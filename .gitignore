@@ -1,0 +1,5 @@
+go-fila
+admin/
+.vscode/
+.idea/
+*.log
