@@ -366,14 +366,17 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 			inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 		case "select":
-			optsHTML := `<option value="">Select...</option>`
-			for k, v := range f.Options {
-				optsHTML += fmt.Sprintf(`<option value=%q if fmt.Sprintf("%%v", data.Item[%q]) == %q { selected }>%s</option>
-`, k, f.Name, k, v)
-			}
 			inputs.WriteString(fmt.Sprintf(`                <select id="%s" name="%s" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2">
-                    %s                </select>
-`, f.Name, f.Name, optsHTML))
+                    <option value="">Select...</option>
+                    for _, fd := range data.Fields {
+                        if fd.Name == %q {
+                            for key, label := range fd.Options {
+                                <option value={ key } if viewmodels.OptionValue(data.Item[%q]) == key { selected }>{ label }</option>
+                            }
+                        }
+                    }
+                </select>
+`, f.Name, f.Name, f.Name, f.Name))
 		case "boolean":
 			inputs.WriteString(fmt.Sprintf(`                <input type="checkbox" id="%s" name="%s" value="true" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                     if fmt.Sprintf("%%v", data.Item[%q]) == "true" {

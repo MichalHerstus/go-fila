@@ -56,10 +56,9 @@ func (g *Generator) generateRouter() error {
 	r.Route(panelPath, func(r chi.Router) {
 		r.Get("/login", auth.LoginHandler(db))
 		r.Post("/login", auth.LoginHandler(db))
-	})
 
-	r.Route(panelPath, func(r chi.Router) {
-		r.Use(auth.AuthMiddleware)
+		r.Group(func(r chi.Router) {
+			r.Use(auth.AuthMiddleware)
 `
 
 	for _, res := range g.Config.Resources {
@@ -113,7 +112,8 @@ func (g *Generator) generateRouter() error {
 	code += fmt.Sprintf("\t\tr.Get(\"/logout\", auth.LogoutHandler(db))\n")
 	code += "\t\tr.Post(\"/logout\", auth.LogoutHandler(db))\n"
 
-	code += `	})
+	code += `		})
+	})
 
 	return r
 }

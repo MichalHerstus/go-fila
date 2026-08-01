@@ -17,7 +17,11 @@ import (
 func (g *Generator) generateViewModels() error {
 	code := `package viewmodels
 
-import "html/template"
+import (
+    "database/sql"
+    "fmt"
+    "html/template"
+)
 
 type ColumnDef struct {
 	Name       string
@@ -101,6 +105,42 @@ type NavItemData struct {
 	Label       string
 	URL         string
 	OpensInNewTab bool
+}
+
+func OptionValue(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case int64:
+		return fmt.Sprintf("%d", t)
+	case int32:
+		return fmt.Sprintf("%d", t)
+	case int:
+		return fmt.Sprintf("%d", t)
+	case float64:
+		return fmt.Sprintf("%v", t)
+	case bool:
+		return fmt.Sprintf("%v", t)
+	case sql.NullInt64:
+		if t.Valid {
+			return fmt.Sprintf("%d", t.Int64)
+		}
+		return ""
+	case sql.NullInt32:
+		if t.Valid {
+			return fmt.Sprintf("%d", t.Int32)
+		}
+		return ""
+	case sql.NullString:
+		if t.Valid {
+			return t.String
+		}
+		return ""
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 `
 

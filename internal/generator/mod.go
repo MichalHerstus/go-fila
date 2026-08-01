@@ -13,9 +13,14 @@ import (
 
 // generateGoMod writes go.mod for the generated project, using the base name
 // of g.OutDir as the module name and the pinned dependency versions from the
-// AGENTS.md guide. Returns an error on write failure.
+// AGENTS.md guide. For sqlite databases the mattn/go-sqlite3 driver is added.
+// Returns an error on write failure.
 func (g *Generator) generateGoMod() error {
 	modName := filepath.Base(g.OutDir)
+	sqliteDep := ""
+	if g.isSQLite() {
+		sqliteDep = "\tgithub.com/mattn/go-sqlite3 v1.14.24\n"
+	}
 	code := fmt.Sprintf(`module %s
 
 go 1.26
@@ -24,9 +29,9 @@ require (
 	github.com/a-h/templ v0.3.819
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/gorilla/sessions v1.4.0
-	golang.org/x/crypto v0.31.0
+%s	golang.org/x/crypto v0.31.0
 )
-`, modName)
+`, modName, sqliteDep)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "go.mod"), []byte(code), 0644)
 }

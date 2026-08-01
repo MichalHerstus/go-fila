@@ -367,6 +367,7 @@ func cmdGenerate() {
 	}
 
 	gen := generator.New(cfg, outDir)
+	gen.ConfigDir = filepath.Dir(configPath)
 	if err := gen.Generate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating: %v\n", err)
 		os.Exit(1)

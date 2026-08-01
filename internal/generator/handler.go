@@ -207,23 +207,71 @@ func List(db *sql.DB) http.HandlerFunc {
             sort = ""
         }
 
-        var args []interface{}
+`)
+	searchableColsLiteral := ""
+	for i, sc := range searchCols {
+		if i > 0 {
+			searchableColsLiteral += ", "
+		}
+		searchableColsLiteral += fmt.Sprintf("%q", sc)
+	}
+
+	// Build the args + WHERE/ORDER/LIMIT construction. Sqlite binds ? args
+	// positionally in SQL text order, so search args must come before the
+	// LIMIT/OFFSET args; postgres uses numbered $N so order does not matter.
+	var listCore string
+	if g.isSQLite() {
+		listCore = fmt.Sprintf(`        var args []interface{}
+
+        var whereClauses []string
+        if search != "" {
+            searchableCols := []string{%s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, col+" LIKE ?")
+                args = append(args, "%%"+search+"%%")
+            }
+        }
+
+        whereSQL := ""
+        if len(whereClauses) > 0 {
+            whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+        }
+
+        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
+        var total int64
+        if err := db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
+        fullArgs = append(fullArgs, perPage, offset)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        defer rows.Close()
+
+`, searchableColsLiteral, tName, colsJoin, tName)
+	} else {
+		listCore = fmt.Sprintf(`        var args []interface{}
         args = append(args, perPage, offset)
         argIdx := 3
 
         var whereClauses []string
         if search != "" {
-            searchableCols := []string{`)
-	for i, sc := range searchCols {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteString(fmt.Sprintf("%q", sc))
-	}
-	sb.WriteString(`}
+            searchableCols := []string{%s}
             for _, col := range searchableCols {
-                whereClauses = append(whereClauses, fmt.Sprintf("%s ILIKE $%d", col, argIdx))
-                args = append(args, "%"+search+"%")
+                whereClauses = append(whereClauses, fmt.Sprintf("%%s ILIKE $%%d", col, argIdx))
+                args = append(args, "%%"+search+"%%")
                 argIdx++
             }
         }
@@ -235,17 +283,17 @@ func List(db *sql.DB) http.HandlerFunc {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %s %s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
         }
 
-        countQuery := "SELECT COUNT(*) FROM ` + tName + `" + whereSQL
+        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
         var total int64
         if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
             http.Error(w, err.Error(), http.StatusInternalServerError)
             return
         }
 
-        dataQuery := "SELECT ` + colsJoin + ` FROM ` + tName + `" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
+        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
@@ -255,7 +303,11 @@ func List(db *sql.DB) http.HandlerFunc {
         }
         defer rows.Close()
 
-        var items []map[string]interface{}
+`, searchableColsLiteral, tName, colsJoin, tName)
+	}
+	sb.WriteString(listCore)
+
+	sb.WriteString(`        var items []map[string]interface{}
         for rows.Next() {
             ` + scanFields(colNames) + `
             items = append(items, item)
@@ -356,7 +408,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
             return
         }
 
-        item, err := data.New(db).%s(r.Context(), int32(id))
+        item, err := data.New(db).%s(r.Context(), %s(id))
         if err != nil {
             http.Error(w, err.Error(), http.StatusNotFound)
             return
@@ -380,6 +432,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
 `, pkgName,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		queryName,
+		g.idGoType(),
 		detailFieldMap(r.Detail.Fields),
 		fieldDefsFromDetail(r.Detail.Fields),
 		r.Name,
@@ -788,7 +841,7 @@ func buildOptionsLoader(queryDir string, fields []types.Field) (optVars map[stri
 			optLabel = "name"
 		}
 		loads = append(loads, fmt.Sprintf(`        %s := map[string]string{}
-        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label string; if err := optRows.Scan(&val, &label); err == nil { %s[val] = label } } } }`, varName, optField, optLabel, rawSQL, varName))
+        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, optField, optLabel, rawSQL, varName))
 	}
 	return optVars, strings.Join(loads, "\n")
 }
@@ -941,7 +994,7 @@ func Update(db *sql.DB) http.HandlerFunc {
         }
 
         if r.Method == http.MethodGet {
-            item, err := data.New(db).%s(r.Context(), int32(id))
+            item, err := data.New(db).%s(r.Context(), %s(id))
             if err != nil {
                 http.Error(w, err.Error(), http.StatusNotFound)
                 return
@@ -992,6 +1045,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		populateQuery,
+		g.idGoType(),
 		strings.Join(populateFields, "\n"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),

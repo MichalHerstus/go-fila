@@ -17,8 +17,16 @@ import (
 // generateMain writes main.go for the generated app: it imports the sqlc
 // output package (for the postgres driver registration) and the panel router,
 // opens the database connection using getDSN, and listens on the ADDR env var
-// (default ":8080"). Returns an error if the file cannot be written.
+// (default ":8080"). For sqlite it additionally registers the sqlite driver.
+// Returns an error if the file cannot be written.
 func (g *Generator) generateMain() error {
+	driverName := "postgres"
+	driverImport := fmt.Sprintf("_ %q", g.moduleImport(g.Config.SQLC.OutputPkg))
+	if g.isSQLite() {
+		driverName = "sqlite3"
+		driverImport = `_ "github.com/mattn/go-sqlite3"`
+	}
+
 	code := fmt.Sprintf(`package main
 
 import (
@@ -27,7 +35,7 @@ import (
 	"net/http"
 	"os"
 
-	_ "%s"
+	%s
 	"%s"
 )
 
@@ -37,7 +45,7 @@ func main() {
 		dsn = %q
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open(%q, dsn)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -59,7 +67,7 @@ func main() {
 		log.Fatal(err)
 	}
 }
-`, g.moduleImport(g.Config.SQLC.OutputPkg), g.moduleImport("internal/panel"), getDSN(g.Config))
+`, driverImport, g.moduleImport("internal/panel"), getDSN(g.Config), driverName)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "main.go"), []byte(code), 0644)
 }

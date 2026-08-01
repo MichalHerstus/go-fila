@@ -19,9 +19,13 @@ import (
 // (./sql/migrations and ./sql/queries) and the Go code is emitted into
 // internal/data using the database/sql driver.
 func (g *Generator) generateSQLCConfig() error {
-	content := `version: "2"
+	engine := "postgresql"
+	if g.isSQLite() {
+		engine = "sqlite"
+	}
+	content := fmt.Sprintf(`version: "2"
 sql:
-  - engine: "postgresql"
+  - engine: %q
     schema: "./sql/migrations"
     queries: "./sql/queries"
     gen:
@@ -29,7 +33,7 @@ sql:
         package: "data"
         out: "internal/data"
         sql_package: "database/sql"
-`
+`, engine)
 	return os.WriteFile(filepath.Join(g.OutDir, "sqlc.yaml"), []byte(content), 0644)
 }
 
@@ -80,7 +84,7 @@ func findSQLCQuery(queryDir string, queryName string) string {
 					}
 					body.WriteString(next + " ")
 				}
-				return strings.TrimSpace(body.String())
+				return strings.TrimRight(strings.TrimSpace(body.String()), ";")
 			}
 		}
 	}
