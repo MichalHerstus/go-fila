@@ -104,7 +104,7 @@ func (g *Generator) generateRouter() error {
 		if path == "" {
 			path = "/" + p.Name
 		}
-		if !(p.Default && (path == "/" || path == "/dashboard")) {
+		if path != "/" {
 			code += fmt.Sprintf("\t\tr.Get(\"%s\", %s)\n", path, handlerName)
 		}
 	}
