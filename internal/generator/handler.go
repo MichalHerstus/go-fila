@@ -607,11 +607,14 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	var dispatch []string
 	for _, a := range r.Actions {
 		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
-        _, err := db.ExecContext(r.Context(), %q, int64(id))
-        if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }`, a.Name, a.Query))
+        {
+            _, err := db.ExecContext(r.Context(), %q, int64(id))
+            if err != nil {
+                http.Error(w, err.Error(), http.StatusInternalServerError)
+                return
+            }
+        }
+`, a.Name, a.Query))
 	}
 
 	code := fmt.Sprintf(`package %s

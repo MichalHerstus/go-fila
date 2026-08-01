@@ -42,7 +42,6 @@ func (g *Generator) generateAuth() error {
 
 	// RBAC middleware generation
 	var rbacMiddleware string
-	var rbacImports string
 	var hasRBAC bool
 	for _, r := range g.Config.Resources {
 		if r.Policies != nil && r.Policies.ViewAny != "" {
@@ -51,7 +50,6 @@ func (g *Generator) generateAuth() error {
 		}
 	}
 	if hasRBAC {
-		rbacImports = `"strings"`
 		rbacMiddleware = `
 func checkRole(required string, userRole string) bool {
     if required == "" {
@@ -131,7 +129,6 @@ import (
     "database/sql"
     "net/http"
     "golang.org/x/crypto/bcrypt"
-    %s
 )
 
 func LoginHandler(db *sql.DB) http.HandlerFunc {
@@ -233,7 +230,7 @@ type LoginPageData struct {
     PanelPath string
     PanelName string
 }
-`, rbacImports,
+`,
 		panelPath, panelName,
 		panelPath, panelName,
 		emailField, passwordField,
@@ -307,7 +304,7 @@ func AuthMiddleware(next http.Handler) http.Handler {
         next.ServeHTTP(w, r.WithContext(ctx))
     })
 }
-`, panelPath, panelPath)
+%s`, panelPath, panelPath, rbacMiddleware)
 
 	if err := os.WriteFile(filepath.Join(dir, "middleware.go"), []byte(middlewareCode), 0644); err != nil {
 		return err

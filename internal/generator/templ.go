@@ -159,13 +159,13 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 
 	var extraActions string
 	for _, a := range r.Actions {
-		extraActions += fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, item["id"], %q) } method="POST" class="inline">
+		extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, item["id"], %q)) } method="POST" class="inline">
                     <button type="submit" class="text-indigo-600 hover:text-indigo-900 text-sm mr-2">%s</button>
                 </form>
 `, panelPath, resLower, a.Name, a.Label)
 	}
 	if r.Form != nil && r.Form.Delete != nil {
-		extraActions += fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, item["id"]) } method="POST" class="inline" onsubmit="return confirm('Delete?')">
+		extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, item["id"])) } method="POST" class="inline" onsubmit="return confirm('Delete?')">
                     <button type="submit" class="text-red-600 hover:text-red-900 text-sm">Delete</button>
                 </form>
 `, panelPath, resLower)
@@ -247,13 +247,13 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 
 	var actionBtns strings.Builder
 	for _, a := range r.Actions {
-		actionBtns.WriteString(fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, data.Item["id"], %q) } method="POST" class="inline">
+		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, data.Item["id"], %q)) } method="POST" class="inline">
                     <button type="submit" class="%s px-4 py-2 rounded-lg text-sm hover:opacity-90">%s</button>
                 </form>
 `, panelPath, resLower, a.Name, actionColor(a.Color), a.Label))
 	}
 	if r.Form != nil && r.Form.Delete != nil {
-		actionBtns.WriteString(fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, data.Item["id"]) } method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
+		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, data.Item["id"])) } method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
                     <button type="submit" class="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700">Delete</button>
                 </form>
 `, panelPath, resLower, resName))
