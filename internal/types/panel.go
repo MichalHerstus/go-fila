@@ -1,5 +1,11 @@
+// panel.go
+//
+// YAML-tagged structs describing custom dashboard pages and their widgets
+// (stat, stats_grid, chart, table, list, html).
 package types
 
+// Page is a custom dashboard page in the admin panel, optionally marked as
+// the default route.
 type Page struct {
 	Name    string   `yaml:"name"`
 	Path    string   `yaml:"path"`
@@ -7,6 +13,9 @@ type Page struct {
 	Widgets []Widget `yaml:"widgets"`
 }
 
+// Widget is a dashboard widget. Depending on Type it uses different fields:
+// stat (label/query/icon/color), chart (label/query + Chart), table
+// (label/query/data_columns), stats_grid (columns + nested Widgets), list/html.
 type Widget struct {
 	Type        string        `yaml:"type"`
 	Label       string        `yaml:"label"`
@@ -21,6 +30,8 @@ type Widget struct {
 	Chart       *ChartConfig  `yaml:"chart"`
 }
 
+// ChartConfig configures a chart widget: the chart type and optional query
+// with x/y axes.
 type ChartConfig struct {
 	Type  string `yaml:"type"`
 	Query string `yaml:"query"`

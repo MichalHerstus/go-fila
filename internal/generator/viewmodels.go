@@ -1,3 +1,8 @@
+// viewmodels.go
+//
+// Generates internal/viewmodels/models.go for the admin panel application:
+// plain Go structs that carry data from the handlers into the templ views
+// (list, detail, form, page and widget data).
 package generator
 
 import (
@@ -5,6 +10,10 @@ import (
 	"path/filepath"
 )
 
+// generateViewModels writes internal/viewmodels/models.go containing the view
+// data structs (ColumnDef, ListData, DetailData, FormData, PageData,
+// WidgetData, AuthData, NavGroupData, NavItemData). Returns an error on write
+// failure.
 func (g *Generator) generateViewModels() error {
 	code := `package viewmodels
 

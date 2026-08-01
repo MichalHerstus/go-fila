@@ -1,3 +1,10 @@
+// auth.go
+//
+// Generates the auth package of the admin panel application
+// (internal/panel/auth): the login/logout handlers with bcrypt verification,
+// the gorilla/sessions store and session helpers, the session/RBAC middleware,
+// and the login templ page. RBAC middleware code is only emitted when at least
+// one resource declares policies.
 package generator
 
 import (
@@ -7,6 +14,12 @@ import (
 	"strings"
 )
 
+// generateAuth writes the whole internal/panel/auth package:
+// handler.go (LoginHandler, LogoutHandler, LoginPageData),
+// session.go (session store + GetSession),
+// middleware.go (SessionMiddleware, AuthMiddleware, context keys) and
+// login.templ (the login form page). It derives the auth table, login field
+// names and redirect URL from the config. Returns an error on write failure.
 func (g *Generator) generateAuth() error {
 	dir := filepath.Join(g.OutDir, "internal/panel/auth")
 	panelName := g.Config.Panel.Name
@@ -304,6 +317,12 @@ func AuthMiddleware(next http.Handler) http.Handler {
 	return g.generateAuthLoginTempl(dir, panelName, panelPath)
 }
 
+// generateAuthLoginTempl writes the login.templ page: a full standalone HTML
+// document (Tailwind styled) that posts the email/password form to
+// panelPath/login and shows any login error message.
+// Params: dir (the auth package directory), panelName (panel display name),
+// panelPath (panel base path used in the form action).
+// Returns: an error on write failure.
 func (g *Generator) generateAuthLoginTempl(dir string, panelName, panelPath string) error {
 	code := fmt.Sprintf(`package auth
 
@@ -324,16 +343,16 @@ templ LoginPage(data LoginPageData) {
                     <p class="text-sm text-gray-500 mt-1">Sign in to your account</p>
                 </div>
 
-                @if data.Error != "" {
+                if data.Error != "" {
                 <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 text-sm">
-                    @data.Error
+                    { data.Error }
                 </div>
                 }
 
                 <form action="%s/login" method="POST" class="space-y-4">
                     <div>
                         <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                        <input type="email" id="email" name="email" value="@data.Email" required
+                        <input type="email" id="email" name="email" value={ data.Email } required
                             class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
                     </div>
                     <div>

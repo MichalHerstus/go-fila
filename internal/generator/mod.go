@@ -1,3 +1,8 @@
+// mod.go
+//
+// Generates the go.mod for the generated admin panel application. The module
+// name is the base name of the output directory and the file pins the templ,
+// chi, gorilla/sessions and golang.org/x/crypto dependencies.
 package generator
 
 import (
@@ -6,6 +11,9 @@ import (
 	"path/filepath"
 )
 
+// generateGoMod writes go.mod for the generated project, using the base name
+// of g.OutDir as the module name and the pinned dependency versions from the
+// AGENTS.md guide. Returns an error on write failure.
 func (g *Generator) generateGoMod() error {
 	modName := filepath.Base(g.OutDir)
 	code := fmt.Sprintf(`module %s

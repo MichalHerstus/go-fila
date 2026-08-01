@@ -1,3 +1,10 @@
+// router.go
+//
+// Generates the router for the admin panel application (internal/panel/router.go)
+// and the HTTP handler for each custom page (internal/panel/pages).
+// The router wires chi middleware, static file serving, login/logout routes,
+// per-resource CRUD routes (with optional RBAC wrapping) and page routes under
+// the configured panel path.
 package generator
 
 import (
@@ -9,16 +16,22 @@ import (
 	"github.com/go-fila/go-fila/internal/types"
 )
 
+// generateRouter writes internal/panel/router.go. It builds the import list
+// (database/sql, chi, auth, pages and one resource package per resource), then
+// emits the NewRouter function with middleware, static file handling, the
+// login/logout endpoints, CRUD routes per resource and page routes. Resources
+// with policies get their routes wrapped in auth.RBACMiddleware; action
+// routes are always plain POST. Returns an error on write failure.
 func (g *Generator) generateRouter() error {
 	var importPaths []string
 	importPaths = append(importPaths, `"database/sql"`, `"net/http"`)
 	importPaths = append(importPaths, `"github.com/go-chi/chi/v5"`, `"github.com/go-chi/chi/v5/middleware"`)
-	importPaths = append(importPaths, `"internal/panel/auth"`)
-	importPaths = append(importPaths, `"internal/panel/pages"`)
+	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/auth")))
+	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/pages")))
 
 	for _, r := range g.Config.Resources {
 		name := strings.ToLower(r.Name)
-		importPaths = append(importPaths, fmt.Sprintf(`"internal/panel/resources/%s"`, name))
+		importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/resources/"+name)))
 	}
 
 	code := "package panel\n\nimport (\n"
@@ -110,6 +123,12 @@ func (g *Generator) generateRouter() error {
 	return os.WriteFile(filepath.Join(dir, "router.go"), []byte(code), 0644)
 }
 
+// generatePage writes one page handler per configured Page. The handler
+// initializes an empty widget list, runs the DB queries declared by each
+// widget (stat, chart, table, stats_grid), packs them into a viewmodels.PageData
+// and renders the matching templ page view.
+// Params: p (the Page definition to generate a handler for).
+// Returns: an error on write failure.
 func (g *Generator) generatePage(p types.Page) error {
 	dir := filepath.Join(g.OutDir, "internal/panel/pages")
 	name := p.Name
@@ -230,17 +249,26 @@ func (g *Generator) generatePage(p types.Page) error {
 		}
 	}
 
+	jsonImport := ""
+	for _, w := range p.Widgets {
+		if w.Type == "chart" {
+			jsonImport = `    "encoding/json"
+`
+			break
+		}
+	}
+
 	code := fmt.Sprintf(`package pages
 
 import (
     "database/sql"
-    "encoding/json"
-    "fmt"
+%s    "fmt"
     "html/template"
     "net/http"
 
-    "internal/viewmodels"
-    "internal/views"
+    %q
+    layoutviews %q
+    pageviews %q
 )
 
 func %s(db *sql.DB) http.HandlerFunc {
@@ -256,13 +284,14 @@ func %s(db *sql.DB) http.HandlerFunc {
             Widgets:   widgets,
         }
 
-        err := views.Base(pd.Name, pd.PanelPath, views.%s(pd)).Render(r.Context(), w)
+        err := layoutviews.Base(pd.Name, pd.PanelPath, pageviews.%s(pd)).Render(r.Context(), w)
         if err != nil {
             http.Error(w, err.Error(), http.StatusInternalServerError)
         }
     }
 }
-`, handlerName, strings.Join(widgetInit, "\n"), name, panelID, panelPath, viewName)
+`, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
+		handlerName, strings.Join(widgetInit, "\n"), name, panelID, panelPath, viewName)
 
 	return os.WriteFile(filepath.Join(dir, name+".go"), []byte(code), 0644)
 }

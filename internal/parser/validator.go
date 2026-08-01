@@ -1,3 +1,8 @@
+// validator.go
+//
+// Validates a parsed configuration and fills in defaults for missing optional
+// fields (panel id, sqlc paths, resource labels, page paths). The generator
+// relies on these defaults being applied before generation.
 package parser
 
 import (
@@ -6,6 +11,12 @@ import (
 	"github.com/go-fila/go-fila/internal/types"
 )
 
+// Validate checks a parsed config for required fields and applies defaults:
+// version, panel.name and panel.path must be present; panel.id, sqlc paths,
+// resource labels and page paths are defaulted when empty; at least one
+// resource or page must exist.
+// Params: cfg (the config to validate; may be mutated to set defaults).
+// Returns: an error describing the first validation problem, or nil.
 func Validate(cfg *types.Config) error {
 	if cfg.Version == "" {
 		return fmt.Errorf("version is required")

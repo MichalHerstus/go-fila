@@ -1,3 +1,9 @@
+// main.go
+//
+// CLI entry point for the go-fila admin panel generator. Parses the
+// subcommand (init, generate, validate, version) plus the global flags
+// (--config, --out, --force, --verbose) and delegates to the parser and
+// generator packages.
 package main
 
 import (
@@ -9,8 +15,12 @@ import (
 	"github.com/go-fila/go-fila/internal/parser"
 )
 
-const version = "0.2.0"
+// version is the current go-fila release version.
+const version = "0.5.0"
 
+// main is the CLI entry point. It requires at least one argument and
+// dispatches to cmdInit, cmdGenerate or cmdValidate, or prints the version.
+// Missing or unknown arguments print the usage text and exit with code 1.
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -32,6 +42,8 @@ func main() {
 	}
 }
 
+// printUsage prints the CLI help text to stdout, listing the available
+// subcommands and their flags.
 func printUsage() {
 	fmt.Println(`go-fila — YAML-driven admin panel generator
 
@@ -48,6 +60,12 @@ Flags:
   --verbose      Enable verbose logging`)
 }
 
+// parseGlobalFlags scans os.Args[2:] for the global flags shared by all
+// subcommands. Flags that take a value (--config/-c, --out/-o) consume the
+// following argument.
+// Returns: configPath (YAML config file path, default "go-fila.yaml"),
+// outDir (output directory, default "./admin"),
+// force (overwrite existing files), verbose (enable verbose logging).
 func parseGlobalFlags() (configPath, outDir string, force, verbose bool) {
 	configPath = "go-fila.yaml"
 	outDir = "./admin"
@@ -76,6 +94,10 @@ func parseGlobalFlags() (configPath, outDir string, force, verbose bool) {
 	return
 }
 
+// cmdInit scaffolds a starter project in the current directory: it writes
+// go-fila.yaml (example configuration), sql/migrations/schema.sql and
+// sql/queries/user.sql. It refuses to overwrite an existing config file or
+// output directory unless --force is given.
 func cmdInit() {
 	configPath, outDir, force, _ := parseGlobalFlags()
 
@@ -306,6 +328,9 @@ SELECT * FROM roles ORDER BY name;
 	fmt.Println("  4. Run 'go-fila generate' to generate the admin panel")
 }
 
+// cmdValidate parses and validates the YAML config file, printing whether it
+// is valid. With --verbose it also prints a short summary of the panel, the
+// number of resources, pages and navigation groups.
 func cmdValidate() {
 	configPath, _, _, verbose := parseGlobalFlags()
 
@@ -324,6 +349,10 @@ func cmdValidate() {
 	}
 }
 
+// cmdGenerate parses the YAML config and generates the admin panel
+// application into outDir. Afterwards it attempts to run `sqlc generate` and
+// the Tailwind CSS build; failures there are reported as warnings instead of
+// being fatal, since the user can re-run them manually.
 func cmdGenerate() {
 	configPath, outDir, _, verbose := parseGlobalFlags()
 

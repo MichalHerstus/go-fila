@@ -1,3 +1,10 @@
+// templ.go
+//
+// Generates all the .templ views of the admin panel application: per-resource
+// list/detail/form views, per-page widget views, the shared layout
+// (base.templ with sidebar/topbar), and reusable components
+// (renderers.templ with field renderers, search bar, sort icon and
+// pagination). All views declare package views.
 package generator
 
 import (
@@ -10,6 +17,21 @@ import (
 	"github.com/go-fila/go-fila/internal/types"
 )
 
+// prefixImports rewrites bare "internal/..." import paths in generated source
+// so they are module-qualified, matching the module name written to go.mod.
+// Params: code (generated Go or templ source), moduleImport (the module-
+// qualified import path to substitute).
+// Returns: the source with the bare import rewritten.
+func prefixImports(code string, moduleImport string) string {
+	if strings.Contains(code, "fmt.") && !strings.Contains(code, `"fmt"`) {
+		code = strings.Replace(code, `import "internal/viewmodels"`, "import (\n    \"fmt\"\n    \"internal/viewmodels\"\n)", 1)
+	}
+	return strings.ReplaceAll(code, `"internal/viewmodels"`, fmt.Sprintf("%q", moduleImport))
+}
+
+// generateViews runs all templ generation steps: one view set per resource,
+// one view per page, then the layout and component views.
+// Returns: an error if any step fails.
 func (g *Generator) generateViews() error {
 	for _, r := range g.Config.Resources {
 		if err := g.generateResourceViews(r); err != nil {
@@ -30,8 +52,18 @@ func (g *Generator) generateViews() error {
 	return nil
 }
 
+// generateResourceViews writes the list/detail/form templ files for a single
+// resource into internal/views/resources/{resource}/, one per declared section.
+// The shared renderer components (renderBadge, searchBar, pagination, etc.) are
+// emitted into the same directory so every resource view package is
+// self-contained.
+// Params: r (the resource definition).
+// Returns: an error if any templ file fails to write.
 func (g *Generator) generateResourceViews(r types.Resource) error {
 	viewDir := filepath.Join(g.OutDir, "internal/views/resources", strings.ToLower(r.Name))
+	if err := os.WriteFile(filepath.Join(viewDir, "renderers.templ"), []byte(renderersSource()), 0644); err != nil {
+		return err
+	}
 	if r.List != nil {
 		if err := g.generateListTempl(viewDir, r); err != nil {
 			return err
@@ -50,6 +82,13 @@ func (g *Generator) generateResourceViews(r types.Resource) error {
 	return nil
 }
 
+// renderCell returns the templ expression used to display a cell value based
+// on its field type, delegating to the matching renderer component in
+// renderers.templ (badge, boolean, email, image, file, datetime, date,
+// select, relation, json, float) or emitting the raw value for plain types.
+// Params: fieldType (the column/field type), expr (the templ expression that
+// yields the value, e.g. `item["name"]`).
+// Returns: the templ expression string for the cell.
 func renderCell(fieldType, expr string) string {
 	switch fieldType {
 	case "badge":
@@ -75,12 +114,17 @@ func renderCell(fieldType, expr string) string {
 	case "float":
 		return fmt.Sprintf(`@renderFloat(%s)`, expr)
 	case "integer", "string", "text", "password":
-		return fmt.Sprintf(`@%s`, expr)
+		return fmt.Sprintf(`{ fmt.Sprintf("%%v", %s) }`, expr)
 	default:
-		return fmt.Sprintf(`@%s`, expr)
+		return fmt.Sprintf(`{ fmt.Sprintf("%%v", %s) }`, expr)
 	}
 }
 
+// generateListTempl writes list.templ for a resource: a table with sortable
+// headers, per-row action forms (view/edit/custom actions/delete), a create
+// and CSV export button, the search bar and pagination.
+// Params: dir (view directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 	cols := r.List.Columns
 	templName := r.Name + "List"
@@ -98,7 +142,7 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 		}
 		if c.Sortable {
 			headers.WriteString(fmt.Sprintf(`            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                <a href={? fmt.Sprintf("?sort=%%s&order=%%s", %q, sortOrder(data.Sort, %q, data.Order)) } class="flex items-center gap-1 hover:text-gray-700">
+                <a href={ templ.SafeURL(fmt.Sprintf("?sort=%%s&order=%%s", %q, sortOrder(data.Sort, %q, data.Order))) } class="flex items-center gap-1 hover:text-gray-700">
                     %s
                     @sortIcon(data.Sort, %q, data.Order)
                 </a>
@@ -115,21 +159,21 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 
 	var extraActions string
 	for _, a := range r.Actions {
-		extraActions += fmt.Sprintf(`                <form action="%s/%s/{? fmt.Sprintf("%%v", item["id"]) }/action/%s" method="POST" class="inline">
+		extraActions += fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, item["id"], %q) } method="POST" class="inline">
                     <button type="submit" class="text-indigo-600 hover:text-indigo-900 text-sm mr-2">%s</button>
                 </form>
 `, panelPath, resLower, a.Name, a.Label)
 	}
 	if r.Form != nil && r.Form.Delete != nil {
-		extraActions += fmt.Sprintf(`                <form action="%s/%s/{? fmt.Sprintf("%%v", item["id"]) }/delete" method="POST" class="inline" onsubmit="return confirm('Delete?')">
+		extraActions += fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, item["id"]) } method="POST" class="inline" onsubmit="return confirm('Delete?')">
                     <button type="submit" class="text-red-600 hover:text-red-900 text-sm">Delete</button>
                 </form>
 `, panelPath, resLower)
 	}
 
 	actionsCol := fmt.Sprintf(`            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                <a href="%s/%s/{? fmt.Sprintf("%%v", item["id"]) }" class="text-indigo-600 hover:text-indigo-900 mr-3">View</a>
-                <a href="%s/%s/{? fmt.Sprintf("%%v", item["id"]) }/edit" class="text-indigo-600 hover:text-indigo-900 mr-3">Edit</a>
+                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 mr-3">View</a>
+                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 mr-3">Edit</a>
 %s            </td>
 `, panelPath, resLower, panelPath, resLower, extraActions)
 
@@ -160,7 +204,7 @@ templ %s(data *viewmodels.ListData) {
                     </tr>
                 </thead>
                 <tbody class="bg-white divide-y divide-gray-200">
-                    @for _, item := range data.Items {
+                    for _, item := range data.Items {
                     <tr class="hover:bg-gray-50">
 %s%s                    </tr>
                     }
@@ -172,10 +216,15 @@ templ %s(data *viewmodels.ListData) {
     </div>
 }
 `, templName, resLabel, createBtn, exportBtn, headers.String(), cells.String(), actionsCol)
+	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "list.templ"), []byte(code), 0644)
 }
 
+// generateDetailTempl writes detail.templ for a resource: a read-only table
+// of the detail fields plus action buttons (edit, custom actions, delete).
+// Params: dir (view directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 	resName := r.Name
 	templName := resName + "Detail"
@@ -198,13 +247,13 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 
 	var actionBtns strings.Builder
 	for _, a := range r.Actions {
-		actionBtns.WriteString(fmt.Sprintf(`                <form action="%s/%s/{? fmt.Sprintf("%%v", data.Item["id"]) }/action/%s" method="POST" class="inline">
+		actionBtns.WriteString(fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, data.Item["id"], %q) } method="POST" class="inline">
                     <button type="submit" class="%s px-4 py-2 rounded-lg text-sm hover:opacity-90">%s</button>
                 </form>
 `, panelPath, resLower, a.Name, actionColor(a.Color), a.Label))
 	}
 	if r.Form != nil && r.Form.Delete != nil {
-		actionBtns.WriteString(fmt.Sprintf(`                <form action="%s/%s/{? fmt.Sprintf("%%v", data.Item["id"]) }/delete" method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
+		actionBtns.WriteString(fmt.Sprintf(`                <form action={ fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, data.Item["id"]) } method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
                     <button type="submit" class="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700">Delete</button>
                 </form>
 `, panelPath, resLower, resName))
@@ -220,7 +269,7 @@ templ %s(data *viewmodels.DetailData) {
             <h1 class="text-2xl font-bold text-gray-900">%s Details</h1>
             <div class="flex gap-2">
                 <a href="%s/%s" class="text-gray-600 hover:text-gray-900 px-4 py-2">Back</a>
-                <a href="%s/%s/{? fmt.Sprintf("%%v", data.Item["id"]) }/edit" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">Edit</a>
+                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, data.Item["id"])) } class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">Edit</a>
 %s            </div>
         </div>
 
@@ -233,10 +282,16 @@ templ %s(data *viewmodels.DetailData) {
     </div>
 }
 `, templName, resName, panelPath, resLower, panelPath, resLower, actionBtns.String(), rows.String())
+	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "detail.templ"), []byte(code), 0644)
 }
 
+// actionColor maps a semantic action color (success, danger, warning,
+// primary, info or any of their aliases) to the Tailwind button classes used
+// on action buttons. Unknown colors fall back to gray.
+// Params: c (the configured color name).
+// Returns: the Tailwind class string for the button.
 func actionColor(c string) string {
 	switch c {
 	case "success", "green":
@@ -254,6 +309,13 @@ func actionColor(c string) string {
 	}
 }
 
+// generateFormTempl writes form.templ for a resource: a shared create/update
+// form rendered from the create fields (when present) or update fields. It
+// emits the appropriate input widget per field type, adds a multipart enctype
+// when any field is a file/image, and shows validation hints for required
+// fields.
+// Params: dir (view directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 	templName := r.Name + "Form"
 	resLabel := r.Label
@@ -295,34 +357,38 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 
 		switch f.Type {
 		case "text":
-			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="3" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2">@data.Item[%q]</textarea>
+			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="3" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
 `, f.Name, f.Name, f.Name))
 		case "password":
 			inputs.WriteString(fmt.Sprintf(`                <input type="password" id="%s" name="%s" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
 		case "email":
-			inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 		case "select":
 			optsHTML := `<option value="">Select...</option>`
 			for k, v := range f.Options {
-				optsHTML += fmt.Sprintf(`<option value=%q {? if fmt.Sprintf("%%v", data.Item[%q]) == %q { } selected{? } }>%s</option>
+				optsHTML += fmt.Sprintf(`<option value=%q if fmt.Sprintf("%%v", data.Item[%q]) == %q { selected }>%s</option>
 `, k, f.Name, k, v)
 			}
 			inputs.WriteString(fmt.Sprintf(`                <select id="%s" name="%s" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2">
                     %s                </select>
 `, f.Name, f.Name, optsHTML))
 		case "boolean":
-			inputs.WriteString(fmt.Sprintf(`                <input type="checkbox" id="%s" name="%s" value="true" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" {? if fmt.Sprintf("%%v", data.Item[%q]) == "true" { } checked{? } } />
+			inputs.WriteString(fmt.Sprintf(`                <input type="checkbox" id="%s" name="%s" value="true" class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                    if fmt.Sprintf("%%v", data.Item[%q]) == "true" {
+                        checked
+                    }
+                />
 `, f.Name, f.Name, f.Name))
 		case "integer", "float":
-			inputs.WriteString(fmt.Sprintf(`                <input type="number" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="number" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 		case "datetime":
-			inputs.WriteString(fmt.Sprintf(`                <input type="datetime-local" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="datetime-local" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 		case "date":
-			inputs.WriteString(fmt.Sprintf(`                <input type="date" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="date" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 		case "file":
 			inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
@@ -331,16 +397,16 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 			inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" accept="image/*" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
 		case "badge":
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" placeholder="badge value" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" placeholder="badge value" />
 `, f.Name, f.Name, f.Name))
 		case "relation":
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" placeholder="related ID" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" placeholder="related ID" />
 `, f.Name, f.Name, f.Name))
 		case "json":
-			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2 font-mono text-xs">@data.Item[%q]</textarea>
+			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2 font-mono text-xs">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
 `, f.Name, f.Name, f.Name))
 		default:
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={? fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 		}
 
@@ -381,7 +447,13 @@ import "internal/viewmodels"
 templ %s(data *viewmodels.FormData) {
     <div class="p-6">
         <div class="flex items-center justify-between mb-6">
-            <h1 class="text-2xl font-bold text-gray-900">@if data.IsCreate { Create %s } else { Edit %s }</h1>
+            <h1 class="text-2xl font-bold text-gray-900">
+                if data.IsCreate {
+                    Create %s
+                } else {
+                    Edit %s
+                }
+            </h1>
             <a href="%s" class="text-gray-600 hover:text-gray-900 px-4 py-2">Back</a>
         </div>
 
@@ -389,7 +461,11 @@ templ %s(data *viewmodels.FormData) {
             <form action="%s" method="POST"%s class="space-y-6">
 %s                <div class="flex justify-end pt-4">
                     <button type="submit" class="bg-indigo-600 text-white px-6 py-2 rounded-lg text-sm hover:bg-indigo-700">
-                        @if data.IsCreate { Create } else { Update }
+                        if data.IsCreate {
+                            Create
+                        } else {
+                            Update
+                        }
                     </button>
                 </div>
             </form>
@@ -397,10 +473,17 @@ templ %s(data *viewmodels.FormData) {
     </div>
 }
 `, templName, resLabel, resLabel, listPath, actionPath, enctype, inputs.String())
+	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "form.templ"), []byte(code), 0644)
 }
 
+// generatePageViews writes one templ view per page into internal/views/pages.
+// The page template iterates over its widgets and dispatches to the shared
+// widget template (stats_grid, stat, chart, table, list, html), which also
+// renders stat widgets and inline SVG icons.
+// Params: p (the page definition).
+// Returns: an error on write failure.
 func (g *Generator) generatePageViews(p types.Page) error {
 	viewDir := filepath.Join(g.OutDir, "internal/views/pages")
 	panelID := g.Config.Panel.ID
@@ -416,71 +499,71 @@ import (
 
 templ %s(data *viewmodels.PageData) {
     <div class="p-6">
-        <h1 class="text-2xl font-bold mb-6">@data.Name</h1>
-        @for _, w := range data.Widgets {
+        <h1 class="text-2xl font-bold mb-6">{ data.Name }</h1>
+        for _, w := range data.Widgets {
             @widget(w)
         }
     </div>
 }
 
 templ widget(w viewmodels.WidgetData) {
-    @switch w.Type {
-    @case "stats_grid"
+    switch w.Type {
+    case "stats_grid":
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-%d gap-4 mb-6">
-            @for _, sw := range w.SubWidgets {
+            for _, sw := range w.SubWidgets {
                 @statWidget(sw)
             }
         </div>
-    @case "stat"
+    case "stat":
         @statWidget(w)
-    @case "chart"
+    case "chart":
         <div class="bg-white shadow rounded-lg p-6 mb-6">
-            <h3 class="text-lg font-semibold mb-4">@w.Label</h3>
-            <canvas id={? fmt.Sprintf("chart-%%s", w.Label) } class="w-full h-64"
-                data-chart-type="@w.ChartType"
-                data-labels="@w.ChartLabelsJSON"
-                data-values="@w.ChartValuesJSON">
+            <h3 class="text-lg font-semibold mb-4">{ w.Label }</h3>
+            <canvas id={ fmt.Sprintf("chart-%%s", w.Label) } class="w-full h-64"
+                data-chart-type={ w.ChartType }
+                data-labels={ w.ChartLabelsJSON }
+                data-values={ w.ChartValuesJSON }>
             </canvas>
         </div>
-    @case "table"
+    case "table":
         <div class="bg-white shadow rounded-lg overflow-hidden mb-6">
             <div class="px-6 py-4 border-b">
-                <h3 class="text-lg font-semibold">@w.Label</h3>
+                <h3 class="text-lg font-semibold">{ w.Label }</h3>
             </div>
             <table class="min-w-full divide-y divide-gray-200">
                 <thead class="bg-gray-50">
                     <tr>
-                        @for _, col := range w.TableColumns {
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">@col</th>
+                        for _, col := range w.TableColumns {
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{ col }</th>
                         }
                     </tr>
                 </thead>
                 <tbody class="bg-white divide-y divide-gray-200">
-                    @for _, row := range w.TableRows {
+                    for _, row := range w.TableRows {
                     <tr class="hover:bg-gray-50">
-                        @for _, col := range w.TableColumns {
-                        <td class="px-6 py-4 whitespace-nowrap text-sm">@fmt.Sprintf("%%v", row[col])</td>
+                        for _, col := range w.TableColumns {
+                        <td class="px-6 py-4 whitespace-nowrap text-sm">{ fmt.Sprintf("%%v", row[col]) }</td>
                         }
                     </tr>
                     }
                 </tbody>
             </table>
         </div>
-    @case "list"
+    case "list":
         <div class="bg-white shadow rounded-lg p-6 mb-6">
-            <h3 class="text-lg font-semibold mb-4">@w.Label</h3>
+            <h3 class="text-lg font-semibold mb-4">{ w.Label }</h3>
             <ul class="divide-y divide-gray-200">
-                @for _, row := range w.TableRows {
+                for _, row := range w.TableRows {
                 <li class="py-3 flex items-center justify-between">
-                    <span class="text-sm text-gray-900">@fmt.Sprintf("%%v", row["label"])</span>
-                    <span class="text-sm text-gray-500">@fmt.Sprintf("%%v", row["value"])</span>
+                    <span class="text-sm text-gray-900">{ fmt.Sprintf("%%v", row["label"]) }</span>
+                    <span class="text-sm text-gray-500">{ fmt.Sprintf("%%v", row["value"]) }</span>
                 </li>
                 }
             </ul>
         </div>
-    @case "html"
+    case "html":
         <div class="bg-white shadow rounded-lg p-6 mb-6">
-            @w.Value
+            @templ.Raw(string(w.Value))
         </div>
     }
 }
@@ -489,16 +572,20 @@ templ statWidget(w viewmodels.WidgetData) {
     <div class="bg-white shadow rounded-lg p-6">
         <div class="flex items-center justify-between">
             <div>
-                @if w.Icon != "" {
+                if w.Icon != "" {
                 <div class="w-10 h-10 rounded-lg bg-indigo-100 flex items-center justify-center mb-3">
                     @iconSVG(w.Icon)
                 </div>
                 }
-                <p class="text-sm text-gray-500">@w.Label</p>
+                <p class="text-sm text-gray-500">{ w.Label }</p>
                 <p class="text-2xl font-bold">
-                    @if w.Prefix != "" { <span class="text-lg">@w.Prefix</span> }
-                    @w.Value
-                    @if w.Suffix != "" { <span class="text-lg">@w.Suffix</span> }
+                    if w.Prefix != "" {
+                        <span class="text-lg">{ w.Prefix }</span>
+                    }
+                    @templ.Raw(string(w.Value))
+                    if w.Suffix != "" {
+                        <span class="text-lg">{ w.Suffix }</span>
+                    }
                 </p>
             </div>
         </div>
@@ -506,55 +593,61 @@ templ statWidget(w viewmodels.WidgetData) {
 }
 
 templ iconSVG(name string) {
-    @switch name {
-    @case "users"
+    switch name {
+    case "users":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
         </svg>
-    @case "chart"
+    case "chart":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
         </svg>
-    @case "dollar"
+    case "dollar":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
-    @case "check"
+    case "check":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
         </svg>
-    @case "cog"
+    case "cog":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
         </svg>
-    @case "bell"
+    case "bell":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
         </svg>
-    @case "home"
+    case "home":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
         </svg>
-    @case "mail"
+    case "mail":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
         </svg>
-    @case "lock"
+    case "lock":
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
         </svg>
-    @default
+    default:
         <svg class="w-6 h-6 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
     }
 }
 `, templName, g.detectGridColumns(p.Widgets))
+	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(viewDir, p.Name+".templ"), []byte(code), 0644)
 }
 
+// detectGridColumns finds the column count of the first stats_grid widget on a
+// page, used to size the generated grid layout. Defaults to 4 when no
+// stats_grid widget declares columns.
+// Params: widgets (the page's widget list).
+// Returns: the number of grid columns to render.
 func (g *Generator) detectGridColumns(widgets []types.Widget) int {
 	for _, w := range widgets {
 		if w.Type == "stats_grid" && w.Columns > 0 {
@@ -564,6 +657,11 @@ func (g *Generator) detectGridColumns(widgets []types.Widget) int {
 	return 4
 }
 
+// generateLayoutViews writes base.templ into internal/views/layout: the Base
+// layout document (with the Chart.js CDN script and auto-rendering JS), the
+// sidebar with the navigation groups sorted by their sort value, the topbar
+// with the logout link, and the iconNav SVG helper.
+// Returns: an error on write failure.
 func (g *Generator) generateLayoutViews() error {
 	dir := filepath.Join(g.OutDir, "internal/views/layout")
 	panelPath := g.Config.Panel.Path
@@ -602,13 +700,13 @@ func (g *Generator) generateLayoutViews() error {
 
 	code := fmt.Sprintf(`package views
 
-templ Base(title string, panelPath string) {
+templ Base(title string, panelPath string, children templ.Component) {
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>@title</title>
+        <title>{ title }</title>
         <link href="/static/css/styles.css" rel="stylesheet" />
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
@@ -618,7 +716,7 @@ templ Base(title string, panelPath string) {
             <div class="flex-1 flex flex-col">
                 @Topbar(panelPath)
                 <main class="flex-1 overflow-y-auto p-6">
-                    {! children }
+                    @children
                 </main>
             </div>
         </div>
@@ -650,18 +748,18 @@ templ Base(title string, panelPath string) {
 }
 
 templ iconNav(name string) {
-    @switch name {
-    @case "users"
+    switch name {
+    case "users":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-    @case "chart"
+    case "chart":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>
-    @case "cog"
+    case "cog":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-    @case "home"
+    case "home":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
-    @case "mail"
+    case "mail":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
-    @default
+    default:
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
     }
 }
@@ -695,10 +793,23 @@ templ Topbar(panelPath string) {
 	return os.WriteFile(filepath.Join(dir, "base.templ"), []byte(code), 0644)
 }
 
+// generateComponentViews writes renderers.templ into internal/views/components:
+// the shared field renderers (badge, boolean, email, image, file, datetime,
+// date, select, relation, json, float), the search bar, sort icon, sortOrder
+// helper and pagination component.
+// Returns: an error on write failure.
 func (g *Generator) generateComponentViews() error {
 	dir := filepath.Join(g.OutDir, "internal/views/components")
+	return os.WriteFile(filepath.Join(dir, "renderers.templ"), []byte(renderersSource()), 0644)
+}
 
-	components := `package views
+// renderersSource returns the templ source for the shared field renderers and
+// utility components (search bar, sort icon, sortOrder helper, pagination).
+// The same source is emitted into every resource view directory so each view
+// package is self-contained.
+// Returns: the templ source as a string.
+func renderersSource() string {
+	return `package views
 
 import (
     "fmt"
@@ -708,19 +819,19 @@ import (
 // --- Field Renderers ---
 
 templ renderBadge(value interface{}, color string) {
-    @if value != nil {
-        @text := fmt.Sprintf("%v", value)
-        @c := color
-        @if c == "" {
-            @c = "gray"
+    if value != nil {
+        {{ text := fmt.Sprintf("%v", value) }}
+        {{ c := color }}
+        if c == "" {
+            {{ c = "gray" }}
         }
-        <span class={? fmt.Sprintf("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-%s-100 text-%s-800", c, c) }>@text</span>
+        <span class={ fmt.Sprintf("inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-%s-100 text-%s-800", c, c) }>{ text }</span>
     }
 }
 
 templ renderBoolean(value interface{}) {
-    @if value != nil {
-        @if b, ok := value.(bool); ok && b {
+    if value != nil {
+        if b, ok := value.(bool); ok && b {
             <span class="text-green-600">
                 <svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
@@ -737,72 +848,72 @@ templ renderBoolean(value interface{}) {
 }
 
 templ renderEmail(value interface{}) {
-    @if value != nil {
-        @email := fmt.Sprintf("%v", value)
-        <a href={? fmt.Sprintf("mailto:%s", email) } class="text-indigo-600 hover:text-indigo-900 underline">@email</a>
+    if value != nil {
+        {{ email := fmt.Sprintf("%v", value) }}
+        <a href={ templ.SafeURL(fmt.Sprintf("mailto:%s", email)) } class="text-indigo-600 hover:text-indigo-900 underline">{ email }</a>
     }
 }
 
 templ renderImage(value interface{}) {
-    @if value != nil {
-        @src := fmt.Sprintf("%v", value)
-        <img src="@src" alt="" class="w-10 h-10 rounded-full object-cover" />
+    if value != nil {
+        {{ src := fmt.Sprintf("%v", value) }}
+        <img src={ src } alt="" class="w-10 h-10 rounded-full object-cover" />
     }
 }
 
 templ renderFile(value interface{}) {
-    @if value != nil {
-        @name := fmt.Sprintf("%v", value)
-        <a href="@name" class="text-indigo-600 hover:text-indigo-900 underline" download>@name</a>
+    if value != nil {
+        {{ name := fmt.Sprintf("%v", value) }}
+        <a href={ templ.SafeURL(name) } class="text-indigo-600 hover:text-indigo-900 underline" download>{ name }</a>
     }
 }
 
 templ renderDateTime(value interface{}) {
-    @if value != nil {
-        @if t, ok := value.(time.Time); ok {
-            <span class="text-sm text-gray-600">@t.Format("Jan 02, 2006 15:04")</span>
+    if value != nil {
+        if t, ok := value.(time.Time); ok {
+            <span class="text-sm text-gray-600">{ t.Format("Jan 02, 2006 15:04") }</span>
         } else {
-            <span class="text-sm text-gray-600">@fmt.Sprintf("%v", value)</span>
+            <span class="text-sm text-gray-600">{ fmt.Sprintf("%v", value) }</span>
         }
     }
 }
 
 templ renderDate(value interface{}) {
-    @if value != nil {
-        @if t, ok := value.(time.Time); ok {
-            <span class="text-sm text-gray-600">@t.Format("Jan 02, 2006")</span>
+    if value != nil {
+        if t, ok := value.(time.Time); ok {
+            <span class="text-sm text-gray-600">{ t.Format("Jan 02, 2006") }</span>
         } else {
-            <span class="text-sm text-gray-600">@fmt.Sprintf("%v", value)</span>
+            <span class="text-sm text-gray-600">{ fmt.Sprintf("%v", value) }</span>
         }
     }
 }
 
 templ renderSelect(value interface{}) {
-    @if value != nil {
-        @text := fmt.Sprintf("%v", value)
-        <span class="text-sm text-gray-900">@text</span>
+    if value != nil {
+        {{ text := fmt.Sprintf("%v", value) }}
+        <span class="text-sm text-gray-900">{ text }</span>
     }
 }
 
 templ renderRelation(value interface{}) {
-    @if value != nil {
-        @text := fmt.Sprintf("%v", value)
-        <a href="#" class="text-indigo-600 hover:text-indigo-900 underline">@text</a>
+    if value != nil {
+        {{ text := fmt.Sprintf("%v", value) }}
+        <a href="#" class="text-indigo-600 hover:text-indigo-900 underline">{ text }</a>
     }
 }
 
 templ renderJSON(value interface{}) {
-    @if value != nil {
-        <pre class="text-xs text-gray-600 bg-gray-50 p-2 rounded overflow-x-auto max-w-xs">@fmt.Sprintf("%v", value)</pre>
+    if value != nil {
+        <pre class="text-xs text-gray-600 bg-gray-50 p-2 rounded overflow-x-auto max-w-xs">{ fmt.Sprintf("%v", value) }</pre>
     }
 }
 
 templ renderFloat(value interface{}) {
-    @if value != nil {
-        @if f, ok := value.(float64); ok {
-            <span class="text-sm text-gray-900">@fmt.Sprintf("%.2f", f)</span>
+    if value != nil {
+        if f, ok := value.(float64); ok {
+            <span class="text-sm text-gray-900">{ fmt.Sprintf("%.2f", f) }</span>
         } else {
-            <span class="text-sm text-gray-900">@fmt.Sprintf("%v", value)</span>
+            <span class="text-sm text-gray-900">{ fmt.Sprintf("%v", value) }</span>
         }
     }
 }
@@ -812,9 +923,9 @@ templ renderFloat(value interface{}) {
 templ searchBar(query string, resource string) {
     <div class="mb-4">
         <form method="GET" class="flex gap-2">
-            <input type="text" name="search" value="@query" placeholder="Search..." class="w-64 rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+            <input type="text" name="search" value={ query } placeholder="Search..." class="w-64 rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
             <button type="submit" class="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm hover:bg-gray-200 border">Search</button>
-            @if query != "" {
+            if query != "" {
                 <a href="?" class="text-gray-500 hover:text-gray-700 px-4 py-2 text-sm">Clear</a>
             }
         </form>
@@ -822,8 +933,8 @@ templ searchBar(query string, resource string) {
 }
 
 templ sortIcon(sortField string, field string, order string) {
-    @if sortField == field {
-        @if order == "desc" {
+    if sortField == field {
+        if order == "desc" {
             <svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" />
             </svg>
@@ -845,30 +956,28 @@ func sortOrder(currentSort string, field string, currentOrder string) string {
 }
 
 templ pagination(page int, totalPages int, total int, search string, sort string, order string) {
-    @if totalPages > 0 {
+    if totalPages > 0 {
         <div class="bg-white px-4 py-3 flex items-center justify-between border-t">
             <div class="text-sm text-gray-700">
-                Showing page @page of @totalPages (@total total)
+                Showing page { fmt.Sprintf("%d", page) } of { fmt.Sprintf("%d", totalPages) } ({ fmt.Sprintf("%d", total) } total)
             </div>
             <div class="flex gap-1">
-                @if page > 1 {
-                    <a href={? fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", page-1, search, sort, order) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50">Previous</a>
+                if page > 1 {
+                    <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", page-1, search, sort, order)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50">Previous</a>
                 }
-                @for i := 1; i <= totalPages; i++ {
-                    @if i == page {
-                        <span class="px-3 py-1 border rounded text-sm bg-indigo-600 text-white">@i</span>
+                for i := 1; i <= totalPages; i++ {
+                    if i == page {
+                        <span class="px-3 py-1 border rounded text-sm bg-indigo-600 text-white">{ fmt.Sprintf("%d", i) }</span>
                     } else {
-                        <a href={? fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", i, search, sort, order) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50">@i</a>
+                        <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", i, search, sort, order)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50">{ fmt.Sprintf("%d", i) }</a>
                     }
                 }
-                @if page < totalPages {
-                    <a href={? fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", page+1, search, sort, order) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50">Next</a>
+                if page < totalPages {
+                    <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", page+1, search, sort, order)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50">Next</a>
                 }
             </div>
         </div>
     }
 }
 `
-
-	return os.WriteFile(filepath.Join(dir, "renderers.templ"), []byte(components), 0644)
 }

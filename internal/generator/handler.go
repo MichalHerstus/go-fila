@@ -1,3 +1,10 @@
+// handler.go
+//
+// Generates the HTTP handlers for each resource in the admin panel
+// (internal/panel/resources/{resource}/): list with dynamic WHERE/ORDER BY/
+// LIMIT, detail via SQLC, create/update with raw SQL, delete, named actions
+// and CSV export. It also holds shared helpers for building column/field
+// definitions, scanning rows, and converting snake_case to PascalCase.
 package generator
 
 import (
@@ -9,6 +16,11 @@ import (
 	"github.com/go-fila/go-fila/internal/types"
 )
 
+// generateResource writes all handler files for a single resource into its
+// package directory: list.go, detail.go, create.go/update.go/delete.go,
+// export.go and actions.go, depending on which sections the resource declares.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error if any handler file fails to write.
 func (g *Generator) generateResource(r types.Resource) error {
 	dir := filepath.Join(g.OutDir, "internal/panel/resources", strings.ToLower(r.Name))
 
@@ -40,6 +52,11 @@ func (g *Generator) generateResource(r types.Resource) error {
 	return nil
 }
 
+// colDefsStr renders the []viewmodels.ColumnDef literal for a list of
+// columns, filling in the label (defaults to the column name), field type,
+// sortable/searchable flags and the static options map (nil when empty).
+// Params: cols (list columns from the YAML config).
+// Returns: a comma-joined Go source string for the column defs.
 func colDefsStr(cols []types.Column) string {
 	var defs []string
 	for _, c := range cols {
@@ -60,6 +77,11 @@ func colDefsStr(cols []types.Column) string {
 	return strings.Join(defs, ",\n")
 }
 
+// fieldDefsStr renders the []viewmodels.ColumnDef literal for a list of form
+// or detail fields, defaulting the label to the field name and the field type
+// to "string".
+// Params: fields (field definitions from the YAML config).
+// Returns: a comma-joined Go source string for the field defs.
 func fieldDefsStr(fields []types.Field) string {
 	var defs []string
 	for _, f := range fields {
@@ -84,14 +106,28 @@ func fieldDefsStr(fields []types.Field) string {
 	return strings.Join(defs, ",\n")
 }
 
+// fieldDefsFromDetail renders the field defs for a detail view; it is a thin
+// wrapper around fieldDefsStr kept for readability at call sites.
+// Params: fields (detail field definitions).
+// Returns: the rendered Go source string.
 func fieldDefsFromDetail(fields []types.Field) string {
 	return fieldDefsStr(fields)
 }
 
+// tableName derives the default SQL table name for a resource: the lowercase
+// resource name plus a plural "s" (e.g. "User" -> "users").
+// Params: resourceName (PascalCase resource name from the YAML config).
+// Returns: the plural lowercase table name.
 func tableName(resourceName string) string {
 	return strings.ToLower(resourceName) + "s"
 }
 
+// generateListHandler writes list.go for a resource: a List(db) handler that
+// reads page/search/sort/order query parameters, builds a dynamic WHERE/ORDER
+// BY/LIMIT query against the plural table name, counts the total rows for
+// pagination, scans the listed columns and renders the resource list view.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateListHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	tName := tableName(r.Name)
@@ -124,8 +160,8 @@ import (
     "strconv"
     "strings"
 
-    "internal/viewmodels"
-    "internal/views/resources/%s"
+    %q
+    %q
 )
 
 func List(db *sql.DB) http.HandlerFunc {
@@ -156,7 +192,8 @@ func List(db *sql.DB) http.HandlerFunc {
 	}()+`
         }
 
-        validSorts := map[string]bool{`, pkgName, pkgName))
+        validSorts := map[string]bool{`, pkgName,
+		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName)))
 
 	// Valid sort columns
 	for i, c := range sortableCols {
@@ -250,6 +287,11 @@ func List(db *sql.DB) http.HandlerFunc {
 	return os.WriteFile(filepath.Join(dir, "list.go"), []byte(sb.String()), 0644)
 }
 
+// validSortsMapStr renders the Go source for a map of sortable column names
+// (all mapping to true), used to whitelist sort parameters in the generated
+// list handler.
+// Params: cols (names of the sortable columns).
+// Returns: the Go literal string for the map.
 func validSortsMapStr(cols []string) string {
 	var parts []string
 	for _, c := range cols {
@@ -258,6 +300,11 @@ func validSortsMapStr(cols []string) string {
 	return strings.Join(parts, ", ")
 }
 
+// scanFields generates the Go source that scans a database row into a
+// map[string]interface{}: it declares one interface{} variable per column,
+// appends their addresses to a scan slice and populates the item map.
+// Params: cols (the column names to scan).
+// Returns: the multi-line Go source string to inline in the generated handler.
 func scanFields(cols []string) string {
 	var scans []string
 	scans = append(scans, `        item := make(map[string]interface{})`)
@@ -276,6 +323,11 @@ func scanFields(cols []string) string {
 	return strings.Join(scans, "\n")
 }
 
+// generateDetailHandler writes detail.go for a resource: a Detail(db) handler
+// that parses the :id path parameter, calls the SQLC detail query, maps the
+// returned struct fields into a map and renders the detail view.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateDetailHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	queryName := r.Detail.Query
@@ -290,9 +342,9 @@ import (
     "net/http"
     "strconv"
 
-    "internal/data"
-    "internal/viewmodels"
-    "internal/views/resources/%s"
+    %q
+    %q
+    %q
 )
 
 func Detail(db *sql.DB) http.HandlerFunc {
@@ -304,7 +356,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
             return
         }
 
-        item, err := data.%s(db, int64(id))
+        item, err := data.New(db).%s(r.Context(), int32(id))
         if err != nil {
             http.Error(w, err.Error(), http.StatusNotFound)
             return
@@ -325,7 +377,8 @@ func Detail(db *sql.DB) http.HandlerFunc {
         views.%sDetail(vd).Render(r.Context(), w)
     }
 }
-`, pkgName, pkgName,
+`, pkgName,
+		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		queryName,
 		detailFieldMap(r.Detail.Fields),
 		fieldDefsFromDetail(r.Detail.Fields),
@@ -336,6 +389,11 @@ func Detail(db *sql.DB) http.HandlerFunc {
 	return os.WriteFile(filepath.Join(dir, "detail.go"), []byte(code), 0644)
 }
 
+// detailFieldMap generates the entries of the itemMap literal in the detail
+// handler, mapping each snake_case field name to the corresponding PascalCase
+// field of the SQLC result struct.
+// Params: fields (detail field definitions).
+// Returns: the indented Go source lines mapping field names to struct fields.
 func detailFieldMap(fields []types.Field) string {
 	var entries []string
 	for _, f := range fields {
@@ -345,6 +403,11 @@ func detailFieldMap(fields []types.Field) string {
 	return strings.Join(entries, "\n")
 }
 
+// snakeToPascal converts a snake_case string to PascalCase so it matches the
+// field names that sqlc generates. The "id" segment is special-cased to "ID"
+// (e.g. "user_role_id" -> "UserRoleID").
+// Params: s (the snake_case input, e.g. a column name).
+// Returns: the PascalCase variant.
 func snakeToPascal(s string) string {
 	parts := strings.Split(s, "_")
 	for i, p := range parts {
@@ -357,6 +420,10 @@ func snakeToPascal(s string) string {
 	return strings.Join(parts, "")
 }
 
+// generateFormHandlers dispatches to the create, update and delete handler
+// generators based on which form sections the resource declares.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error if any generated handler fails.
 func (g *Generator) generateFormHandlers(dir string, r types.Resource) error {
 	if r.Form.Create != nil {
 		if err := g.generateCreateHandler(dir, r); err != nil {
@@ -376,6 +443,11 @@ func (g *Generator) generateFormHandlers(dir string, r types.Resource) error {
 	return nil
 }
 
+// generateDeleteHandler writes delete.go: a Delete(db) handler that parses the
+// :id path parameter, runs "DELETE FROM {table} WHERE id = $1" via ExecContext
+// and redirects back to the resource list.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
@@ -412,6 +484,11 @@ func Delete(db *sql.DB) http.HandlerFunc {
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
 
+// generateCSVHandler writes export.go: an ExportCSV(db) handler that selects
+// all list columns ordered by the first column and streams them as an
+// attachment CSV file using encoding/csv.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateCSVHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	tName := tableName(r.Name)
@@ -427,7 +504,6 @@ func (g *Generator) generateCSVHandler(dir string, r types.Resource) error {
 import (
     "database/sql"
     "encoding/csv"
-    "fmt"
     "net/http"
 )
 
@@ -465,6 +541,12 @@ func ExportCSV(db *sql.DB) http.HandlerFunc {
 	return os.WriteFile(filepath.Join(dir, "export.go"), []byte(code), 0644)
 }
 
+// generateActionHandler writes actions.go: an Action(db) handler that parses
+// the :id and :action path parameters and switches over the configured action
+// names, executing each action's SQL via ExecContext, then redirecting to the
+// resource list. Unknown action names return 404.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
@@ -511,6 +593,13 @@ func Action(db *sql.DB) http.HandlerFunc {
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
 
+// generateCreateHandler writes create.go: a Create(db) handler serving the
+// create form on GET and inserting a new row on POST. It builds the INSERT
+// statement from the create form fields, bcrypt-hashes password fields, saves
+// uploaded files (file/image fields) via the saveUploadedFile helper and loads
+// dynamic select options declared with options_query.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
 func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
@@ -604,8 +693,8 @@ import (
     "net/http"
     "strings"
 %s%s
-    "internal/viewmodels"
-    "internal/views/resources/%s"
+    %q
+    %q
 )
 
 func Create(db *sql.DB) http.HandlerFunc {
@@ -652,7 +741,7 @@ func Create(db *sql.DB) http.HandlerFunc {
 %s`, pkgName,
 		bcryptImport,
 		fileImport,
-		pkgName,
+		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
 		listPath,
@@ -672,6 +761,11 @@ func Create(db *sql.DB) http.HandlerFunc {
 
 // buildOptionsLoader generates code to load dynamic select options from DB.
 // Returns: fieldName→goVarName map, and the code to load them at request time.
+// Params: queryDir (directory with the .sql files used to resolve each
+// options_query), fields (the form fields to inspect).
+// Returns: optVars (map from field name to the generated Go variable holding
+// its options) and loadCode (Go source that fills those variables at request
+// time by running "SELECT value, label FROM (rawSQL) AS _opt").
 func buildOptionsLoader(queryDir string, fields []types.Field) (optVars map[string]string, loadCode string) {
 	optVars = make(map[string]string)
 	var loads []string
@@ -699,6 +793,12 @@ func buildOptionsLoader(queryDir string, fields []types.Field) (optVars map[stri
 	return optVars, strings.Join(loads, "\n")
 }
 
+// formFieldDefsWithOpts renders the []viewmodels.ColumnDef literal for form
+// fields, wiring each field's Options to the runtime-loaded variable when the
+// field has an options_query, or to the inline static options map otherwise.
+// Params: fields (form field definitions), optVars (map from field name to the
+// generated options variable, as returned by buildOptionsLoader).
+// Returns: the comma-joined Go source string for the field defs.
 func formFieldDefsWithOpts(fields []types.Field, optVars map[string]string) string {
 	var defs []string
 	for _, f := range fields {
@@ -721,6 +821,11 @@ func formFieldDefsWithOpts(fields []types.Field, optVars map[string]string) stri
 	return strings.Join(defs, ",\n")
 }
 
+// colsLiteral renders a list of double-quoted Go string literals for the given
+// column names, used to build the cols []string literals in the generated
+// create/update handlers.
+// Params: cols (the column names).
+// Returns: a comma-separated list of quoted Go literals.
 func colsLiteral(cols []string) string {
 	var q []string
 	for _, c := range cols {
@@ -729,6 +834,12 @@ func colsLiteral(cols []string) string {
 	return strings.Join(q, ", ")
 }
 
+// generateUpdateHandler writes update.go: an Update(db) handler that renders
+// the populated edit form on GET (via the SQLC populate query) and performs a
+// raw SQL UPDATE on POST. It builds the SET clauses from the update form
+// fields, saves uploaded files, appends the record id as the last placeholder
+// and loads dynamic select options. Returns an error on write failure.
+// Params: dir (resource package directory), r (the resource definition).
 func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
@@ -815,9 +926,9 @@ import (
     "strconv"
     "strings"
 %s
-    "internal/data"
-    "internal/viewmodels"
-    "internal/views/resources/%s"
+    %q
+    %q
+    %q
 )
 
 func Update(db *sql.DB) http.HandlerFunc {
@@ -830,7 +941,7 @@ func Update(db *sql.DB) http.HandlerFunc {
         }
 
         if r.Method == http.MethodGet {
-            item, err := data.%s(db, int64(id))
+            item, err := data.New(db).%s(r.Context(), int32(id))
             if err != nil {
                 http.Error(w, err.Error(), http.StatusNotFound)
                 return
@@ -879,7 +990,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 }
 %s`, pkgName,
 		fileImport,
-		pkgName,
+		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		populateQuery,
 		strings.Join(populateFields, "\n"),
 		optLoadCode,
