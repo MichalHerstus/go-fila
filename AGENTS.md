@@ -4,7 +4,7 @@
 
 ```sh
 go build ./cmd/go-fila          # the project binary
-go build ./...                   # FAILS if admin/ dir exists (separate Go module)
+go build ./...                   # skips nested admin/ modules (separate go.mod)
 ```
 
 Single binary at `cmd/go-fila/main.go` — stdlib flags, no cobra/viper.
@@ -17,10 +17,11 @@ go-fila generate        # generates admin/ app, runs sqlc + tailwind (non-fatal)
 cd admin
 npm install && npm run build:css   # build tailwind manually
 sqlc generate                       # retry if it failed during generate
+go tool templ generate              # compile .templ -> *_templ.go (required before go build)
 go mod tidy && go build ./...
 ```
 
-`sqlc generate` and `npx tailwindcss` failures are **non-fatal**. The user re-runs them manually.
+`sqlc generate` and `npx tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it.
 
 Flags: `generate --config <yaml> --out <dir> --force --verbose`. `--out` basename becomes the module name.
 
@@ -126,6 +127,9 @@ All generation uses clean string concatenation. No comments emitted.
 ### Router: one `r.Route` block with an inner `r.Group`
 Login routes and the auth-protected routes live in a **single** `r.Route(panelPath, ...)`; the protected set is an inner `r.Group(func(r chi.Router) { r.Use(auth.AuthMiddleware); ... })`. Two `r.Route` calls on the same path panic (`chi: attempting to Mount() a handler on an existing path`); calling `r.Use` after a registered route also panics (`all middlewares must be defined before routes`).
 
+### Default page mounts at both `/` and its `path`
+A page with `default: true` gets `r.Get("/", handler)` **and** `r.Get(pagePath, handler)`. The generator skips only the literal `/` (the default branch already adds it). Without the `pagePath` mount, a `auth.login.redirect: /admin/dashboard` (the `init` default) 404s because only `/admin/` is registered.
+
 ### RBAC middleware is appended to middleware.go
 `rbacMiddleware` (`checkRole` + `RBACMiddleware`) is built only when a resource has `policies:` and is appended to the generated `internal/panel/auth/middleware.go`. Do not inject `"strings"` into auth handler.go — only middleware.go uses `strings.Split`. The router wraps protected routes with `r.With(auth.RBACMiddleware(resource, action))`; action routes never use RBAC (plain `r.Post`).
 
@@ -166,10 +170,10 @@ Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Cha
 | `cmd/go-fila/main.go` | CLI entry (init/generate/validate/version), hand-rolled flags |
 | `internal/types/` | YAML-tagged Go structs for config schema (4 files: config.go, panel.go, resource.go, field.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (10 files) |
-| `examples/` | Working YAML examples (full + minimal) |
+| `internal/generator/` | Code generation pipeline (10 files, see above) |
+| `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/go-fila/main.go`'s `cmdInit` |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
-| `testdata/`, `pkg/auth/`, `internal/templates/` | Reserved / unused |
+| `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |
 
 ## Generated app dependencies
 
