@@ -25,6 +25,8 @@ func (g *Generator) generateGoMod() error {
 
 go 1.26
 
+tool github.com/a-h/templ/cmd/templ
+
 require (
 	github.com/a-h/templ v0.3.819
 	github.com/go-chi/chi/v5 v5.3.1

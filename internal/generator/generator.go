@@ -151,6 +151,10 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("generating go.mod: %w", err)
 	}
 
+	if err := g.generateMakefile(); err != nil {
+		return fmt.Errorf("generating Makefile: %w", err)
+	}
+
 	if err := g.generateViewModels(); err != nil {
 		return fmt.Errorf("generating view models: %w", err)
 	}

@@ -16,7 +16,7 @@ import (
 )
 
 // version is the current go-fila release version.
-const version = "0.5.0"
+const version = "0.5.1"
 
 // main is the CLI entry point. It requires at least one argument and
 // dispatches to cmdInit, cmdGenerate or cmdValidate, or prints the version.

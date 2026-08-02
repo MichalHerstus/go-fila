@@ -15,13 +15,22 @@ Single binary at `cmd/go-fila/main.go` — stdlib flags, no cobra/viper.
 go-fila init            # writes go-fila.yaml + sql/{migrations,queries}/
 go-fila generate        # generates admin/ app, runs sqlc + tailwind (non-fatal)
 cd admin
-npm install && npm run build:css   # build tailwind manually
-sqlc generate                       # retry if it failed during generate
-go tool templ generate              # compile .templ -> *_templ.go (required before go build)
-go mod tidy && go build ./...
+make                    # builds the dashboard binary + assets
 ```
 
-`sqlc generate` and `npx tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it.
+The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `deps`, `css`, `sqlc`, `templ`, `tidy` targets, plus `run` (build + serve) and `clean`.
+
+Equivalent manual steps:
+
+```sh
+cd admin
+npm install && npm run build:css   # build tailwind
+sqlc generate                       # retry if it failed during generate
+go tool templ generate              # compile .templ -> *_templ.go (required before go build)
+go mod tidy && go build -o admin .
+```
+
+`sqlc generate` and `npx tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
 
 Flags: `generate --config <yaml> --out <dir> --force --verbose`. `--out` basename becomes the module name.
 
@@ -59,7 +68,7 @@ mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **
 7. `generateResource()` → per-resource handlers (`handler.go`): list, detail, create, update, **delete, action, CSV export**
 8. `generatePage()` — page handlers with widget DB queries
 9. `generateViews()` (`templ.go`) — all `.templ` views
-10. `generateGoMod()` (`mod.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
+10. `generateGoMod()` (`mod.go`, declares the templ `tool` directive), `generateMakefile()` (`makefile.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
 
 All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 
@@ -170,7 +179,7 @@ Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Cha
 | `cmd/go-fila/main.go` | CLI entry (init/generate/validate/version), hand-rolled flags |
 | `internal/types/` | YAML-tagged Go structs for config schema (4 files: config.go, panel.go, resource.go, field.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (10 files, see above) |
+| `internal/generator/` | Code generation pipeline (11 files, see above) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/go-fila/main.go`'s `cmdInit` |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
 | `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |
@@ -178,3 +187,5 @@ Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Cha
 ## Generated app dependencies
 
 `github.com/a-h/templ`, `github.com/go-chi/chi/v5`, `github.com/gorilla/sessions`, `golang.org/x/crypto`. Plus `github.com/mattn/go-sqlite3 v1.14.24` when the driver is sqlite (blank-imported in main.go).
+
+The generated `go.mod` also declares `tool github.com/a-h/templ/cmd/templ` so `go tool templ generate` works without a manual templ install, and `generateMakefile()` emits a `Makefile` whose `build` target runs all steps (npm deps, Tailwind, sqlc, tidy, templ, `go build -o <binary> .`).

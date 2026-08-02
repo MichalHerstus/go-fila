@@ -18,6 +18,7 @@ go-fila generate:
   ├── generates internal/views/       → .templ components (type-safe UI)
   ├── generates internal/assets/      → Tailwind CSS (compiled), static files
   ├── generates main.go + router      → chi-based wiring
+  ├── writes go.mod + Makefile        → templ tool directive; `make` builds the binary
   └── scaffolds working example       → User/Role resources + auth + dashboard
 ```
 
@@ -380,6 +381,7 @@ go-fila generate --config go-fila.yaml --out ./output
 7. **Generate auth** — login handler, session middleware, RBAC middleware
 8. **Generate main.go** — DB pool init, chi setup, server start
 9. **Compile Tailwind** — scan `.templ` files for classes, output `styles.css`
+10. **Generate go.mod + Makefile** — `tool github.com/a-h/templ/cmd/templ` directive; a `Makefile` whose `build` target runs all steps (npm deps, Tailwind, sqlc, tidy, templ, `go build -o <binary> .`) to produce the dashboard binary
 
 ---
 
@@ -388,7 +390,8 @@ go-fila generate --config go-fila.yaml --out ./output
 ```
 output/
 ├── main.go                     # chi router, DB pool, server start
-├── go.mod / go.sum
+├── go.mod / go.sum             # go.mod declares templ as a Go tool
+├── Makefile                    # make / make build — builds the dashboard binary
 ├── sqlc.yaml
 ├── sql/
 │   ├── schema.sql

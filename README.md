@@ -8,8 +8,8 @@
 |---|---|---|
 | [Go](https://go.dev/dl/) 1.26+ | Running go-fila + building generated app | |
 | [SQLC](https://docs.sqlc.dev/en/latest/overview/install.html) | Generating the data layer (`internal/data/`) | Generator runs it, failure is non-fatal |
-| [Node.js](https://nodejs.org/) + npm | Building Tailwind CSS in the generated app | Run `npm install && npm run build:css` in the output dir |
-| [Templ](https://templ.dev/) | Compiling `.templ` files in the generated app | `go tool templ generate` in the output dir |
+| [Node.js](https://nodejs.org/) + npm | Building Tailwind CSS in the generated app | `make css` / `npm install && npm run build:css` in the output dir |
+| [Templ](https://templ.dev/) | Compiling `.templ` files in the generated app | Optional — the generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` is handled by the Go toolchain |
 
 ## Quick start
 
@@ -29,12 +29,15 @@ go-fila generate              # produces ./admin/
 
 # Build and run the generated app
 cd admin
-npm install
-npm run build:css             # build Tailwind
-go tool templ generate        # compile .templ -> *_templ.go (required before go build)
-go mod tidy
-go build ./...
+make build                    # builds the dashboard binary + assets
+
+# Run the dashboard server
+make run
+
+# Individual steps: make deps / css / sqlc / templ / tidy / clean
 ```
+
+The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `npm install`, `npm run build:css`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
 
 The `init` command fails if files already exist unless `--force` is passed.
 
@@ -69,7 +72,7 @@ go-fila/
 │   ├── parser/                 # YAML parsing + validation
 │   │   ├── schema.go
 │   │   └── validator.go
-│   └── generator/              # Code generation pipeline (10 files)
+│   └── generator/              # Code generation pipeline (11 files)
 │       ├── generator.go        # Orchestrator
 │       ├── handler.go          # Per-resource handlers (list, detail, create,
 │       │                       #   update, delete, action, CSV export)
@@ -77,7 +80,8 @@ go-fila/
 │       ├── router.go           # Chi router + RBAC + page handlers
 │       ├── auth.go             # Login/logout/session/RBAC middleware
 │       ├── main.go             # Generated server entrypoint
-│       ├── mod.go              # Generated go.mod
+│       ├── mod.go              # Generated go.mod (incl. templ tool directive)
+│       ├── makefile.go         # Generated Makefile (build/run/clean targets)
 │       ├── viewmodels.go       # View data structs
 │       ├── tailwind.go         # Tailwind config + static assets
 │       └── sqlc.go             # SQLC config + query lookup
@@ -91,7 +95,8 @@ go-fila/
 ```
 output/
 ├── main.go                          # Chi router, DB pool, server start
-├── go.mod / go.sum
+├── go.mod / go.sum                  # go.mod declares templ as a Go tool
+├── Makefile                         # make / make build — builds the binary
 ├── sqlc.yaml
 ├── package.json / tailwind.config.js
 ├── sql/
