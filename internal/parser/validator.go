@@ -52,6 +52,14 @@ func Validate(cfg *types.Config) error {
 		if r.Label == "" {
 			cfg.Resources[i].Label = r.Name
 		}
+		if r.Card != nil {
+			if r.Card.Columns < 1 {
+				r.Card.Columns = 4
+			}
+			if r.Card.Rows < 1 {
+				r.Card.Rows = 4
+			}
+		}
 	}
 	for i, p := range cfg.Pages {
 		if p.Name == "" {

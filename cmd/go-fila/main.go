@@ -49,6 +49,7 @@ func printUsage() {
 
 Usage:
   go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
+  go-fila init --demo    Scaffold a full-featured sqlite demo (order management)
   go-fila generate       Run SQLC + generate admin panel Go application
   go-fila validate       Validate YAML + verify SQLC function references resolve
   go-fila version        Print version information
@@ -57,7 +58,8 @@ Flags:
   --config, -c   Path to YAML config file (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
   --force        Overwrite existing files
-  --verbose      Enable verbose logging`)
+  --verbose      Enable verbose logging
+  --demo         Scaffold a populated sqlite demo project (init only)`)
 }
 
 // parseGlobalFlags scans os.Args[2:] for the global flags shared by all
@@ -65,12 +67,15 @@ Flags:
 // following argument.
 // Returns: configPath (YAML config file path, default "go-fila.yaml"),
 // outDir (output directory, default "./admin"),
-// force (overwrite existing files), verbose (enable verbose logging).
-func parseGlobalFlags() (configPath, outDir string, force, verbose bool) {
+// force (overwrite existing files), verbose (enable verbose logging),
+// demo (scaffold the populated sqlite demo project instead of the plain
+// starter when initializing).
+func parseGlobalFlags() (configPath, outDir string, force, verbose, demo bool) {
 	configPath = "go-fila.yaml"
 	outDir = "./admin"
 	force = false
 	verbose = false
+	demo = false
 
 	args := os.Args[2:]
 	for i := 0; i < len(args); i++ {
@@ -89,6 +94,8 @@ func parseGlobalFlags() (configPath, outDir string, force, verbose bool) {
 			force = true
 		case "--verbose":
 			verbose = true
+		case "--demo":
+			demo = true
 		}
 	}
 	return
@@ -97,9 +104,18 @@ func parseGlobalFlags() (configPath, outDir string, force, verbose bool) {
 // cmdInit scaffolds a starter project in the current directory: it writes
 // go-fila.yaml (example configuration), sql/migrations/schema.sql and
 // sql/queries/user.sql. It refuses to overwrite an existing config file or
-// output directory unless --force is given.
+// output directory unless --force is given. With --demo it instead scaffolds
+// the full-featured sqlite demo project (see cmdInitDemo).
 func cmdInit() {
-	configPath, outDir, force, _ := parseGlobalFlags()
+	configPath, outDir, force, _, demo := parseGlobalFlags()
+
+	if demo {
+		if err := cmdInitDemo(configPath, outDir, force); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if !force {
 		if _, err := os.Stat(configPath); err == nil {
@@ -332,7 +348,7 @@ SELECT * FROM roles ORDER BY name;
 // is valid. With --verbose it also prints a short summary of the panel, the
 // number of resources, pages and navigation groups.
 func cmdValidate() {
-	configPath, _, _, verbose := parseGlobalFlags()
+	configPath, _, _, verbose, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {
@@ -354,7 +370,7 @@ func cmdValidate() {
 // the Tailwind CSS build; failures there are reported as warnings instead of
 // being fatal, since the user can re-run them manually.
 func cmdGenerate() {
-	configPath, outDir, _, verbose := parseGlobalFlags()
+	configPath, outDir, _, verbose, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {

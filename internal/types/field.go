@@ -22,4 +22,5 @@ var FieldTypes = map[string]string{
 	"relation": "Link to related record",
 	"json":     "Pretty-printed",
 	"float":    "Decimal / number input",
+	"gps":      "GPS coordinates",
 }

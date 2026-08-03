@@ -38,6 +38,11 @@ func (g *Generator) generateViews() error {
 			return err
 		}
 	}
+	if len(g.Config.Pages) > 0 {
+		if err := g.generatePageWidgets(); err != nil {
+			return err
+		}
+	}
 	for _, p := range g.Config.Pages {
 		if err := g.generatePageViews(p); err != nil {
 			return err
@@ -79,6 +84,11 @@ func (g *Generator) generateResourceViews(r types.Resource) error {
 			return err
 		}
 	}
+	if r.Card != nil {
+		if err := g.generateCardTempl(viewDir, r); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -113,6 +123,8 @@ func renderCell(fieldType, expr string) string {
 		return fmt.Sprintf(`@renderJSON(%s)`, expr)
 	case "float":
 		return fmt.Sprintf(`@renderFloat(%s)`, expr)
+	case "gps":
+		return fmt.Sprintf(`@renderGPS(%s)`, expr)
 	case "integer", "string", "text", "password":
 		return fmt.Sprintf(`{ fmt.Sprintf("%%v", %s) }`, expr)
 	default:
@@ -180,6 +192,16 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 	createBtn := fmt.Sprintf(`<a href="%s/%s/new" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">Create %s</a>`, panelPath, resLower, resLabel)
 	exportBtn := fmt.Sprintf(`<a href="?export=csv" class="text-gray-600 hover:text-gray-900 px-4 py-2 text-sm">Export CSV</a>`)
 
+	cardBtn := ""
+	if r.Card != nil {
+		cardBtn = fmt.Sprintf(`<a href="%s/%s/cards" class="text-gray-600 hover:text-gray-900 px-4 py-2 text-sm">Cards</a>`, panelPath, resLower)
+	}
+
+	headerBtns := createBtn + " " + exportBtn
+	if cardBtn != "" {
+		headerBtns = createBtn + " " + cardBtn + " " + exportBtn
+	}
+
 	code := fmt.Sprintf(`package views
 
 import "internal/viewmodels"
@@ -189,7 +211,6 @@ templ %s(data *viewmodels.ListData) {
         <div class="flex items-center justify-between mb-6">
             <h1 class="text-2xl font-bold text-gray-900">%s</h1>
             <div class="flex gap-2 items-center">
-                %s
                 %s
             </div>
         </div>
@@ -215,7 +236,7 @@ templ %s(data *viewmodels.ListData) {
         </div>
     </div>
 }
-`, templName, resLabel, createBtn, exportBtn, headers.String(), cells.String(), actionsCol)
+`, templName, resLabel, headerBtns, headers.String(), cells.String(), actionsCol)
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "list.templ"), []byte(code), 0644)
@@ -408,6 +429,9 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 		case "json":
 			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2 font-mono text-xs">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
 `, f.Name, f.Name, f.Name))
+		case "gps":
+			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" placeholder="lat, lng" />
+`, f.Name, f.Name, f.Name))
 		default:
 			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
@@ -481,33 +505,160 @@ templ %s(data *viewmodels.FormData) {
 	return os.WriteFile(filepath.Join(dir, "form.templ"), []byte(code), 0644)
 }
 
-// generatePageViews writes one templ view per page into internal/views/pages.
-// The page template iterates over its widgets and dispatches to the shared
-// widget template (stats_grid, stat, chart, table, list, html), which also
-// renders stat widgets and inline SVG icons.
-// Params: p (the page definition).
+// generateCardTempl writes cards.templ for a resource: a card grid view (or a
+// kanban board when data.Kanban is true). Each card renders the configured
+// fields stacked vertically with per-field renderers; the grid uses Tailwind's
+// responsive columns so `data.Columns` cards fit per row. Grid mode shows the
+// shared search bar and pagination; kanban mode renders columns side by side
+// with the search bar only.
+// Params: dir (view directory), r (the resource definition).
 // Returns: an error on write failure.
-func (g *Generator) generatePageViews(p types.Page) error {
-	viewDir := filepath.Join(g.OutDir, "internal/views/pages")
-	panelID := g.Config.Panel.ID
+func (g *Generator) generateCardTempl(dir string, r types.Resource) error {
+	fields := r.Card.Fields
+	templName := r.Name + "Cards"
+	resLabel := r.Label
+	resLower := strings.ToLower(r.Name)
+	panelPath := g.Config.Panel.Path
 
-	capitalID := strings.ToUpper(panelID[:1]) + panelID[1:]
-	templName := capitalID + p.Name
+	var cardBody strings.Builder
+	for _, f := range fields {
+		label := f.Label
+		if label == "" {
+			label = f.Name
+		}
+		rendered := renderCell(f.Type, fmt.Sprintf(`item[%q]`, f.Name))
+		cardBody.WriteString(fmt.Sprintf(`                    <div class="mb-2">
+                        <span class="block text-xs font-medium text-gray-500">%s</span>
+                        %s
+                    </div>
+`, label, rendered))
+	}
+
+	actions := fmt.Sprintf(`                    <div class="flex gap-2 border-t pt-3 mt-3">
+                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 text-sm">View</a>
+                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 text-sm">Edit</a>
+                    </div>
+`, panelPath, resLower, panelPath, resLower)
+
+	kanbanField := ""
+	if r.Card.KanbanField != "" {
+		kanbanField = r.Card.KanbanField
+	}
+
+	// Header button: a "Create" link to the create form when configured,
+	// otherwise a "View List" link back to the resource list.
+	headerBtnURL := fmt.Sprintf("%s/%s", panelPath, resLower)
+	headerBtnLabel := "View List"
+	if r.Form != nil && r.Form.Create != nil {
+		headerBtnURL = fmt.Sprintf("%s/%s/new", panelPath, resLower)
+		headerBtnLabel = fmt.Sprintf("Create %s", resLabel)
+	}
+	headerBtn := fmt.Sprintf(`<a href="%s" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">%s</a>`, headerBtnURL, headerBtnLabel)
+
+	gridView := fmt.Sprintf(`                <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-%d">
+                    for _, item := range data.Items {
+                        <div class="bg-white shadow rounded-lg p-4 border border-gray-200">
+%s
+%s                    </div>
+                    }
+                </div>
+`, r.Card.Columns, cardBody.String(), actions)
+
+	kanbanView := ""
+	if kanbanField != "" {
+		kanbanView = fmt.Sprintf(`                <div class="flex gap-4 overflow-x-auto pb-4">
+                    for _, col := range data.KanbanColumns {
+                        <div class="w-72 flex-shrink-0 bg-gray-50 rounded-lg p-3 border border-gray-200">
+                            <div class="flex items-center justify-between mb-3">
+                                <span class="text-sm font-medium text-gray-700">{ col.Label }</span>
+                                <span class="text-xs text-gray-500">{ fmt.Sprintf("%%d", len(col.Items)) }</span>
+                            </div>
+                            for _, item := range col.Items {
+                                <div class="bg-white shadow rounded-lg p-4 mb-3 border border-gray-200">
+%s
+%s                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+`, cardBody.String(), actions)
+	}
+
+	code := fmt.Sprintf(`package views
+
+import "internal/viewmodels"
+
+templ %s(data *viewmodels.CardData) {
+    <div class="p-6">
+        <div class="flex items-center justify-between mb-6">
+            <h1 class="text-2xl font-bold text-gray-900">%s</h1>
+            <div class="flex gap-2 items-center">
+                <a href="%s/%s" class="text-gray-600 hover:text-gray-900 px-4 py-2 text-sm">Back</a>
+                %s
+            </div>
+        </div>
+
+        @searchBar(data.Search, data.Resource)
+
+        %s
+
+        if !data.Kanban {
+            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order)
+        }
+    </div>
+}
+`, templName, resLabel, panelPath, resLower, headerBtn, gridView)
+	if kanbanView != "" {
+		code = fmt.Sprintf(`package views
+
+import "internal/viewmodels"
+
+templ %s(data *viewmodels.CardData) {
+    <div class="p-6">
+        <div class="flex items-center justify-between mb-6">
+            <h1 class="text-2xl font-bold text-gray-900">%s</h1>
+            <div class="flex gap-2 items-center">
+                <a href="%s/%s" class="text-gray-600 hover:text-gray-900 px-4 py-2 text-sm">Back</a>
+                %s
+            </div>
+        </div>
+
+        @searchBar(data.Search, data.Resource)
+
+        if data.Kanban {
+%s        } else {
+%s        }
+    </div>
+}
+`, templName, resLabel, panelPath, resLower, headerBtn, kanbanView, gridView)
+	}
+	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
+
+	return os.WriteFile(filepath.Join(dir, "cards.templ"), []byte(code), 0644)
+}
+
+// generatePageWidgets writes internal/views/pages/widgets.templ containing the
+// templ components shared by every page view (widget, statWidget, iconSVG).
+// The shared file is written once regardless of how many pages are configured;
+// per-page view files only declare their page template and reference these
+// components. The stats_grid column count is baked in from the first page that
+// declares a stats_grid widget (defaulting to 4).
+// Returns: an error on write failure.
+func (g *Generator) generatePageWidgets() error {
+	viewDir := filepath.Join(g.OutDir, "internal/views/pages")
+	gridCols := 4
+	for _, p := range g.Config.Pages {
+		if c := g.detectGridColumns(p.Widgets); c != 4 {
+			gridCols = c
+			break
+		}
+	}
 	code := fmt.Sprintf(`package views
 
 import (
     "internal/viewmodels"
     "fmt"
 )
-
-templ %s(data *viewmodels.PageData) {
-    <div class="p-6">
-        <h1 class="text-2xl font-bold mb-6">{ data.Name }</h1>
-        for _, w := range data.Widgets {
-            @widget(w)
-        }
-    </div>
-}
 
 templ widget(w viewmodels.WidgetData) {
     switch w.Type {
@@ -640,7 +791,38 @@ templ iconSVG(name string) {
         </svg>
     }
 }
-`, templName, g.detectGridColumns(p.Widgets))
+`, gridCols)
+	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
+
+	return os.WriteFile(filepath.Join(viewDir, "widgets.templ"), []byte(code), 0644)
+}
+
+// generatePageViews writes one templ view per page into internal/views/pages.
+// Each file only declares its page template; the shared widget/statWidget/
+// iconSVG components live in widgets.templ (see generatePageWidgets).
+// Params: p (the page definition).
+// Returns: an error on write failure.
+func (g *Generator) generatePageViews(p types.Page) error {
+	viewDir := filepath.Join(g.OutDir, "internal/views/pages")
+	panelID := g.Config.Panel.ID
+
+	capitalID := strings.ToUpper(panelID[:1]) + panelID[1:]
+	templName := capitalID + p.Name
+	code := fmt.Sprintf(`package views
+
+import (
+    "internal/viewmodels"
+)
+
+templ %s(data *viewmodels.PageData) {
+    <div class="p-6">
+        <h1 class="text-2xl font-bold mb-6">{ data.Name }</h1>
+        for _, w := range data.Widgets {
+            @widget(w)
+        }
+    </div>
+}
+`, templName)
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(viewDir, p.Name+".templ"), []byte(code), 0644)
@@ -724,6 +906,10 @@ templ Base(title string, panelPath string, children templ.Component) {
             </div>
         </div>
         <script>
+            function toggleSidebar() {
+                var sidebar = document.querySelector('aside');
+                sidebar.style.display = sidebar.style.display === 'none' ? '' : 'none';
+            }
             // Auto-render Chart.js canvases
             document.addEventListener('DOMContentLoaded', function() {
                 document.querySelectorAll('canvas[data-chart-type]').forEach(function(canvas) {
@@ -768,7 +954,7 @@ templ iconNav(name string) {
 }
 
 templ Sidebar(panelPath string) {
-    <aside class="w-64 bg-white shadow-md h-screen fixed left-0 top-0 overflow-y-auto">
+    <aside class="w-64 bg-white shadow-md h-screen overflow-y-auto shrink-0">
         <div class="p-4 border-b">
             <h1 class="text-xl font-bold">%s</h1>
         </div>
@@ -778,7 +964,7 @@ templ Sidebar(panelPath string) {
 }
 
 templ Topbar(panelPath string) {
-    <header class="bg-white shadow-sm px-6 py-3 flex items-center justify-between sticky top-0 z-10 ml-64">
+    <header class="bg-white shadow-sm px-6 py-3 flex items-center justify-between sticky top-0 z-10">
         <div class="flex items-center gap-4">
             <button class="text-gray-500 hover:text-gray-700" onclick="toggleSidebar()">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -918,6 +1104,13 @@ templ renderFloat(value interface{}) {
         } else {
             <span class="text-sm text-gray-900">{ fmt.Sprintf("%v", value) }</span>
         }
+    }
+}
+
+templ renderGPS(value interface{}) {
+    if value != nil {
+        {{ coords := fmt.Sprintf("%v", value) }}
+        <a href={ templ.SafeURL(fmt.Sprintf("https://www.google.com/maps?q=%s", coords)) } target="_blank" rel="noopener noreferrer" class="text-indigo-600 hover:text-indigo-900 underline">{ coords }</a>
     }
 }
 

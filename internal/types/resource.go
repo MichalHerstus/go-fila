@@ -7,35 +7,53 @@ package types
 // Resource is a CRUD-managed entity (e.g. "User") with optional list, detail,
 // form, actions and policies sections.
 type Resource struct {
-	Name     string       `yaml:"name"`
-	Label    string       `yaml:"label"`
-	Icon     string       `yaml:"icon"`
-	Group    string       `yaml:"group"`
-	List     *ListConfig  `yaml:"list"`
+	Name     string        `yaml:"name"`
+	Label    string        `yaml:"label"`
+	Icon     string        `yaml:"icon"`
+	Group    string        `yaml:"group"`
+	List     *ListConfig   `yaml:"list"`
+	Card     *CardConfig   `yaml:"card"`
 	Detail   *DetailConfig `yaml:"detail"`
-	Form     *FormConfig  `yaml:"form"`
-	Actions  []Action     `yaml:"actions"`
-	Policies *Policy      `yaml:"policies"`
+	Form     *FormConfig   `yaml:"form"`
+	Actions  []Action      `yaml:"actions"`
+	Policies *Policy       `yaml:"policies"`
 }
 
 // ListConfig defines the resource list view: SQLC queries for rows and the
 // count, the displayed columns and the default sort (a leading "-" means
 // descending).
+// ListConfig defines the resource list view: SQLC queries for rows and the
+// count, the displayed columns and the default sort (a leading "-" means
+// descending).
 type ListConfig struct {
-	Query       string       `yaml:"query"`
-	CountQuery  string       `yaml:"count_query"`
-	Columns     []Column     `yaml:"columns"`
-	DefaultSort string       `yaml:"default_sort"`
+	Query       string   `yaml:"query"`
+	CountQuery  string   `yaml:"count_query"`
+	Columns     []Column `yaml:"columns"`
+	DefaultSort string   `yaml:"default_sort"`
+}
+
+// CardConfig defines a card-grid view of the resource: display fields (cards
+// share the same field definition as forms), how many cards to fit per row
+// (Columns) and rows per page (Rows), and an optional select field name used
+// to render a kanban board instead of a grid. Pagination and search behave
+// like the list view.
+type CardConfig struct {
+	Fields      []Field  `yaml:"fields"`
+	Columns     int      `yaml:"columns"`
+	Rows        int      `yaml:"rows"`
+	KanbanField string   `yaml:"kanban_field"`
+	Searchable  []string `yaml:"searchable"`
+	DefaultSort string   `yaml:"default_sort"`
 }
 
 // Column is a single list column: its name, label, type, sortable/searchable
 // flags and static display options.
 type Column struct {
-	Name       string         `yaml:"name"`
-	Label      string         `yaml:"label"`
-	Type       string         `yaml:"type"`
-	Sortable   bool           `yaml:"sortable"`
-	Searchable bool           `yaml:"searchable"`
+	Name       string            `yaml:"name"`
+	Label      string            `yaml:"label"`
+	Type       string            `yaml:"type"`
+	Sortable   bool              `yaml:"sortable"`
+	Searchable bool              `yaml:"searchable"`
 	Options    map[string]string `yaml:"options"`
 }
 
@@ -67,16 +85,16 @@ type FormAction struct {
 // visibility contexts, validation and its options (static map or a SQLC-backed
 // query).
 type Field struct {
-	Name           string            `yaml:"name"`
-	Label          string            `yaml:"label"`
-	Type           string            `yaml:"type"`
-	Required       bool              `yaml:"required"`
-	Visible        []string          `yaml:"visible"`
-	Validation     *Validation       `yaml:"validation"`
-	OptionsQuery   string            `yaml:"options_query"`
-	OptionsValue   string            `yaml:"options_value"`
-	OptionsLabel   string            `yaml:"options_label"`
-	Options        map[string]string `yaml:"options"`
+	Name         string            `yaml:"name"`
+	Label        string            `yaml:"label"`
+	Type         string            `yaml:"type"`
+	Required     bool              `yaml:"required"`
+	Visible      []string          `yaml:"visible"`
+	Validation   *Validation       `yaml:"validation"`
+	OptionsQuery string            `yaml:"options_query"`
+	OptionsValue string            `yaml:"options_value"`
+	OptionsLabel string            `yaml:"options_label"`
+	Options      map[string]string `yaml:"options"`
 }
 
 // Validation declares min/max constraints for a form field.
@@ -88,13 +106,13 @@ type Validation struct {
 // Action is a custom row action: name/label/icon/color, optional confirmation
 // and bulk support, and the SQL to execute.
 type Action struct {
-	Name                string `yaml:"name"`
-	Label               string `yaml:"label"`
-	Icon                string `yaml:"icon"`
-	Color               string `yaml:"color"`
+	Name                 string `yaml:"name"`
+	Label                string `yaml:"label"`
+	Icon                 string `yaml:"icon"`
+	Color                string `yaml:"color"`
 	RequiresConfirmation bool   `yaml:"requires_confirmation"`
-	Bulk                bool   `yaml:"bulk"`
-	Query               string `yaml:"query"`
+	Bulk                 bool   `yaml:"bulk"`
+	Query                string `yaml:"query"`
 }
 
 // Policy lists the roles allowed for each resource action (view_any, view,

@@ -72,6 +72,9 @@ func (g *Generator) generateRouter() error {
 		if res.List != nil {
 			code += fmt.Sprintf("\t\t%sGet(\"/%s\", %s.List(db))\n", rbacPrefix("view_any"), name, name)
 		}
+		if res.Card != nil {
+			code += fmt.Sprintf("\t\t%sGet(\"/%s/cards\", %s.Cards(db))\n", rbacPrefix("view_any"), name, name)
+		}
 		if res.Form != nil && res.Form.Create != nil {
 			code += fmt.Sprintf("\t\t%sGet(\"/%s/new\", %s.Create(db))\n", rbacPrefix("create"), name, name)
 			code += fmt.Sprintf("\t\t%sPost(\"/%s/new\", %s.Create(db))\n", rbacPrefix("create"), name, name)
@@ -162,6 +165,7 @@ func (g *Generator) generatePage(p types.Page) error {
         })`, i, w.Query, i, w.Label, w.Color, w.Icon, valExpr))
 		case "chart":
 			widgetInit = append(widgetInit, fmt.Sprintf(`
+        {
         var chartLabels []string
         var chartValues []float64
         if q := %q; q != "" {
@@ -186,7 +190,8 @@ func (g *Generator) generatePage(p types.Page) error {
             ChartType: %q,
             ChartLabelsJSON: string(chartLabelsJSON),
             ChartValuesJSON: string(chartValuesJSON),
-        })`, w.Query, w.Label, w.Chart.Type))
+        })
+        }`, w.Query, w.Label, w.Chart.Type))
 		case "table":
 			colList := "[]string{"
 			for _, col := range w.DataColumns {
@@ -194,6 +199,7 @@ func (g *Generator) generatePage(p types.Page) error {
 			}
 			colList += "}"
 			widgetInit = append(widgetInit, fmt.Sprintf(`
+        {
         var tableRows []map[string]interface{}
         if q := %q; q != "" {
             dataRows, err := db.QueryContext(r.Context(), q)
@@ -221,10 +227,11 @@ func (g *Generator) generatePage(p types.Page) error {
             Label: %q,
             TableColumns: %s,
             TableRows: tableRows,
-        })`, w.Query, w.Label, colList))
+        })
+        }`, w.Query, w.Label, colList))
 		case "stats_grid":
-			widgetInit = append(widgetInit, `
-        var subWidgets []viewmodels.WidgetData`)
+			widgetInit = append(widgetInit, fmt.Sprintf(`
+        var subWidgets%d []viewmodels.WidgetData`, i))
 			for _, sw := range w.Widgets {
 				widgetInit = append(widgetInit, fmt.Sprintf(`
         {
@@ -232,20 +239,20 @@ func (g *Generator) generatePage(p types.Page) error {
             if q := %q; q != "" {
                 _ = db.QueryRowContext(r.Context(), q).Scan(&subCount)
             }
-            subWidgets = append(subWidgets, viewmodels.WidgetData{
+            subWidgets%d = append(subWidgets%d, viewmodels.WidgetData{
                 Type: "stat",
                 Label: %q,
                 Color: %q,
                 Icon: %q,
                 Value: template.HTML(fmt.Sprintf("%%d", subCount)),
             })
-        }`, sw.Query, sw.Label, sw.Color, sw.Icon))
+        }`, sw.Query, i, i, sw.Label, sw.Color, sw.Icon))
 			}
-			widgetInit = append(widgetInit, `
+			widgetInit = append(widgetInit, fmt.Sprintf(`
         widgets = append(widgets, viewmodels.WidgetData{
             Type: "stats_grid",
-            SubWidgets: subWidgets,
-        })`)
+            SubWidgets: subWidgets%d,
+        })`, i))
 		}
 	}
 

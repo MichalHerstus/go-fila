@@ -177,6 +177,29 @@ resources:
           type: email
         - name: role_name
           label: Role
+
+    # ── CARD VIEW (optional) ───────────────────────
+    # View-only card grid. Fields match the form field definition. `columns`
+    # = cards per row (X), `rows` = rows per page (Y); a page shows X*Y cards.
+    # Pagination and search behave like the list view. Set `kanban_field` to
+    # the name of a `select` field to render a kanban board instead: cards are
+    # grouped into columns by that field's option values.
+    card:
+      fields:
+        - name: title
+          type: string
+        - name: status
+          type: select
+          options:
+            todo: "To Do"
+            doing: "In Progress"
+            done: "Done"
+      columns: 3                 # cards per row (X)
+      rows: 4                    # rows per page (Y)
+      kanban_field: status       # optional select field -> kanban board
+      searchable:
+        - title
+      default_sort: -created_at
         - name: status
           type: badge
           options:
@@ -264,6 +287,7 @@ resources:
 | `relation` | Link to related record |
 | `json` | Pretty-printed |
 | `float` | Decimal / number input |
+| `gps` | GPS coordinates (maps link) |
 
 ### Pages & Widgets
 
@@ -457,6 +481,7 @@ go-fila — YAML-driven admin panel generator
 
 Usage:
   go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
+  go-fila init --demo    Scaffold + seed sqlite demo DB (roles/users/customers/products/orders/orderlines)
   go-fila generate       Run SQLC + generate admin panel Go application
   go-fila validate       Validate YAML + verify SQLC function references resolve
   go-fila version        Print version information
@@ -465,6 +490,7 @@ Flags:
   --config, -c   Path to YAML config file (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
   --force        Overwrite existing files
+  --demo         With init: seed sqlite demo DB; login admin@demo.test / admin
   --verbose      Enable verbose logging
 ```
 

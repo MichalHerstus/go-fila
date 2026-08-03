@@ -330,6 +330,29 @@ The list handler reads `page`, `search`, `sort`, and `order` from the query stri
 
 The detail handler parses `:id` from the URL, calls `data.New(db).<Query>(ctx, id)`, maps each declared field to the matching SQLC struct field (snake_case → PascalCase), and renders the detail view. Omit `detail` entirely to have no detail page.
 
+#### card
+
+```yaml
+    card:
+      fields:                      # view-only, same field definition as forms
+        - name: title
+          type: string
+        - name: status
+          type: select
+          options:
+            todo: "To Do"
+            doing: "In Progress"
+            done: "Done"
+      columns: 3                   # X: cards per row
+      rows: 4                      # Y: rows per page (a page shows X*Y cards)
+      kanban_field: status         # optional select field -> kanban board
+      searchable:
+        - title
+      default_sort: -created_at
+```
+
+The card view is view-only (no CRUD wiring of its own). It is served at `GET /{panel}/{resource}/cards` and reachable via a "Cards" button on the list view. Pagination and search behave exactly like the list view. When `kanban_field` names a `select` field, cards are grouped into columns keyed by that field's option values instead of a grid. Omit `card` entirely to have no card view.
+
 #### form
 
 ```yaml
@@ -428,6 +451,7 @@ Policies are optional. When **any** resource declares them, the generator append
 | `file` | Download link | file input |
 | `relation` | Link to related record | text input (related ID) |
 | `json` | Pretty-printed | textarea (mono font) |
+| `gps` | GPS coordinates (maps link) | text input (`"lat, lng"`) |
 
 ### Pages & widgets
 

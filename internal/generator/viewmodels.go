@@ -53,6 +53,31 @@ type DetailData struct {
 	PanelPath string
 }
 
+type CardColumnData struct {
+	Key      string
+	Label    string
+	Items    []map[string]interface{}
+}
+
+type CardData struct {
+	Items      []map[string]interface{}
+	Page       int
+	PerPage    int
+	Total      int
+	TotalPages int
+	Search     string
+	Sort       string
+	Order      string
+	Fields     []ColumnDef
+	Columns    int
+	Rows       int
+	Kanban     bool
+	KanbanField string
+	KanbanColumns []CardColumnData
+	Resource   string
+	PanelPath  string
+}
+
 type FormData struct {
 	Item      map[string]interface{}
 	Fields    []ColumnDef

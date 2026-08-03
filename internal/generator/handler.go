@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/go-fila/go-fila/internal/types"
@@ -26,6 +27,11 @@ func (g *Generator) generateResource(r types.Resource) error {
 
 	if r.List != nil {
 		if err := g.generateListHandler(dir, r); err != nil {
+			return err
+		}
+	}
+	if r.Card != nil {
+		if err := g.generateCardHandler(dir, r); err != nil {
 			return err
 		}
 	}
@@ -122,6 +128,17 @@ func tableName(resourceName string) string {
 	return strings.ToLower(resourceName) + "s"
 }
 
+// resourceTitle returns the page title used for a resource view: the YAML
+// label when set, falling back to the resource name.
+// Params: r (the resource definition).
+// Returns: the display title string.
+func resourceTitle(r types.Resource) string {
+	if r.Label != "" {
+		return r.Label
+	}
+	return r.Name
+}
+
 // generateListHandler writes list.go for a resource: a List(db) handler that
 // reads page/search/sort/order query parameters, builds a dynamic WHERE/ORDER
 // BY/LIMIT query against the plural table name, counts the total rows for
@@ -162,6 +179,7 @@ import (
 
     %q
     %q
+    layoutviews %q
 )
 
 func List(db *sql.DB) http.HandlerFunc {
@@ -192,8 +210,9 @@ func List(db *sql.DB) http.HandlerFunc {
 	}()+`
         }
 
-        validSorts := map[string]bool{`, pkgName,
-		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName)))
+        validSorts := map[string]bool{`, 		pkgName,
+		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
+		g.moduleImport("internal/views/layout")))
 
 	// Valid sort columns
 	for i, c := range sortableCols {
@@ -331,7 +350,7 @@ func List(db *sql.DB) http.HandlerFunc {
             PanelPath: ` + fmt.Sprintf("%q", g.Config.Panel.Path) + `,
         }
 
-        ` + fmt.Sprintf("views.%sList(vd).Render(r.Context(), w)", r.Name) + `
+        ` + fmt.Sprintf("layoutviews.Base(%q, %q, views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
     }
 }
 `)
@@ -375,6 +394,270 @@ func scanFields(cols []string) string {
 	return strings.Join(scans, "\n")
 }
 
+// quoteList renders a comma-separated list of double-quoted Go string literals
+// for the given words, used to build slice/array literals in generated code.
+// Params: words (the strings to quote).
+// Returns: a comma-separated list of quoted Go literals.
+func quoteList(words []string) string {
+	q := make([]string, len(words))
+	for i, w := range words {
+		q[i] = fmt.Sprintf("%q", w)
+	}
+	return strings.Join(q, ", ")
+}
+
+// generateCardHandler writes card.go for a resource: a Cards(db) handler that
+// paginates and searches the resource exactly like the list handler (LIMIT =
+// card Rows * Columns) scanning the card fields. When KanbanField names a
+// select field, the fetched rows are grouped into columns keyed by that field's
+// option values and rendered as a kanban board; otherwise the rows render as a
+// Columns x Rows card grid.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
+func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
+	pkgName := strings.ToLower(r.Name)
+	tName := tableName(r.Name)
+	card := r.Card
+	panelPath := g.Config.Panel.Path
+
+	var fieldNames []string
+	var searchCols []string
+	for _, f := range card.Fields {
+		fieldNames = append(fieldNames, f.Name)
+	}
+	for _, s := range card.Searchable {
+		searchCols = append(searchCols, s)
+	}
+	fieldsJoin := strings.Join(fieldNames, ", ")
+	searchable := quoteList(searchCols)
+
+	kanban := card.KanbanField != ""
+	perPage, rows, cols := card.Rows*card.Columns, card.Rows, card.Columns
+
+	sortStmt := ""
+	if card.DefaultSort != "" {
+		sortField := strings.TrimPrefix(card.DefaultSort, "-")
+		sortOrder := "asc"
+		if card.DefaultSort != sortField {
+			sortOrder = "desc"
+		}
+		sortStmt = fmt.Sprintf(`        if sort == "" {
+            sort = %q
+            order = %q
+        }
+`, sortField, sortOrder)
+	}
+
+	var queryCore string
+	if g.isSQLite() {
+		queryCore = fmt.Sprintf(`        var args []interface{}
+
+        var whereClauses []string
+        if search != "" {
+            searchableCols := []string{%s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, col+" LIKE ?")
+                args = append(args, "%%"+search+"%%")
+            }
+        }
+
+        whereSQL := ""
+        if len(whereClauses) > 0 {
+            whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+        }
+
+        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
+        var total int64
+        if err := db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
+        fullArgs = append(fullArgs, perPage, offset)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        defer rows.Close()
+`, searchable, tName, fieldsJoin, tName)
+	} else {
+		queryCore = fmt.Sprintf(`        var args []interface{}
+        args = append(args, perPage, offset)
+        argIdx := 3
+
+        var whereClauses []string
+        if search != "" {
+            searchableCols := []string{%s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, fmt.Sprintf("%%s ILIKE $%%d", col, argIdx))
+                args = append(args, "%%"+search+"%%")
+                argIdx++
+            }
+        }
+
+        whereSQL := ""
+        if len(whereClauses) > 0 {
+            whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+        }
+
+        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
+        var total int64
+        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        defer rows.Close()
+`, searchable, tName, fieldsJoin, tName)
+	}
+
+	kanbanCode := ""
+	kanbanColumnsExpr := "nil"
+	if kanban {
+		var optKeys []string
+		var optLabelMap []string
+		for _, f := range card.Fields {
+			if f.Name == card.KanbanField {
+				for k := range f.Options {
+					optKeys = append(optKeys, k)
+				}
+				sort.Strings(optKeys)
+				for _, k := range optKeys {
+					optLabelMap = append(optLabelMap, fmt.Sprintf("%q: %q", k, f.Options[k]))
+				}
+			}
+		}
+		kanbanCode = fmt.Sprintf(`        var kanbanColumns []viewmodels.CardColumnData
+        bucket := map[string]*viewmodels.CardColumnData{}
+        var bucketOrder []string
+        {
+            optLabels := map[string]string{%s}
+            for _, k := range []string{%s} {
+                bucket[k] = &viewmodels.CardColumnData{Key: k, Label: optLabels[k]}
+                bucketOrder = append(bucketOrder, k)
+            }
+        }
+        for _, item := range items {
+            key := viewmodels.OptionValue(item[%q])
+            if bucket[key] == nil {
+                bucket[key] = &viewmodels.CardColumnData{Key: key, Label: key}
+                bucketOrder = append(bucketOrder, key)
+            }
+            bucket[key].Items = append(bucket[key].Items, item)
+        }
+        for _, k := range bucketOrder {
+            kanbanColumns = append(kanbanColumns, *bucket[k])
+        }
+`, strings.Join(optLabelMap, ", "), quoteList(optKeys), card.KanbanField)
+		kanbanColumnsExpr = "kanbanColumns"
+	}
+
+	itemsAssignment := `        for rows.Next() {
+            ` + scanFields(fieldNames) + `
+            items = append(items, item)
+        }
+`
+
+	code := fmt.Sprintf(`package %s
+
+import (
+    "database/sql"
+    "fmt"
+    "math"
+    "net/http"
+    "strconv"
+    "strings"
+
+    %q
+    %q
+    layoutviews %q
+)
+
+func Cards(db *sql.DB) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+        if page < 1 {
+            page = 1
+        }
+        perPage := %d
+        offset := (page - 1) * perPage
+
+        search := r.URL.Query().Get("search")
+        sort := r.URL.Query().Get("sort")
+        order := r.URL.Query().Get("order")
+        if order == "" {
+            order = "asc"
+        }
+
+%s
+%s
+        var items []map[string]interface{}
+%s
+        totalPages := int(math.Ceil(float64(total) / float64(perPage)))
+
+%s
+        vd := &viewmodels.CardData{
+            Items:          items,
+            Page:           page,
+            PerPage:        perPage,
+            Total:          int(total),
+            TotalPages:     totalPages,
+            Search:         search,
+            Sort:           sort,
+            Order:          order,
+            Fields: []viewmodels.ColumnDef{
+%s,
+            },
+            Columns:       %d,
+            Rows:          %d,
+            Kanban:        %t,
+            KanbanField:   %q,
+            KanbanColumns: %s,
+            Resource:      %q,
+            PanelPath:     %q,
+        }
+
+        layoutviews.Base(%q, %q, views.%sCards(vd)).Render(r.Context(), w)
+    }
+}
+`, pkgName,
+		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
+		g.moduleImport("internal/views/layout"),
+		perPage,
+		sortStmt,
+		queryCore,
+		itemsAssignment,
+		kanbanCode,
+		fieldDefsStr(card.Fields),
+		cols, rows, kanban, card.KanbanField,
+		kanbanColumnsExpr,
+		r.Name, panelPath, resourceTitle(r), panelPath, r.Name)
+
+	return os.WriteFile(filepath.Join(dir, "card.go"), []byte(code), 0644)
+}
+
 // generateDetailHandler writes detail.go for a resource: a Detail(db) handler
 // that parses the :id path parameter, calls the SQLC detail query, maps the
 // returned struct fields into a map and renders the detail view.
@@ -397,6 +680,7 @@ import (
     %q
     %q
     %q
+    layoutviews %q
 )
 
 func Detail(db *sql.DB) http.HandlerFunc {
@@ -426,16 +710,19 @@ func Detail(db *sql.DB) http.HandlerFunc {
             PanelPath: %q,
         }
 
-        views.%sDetail(vd).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, views.%sDetail(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
+		g.moduleImport("internal/views/layout"),
 		queryName,
 		g.idGoType(),
 		detailFieldMap(r.Detail.Fields),
 		fieldDefsFromDetail(r.Detail.Fields),
 		r.Name,
+		g.Config.Panel.Path,
+		resourceTitle(r),
 		g.Config.Panel.Path,
 		r.Name)
 
@@ -751,6 +1038,7 @@ import (
 %s%s
     %q
     %q
+    layoutviews %q
 )
 
 func Create(db *sql.DB) http.HandlerFunc {
@@ -768,7 +1056,7 @@ func Create(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  true,
             }
-            views.%sForm(vd).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -798,10 +1086,13 @@ func Create(db *sql.DB) http.HandlerFunc {
 		bcryptImport,
 		fileImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
+		g.moduleImport("internal/views/layout"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
 		listPath,
 		r.Name,
+		g.Config.Panel.Path,
+		resourceTitle(r),
 		g.Config.Panel.Path,
 		r.Name,
 		formParseCode,
@@ -985,6 +1276,7 @@ import (
     %q
     %q
     %q
+    layoutviews %q
 )
 
 func Update(db *sql.DB) http.HandlerFunc {
@@ -1018,7 +1310,7 @@ func Update(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  false,
             }
-            views.%sForm(vd).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -1047,6 +1339,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 %s`, pkgName,
 		fileImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
+		g.moduleImport("internal/views/layout"),
 		populateQuery,
 		g.idGoType(),
 		strings.Join(populateFields, "\n"),
@@ -1054,6 +1347,8 @@ func Update(db *sql.DB) http.HandlerFunc {
 		formFieldDefsWithOpts(paramFields, optVars),
 		fmt.Sprintf("%s/%s/%%d", g.Config.Panel.Path, pkgName),
 		r.Name,
+		g.Config.Panel.Path,
+		resourceTitle(r),
 		g.Config.Panel.Path,
 		r.Name,
 		formParseCode,

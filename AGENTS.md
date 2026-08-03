@@ -13,6 +13,7 @@ Single binary at `cmd/go-fila/main.go` — stdlib flags, no cobra/viper.
 
 ```sh
 go-fila init            # writes go-fila.yaml + sql/{migrations,queries}/
+go-fila init --demo     # same + seeds sqlite demo DB (roles/users/customers/products/orders/orderlines); login admin@demo.test / admin
 go-fila generate        # generates admin/ app, runs sqlc + tailwind (non-fatal)
 cd admin
 make                    # builds the dashboard binary + assets
@@ -65,7 +66,7 @@ mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **
 4. `generateMain()` (`main.go`) — `main.go` with driver-aware `sql.Open`
 5. `generateRouter()` (`router.go`) — chi routes + RBAC wiring, page handlers
 6. `generateAuth()` (`auth.go`) — login/logout, session, RBAC middleware
-7. `generateResource()` → per-resource handlers (`handler.go`): list, detail, create, update, **delete, action, CSV export**
+7. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, CSV export**
 8. `generatePage()` — page handlers with widget DB queries
 9. `generateViews()` (`templ.go`) — all `.templ` views
 10. `generateGoMod()` (`mod.go`, declares the templ `tool` directive), `generateMakefile()` (`makefile.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
@@ -77,6 +78,7 @@ All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 | Operation | SQL approach |
 |---|---|
 | List | Raw SQL with dynamic WHERE/ORDER BY/LIMIT |
+| Card | Raw SQL identical to list; `LIMIT = Rows*Columns`, grouped into kanban columns |
 | Detail | SQLC function (`data.GetUser(db, int64(id))`) |
 | Create POST | Raw SQL INSERT via `db.ExecContext` |
 | Update GET | SQLC populate query |
@@ -89,10 +91,17 @@ Create/update avoid SQLC params because `r.FormValue` returns `string` but SQLC 
 
 Detail/update SQLC calls must cast the id to `idGoType()` — sqlite ids are `int64`, postgres `int32`. A literal `int32(id)` breaks the sqlite build.
 
+## Card view (`card` section)
+
+Optional per-resource view at `GET /{panel}/{resource}/cards` (reachable via a "Cards" button on the list view). Fields reuse the form `Field` type. `columns` (X = cards/row) and `rows` (Y = rows/page) define `per_page = X*Y`; pagination + search mirror the list handler (driver-aware, `LIKE`/`ILIKE`). When `card.kanban_field` names a **select** field, the handler groups rows into `KanbanColumns` via `viewmodels.OptionValue(item[field])` instead of a grid — `g.Card.Kanban` flips the shortcut in `cards.templ` (grid vs. board). The grid templ hardcodes `lg:grid-cols-{Columns}`; kanban buckets are keyed by the select's option keys plus any extra row values discovered at request time.
+
+### Field renderer for `gps`
+`renderCell` maps `gps` → `@renderGPS` and the form emits a text input with `lat, lng` placeholder; `renderGPS` renders a link out to Google Maps. Registering a new field type means updating BOTH `renderCell`'s switch and the form-input switch in `templ.go`, plus `FieldTypes` in `types/field.go`.
+
 ## Critical gotchas
 
 ### Format specifier counting in Sprintf
-Every `%s`/`%q`/`%d` must have a matching arg. `%%` is escaped (produce `%` in output, no arg consumed). A mismatch silently produces garbled Go source. `buildOptionsLoader`, `preHashCode`, and `fileImport` insertions are common drift points.
+Every `%s`/`%q`/`%d` must have a matching arg. `%%` is escaped (produce `%` in output, no arg consumed). A mismatch silently produces garbled Go source (e.g. `%!s(MISSING)` literal in emitted templ). This is especially dangerous when a templ substring is built with its own `fmt.Sprintf` and then inserted into a parent one — any `%v`/`%d`/`%s` **inside** emitted `fmt.Sprintf(...)` calls must be doubled (`%%v`) in the generator source. `buildOptionsLoader`, `preHashCode`, `fileImport` insertions, and the `cardBody`/`actions`/`gridView`/`kanbanView` strings in `templ.go` are common drift points.
 
 ### `snakeToPascal` special-cases `id`
 - `id` → `ID`
@@ -144,6 +153,12 @@ A page with `default: true` gets `r.Get("/", handler)` **and** `r.Get(pagePath, 
 
 ### Action switch cases need a block scope
 Each `case "name":` body is wrapped in `{ }` — a bare case body followed by `default:` is a syntax error in the generated `actions.go`.
+
+### Every HTML view must be wrapped in `layoutviews.Base(...)`
+Page handlers wrap `pageviews.X(pd)` in `layoutviews.Base(title, panelPath, ...).Render(r.Context(), w)`. Resource handlers (list, cards, detail, create form GET, update form GET) MUST do the same — a bare `views.XList(vd).Render(r.Context(), w)` renders a fragment with **no** `<html>`/`<head>`/CSS link/sidebar/topbar, so the page appears completely unstyled. All five render call sites in `handler.go` (list.go, card.go, detail.go, create.go, update.go) use `layoutviews.Base(resourceTitle(r), g.Config.Panel.Path, views.Xxx(vd)).Render(...)`, and each generated file imports `layoutviews "…/internal/views/layout"`. `resourceTitle(r)` returns `r.Label` (falls back to `r.Name`) and is defined in handler.go. Symptom: login + pages look fine, but every resource list/form/detail renders raw/unstyled — that means a render call is missing the `layoutviews.Base(...)` wrapper.
+
+### Sidebar layout: no `fixed` sidebar + `ml-64` on content
+The old base layout used `<aside class="w-64 … fixed left-0 top-0">` with `<main>` having no offset — since the sidebar is `position: fixed` it is out of the flex flow and the content (which had no `ml-64`, only the topbar did) slid underneath the nav, overlapping it. Correct layout (in `templ.go` `Base`): the sidebar is a normal flex child `<div class="flex h-screen"><aside class="w-64 … h-screen overflow-y-auto shrink-0">` next to a `<div class="flex-1 flex flex-col">` column holding the sticky topbar and `<main class="flex-1 overflow-y-auto p-6">`. No `ml-64` anywhere. Any new layout change must keep the sidebar in-flow (or add the margin offset to BOTH topbar and main) or the nav overlaps content again.
 
 ## SQL queries (`options_query`)
 

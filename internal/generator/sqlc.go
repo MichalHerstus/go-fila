@@ -76,11 +76,11 @@ func findSQLCQuery(queryDir string, queryName string) string {
 				var body strings.Builder
 				for j := i + 1; j < len(lines); j++ {
 					next := strings.TrimSpace(lines[j])
-					if next == "" || strings.HasPrefix(next, "--") {
-						continue
-					}
 					if strings.HasPrefix(next, "-- name:") || strings.HasPrefix(next, "--name:") {
 						break
+					}
+					if next == "" || strings.HasPrefix(next, "--") {
+						continue
 					}
 					body.WriteString(next + " ")
 				}
