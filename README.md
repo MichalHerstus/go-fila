@@ -45,6 +45,7 @@ The `init` command fails if files already exist unless `--force` is passed.
 
 ```
 go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
+                       with --demo flag it generates fully functional demo dashboard including data 
 go-fila generate       Generate admin panel Go application
 go-fila validate       Validate YAML + verify SQLC references
 go-fila version        Print version
