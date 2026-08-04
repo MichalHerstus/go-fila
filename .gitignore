@@ -3,3 +3,4 @@ admin/
 .vscode/
 .idea/
 *.log
+session-*.md
