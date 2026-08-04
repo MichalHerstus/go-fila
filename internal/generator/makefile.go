@@ -28,7 +28,11 @@ BINARY := ` + binary + `
 # Listen port for the dashboard (passed to the binary as --port).
 PORT ?= 8080
 
-.PHONY: all build deps css sqlc templ tidy run clean
+# Release archive name (binary name + date stamp). Override to customize:
+#   make package PACKAGE_NAME=my-release
+PACKAGE_NAME ?= $(BINARY)-$(shell date +%Y%m%d)
+
+.PHONY: all build deps css sqlc templ tidy run package clean
 
 all: build
 
@@ -63,9 +67,21 @@ tidy:
 run: build
 	./$(BINARY) --port $(PORT)
 
-# Remove the built binary.
+# Package the binary and every file the dashboard needs at runtime (static
+# assets incl. uploads, sql/ migrations and the sqlite data/ dir when present)
+# into a tar.gz archive for deployment. Extract it on the target machine and
+# run the binary from the extracted directory (the sqlite DSN is relative).
+package: build
+	rm -rf $(PACKAGE_NAME)
+	mkdir -p $(PACKAGE_NAME)
+	cp -r $(BINARY) static $(PACKAGE_NAME)/
+	for d in sql data; do if [ -d $$d ]; then cp -r $$d $(PACKAGE_NAME)/; fi; done
+	tar czf $(PACKAGE_NAME).tar.gz $(PACKAGE_NAME)
+	rm -rf $(PACKAGE_NAME)
+
+# Remove the built binary and any release archive.
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(PACKAGE_NAME).tar.gz
 `
 	return os.WriteFile(filepath.Join(g.OutDir, "Makefile"), []byte(makefile), 0644)
 }

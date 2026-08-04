@@ -35,11 +35,27 @@ make build                    # builds the dashboard binary + assets
 make run
 
 # Individual steps: make deps / css / sqlc / templ / tidy / clean
+# Deploy: make package (tar.gz of binary + static + sql + data), extract on
+# the target machine and run the binary from the extracted dir.
 ```
 
 The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `npm install` → `npm run build:css` → `npm run copy:chartjs` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `npm install`, `npm run build:css`, `npm run copy:chartjs`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
 
 Chart.js is vendored into `static/js/chart.js` at build time (pinned to `^4.4.1`; `copy:chartjs` copies `node_modules/chart.js/dist/chart.umd.js`), so the running dashboard serves charts locally and needs **no internet at runtime**. A plain `go build` skips the npm steps, so run `make` (or `make css`) at least once or `/static/js/chart.js` will 404.
+
+## Deployment
+
+`make package` bundles everything the dashboard needs to run into a single `tar.gz` release archive: the binary, the built `static/` assets (CSS, Chart.js, and any uploaded files), plus `sql/` migrations and the sqlite `data/` directory when present. The archive is named `<binary>-<date>.tar.gz` (override with `make package PACKAGE_NAME=my-release`).
+
+```sh
+make package
+scp admin-20260804.tar.gz user@target:/
+# on the target machine
+tar xzf admin-20260804.tar.gz && cd admin-20260804
+./admin --port 8080
+```
+
+Run the binary from the extracted directory — the sqlite DSN (`file:./data/admin.db`) is relative to the working directory. For postgres deployments, configure the database on the server and pass the DSN via the `DATABASE_URL` env var (or keep the one baked in at generation time).
 
 The `init` command fails if files already exist unless `--force` is passed.
 

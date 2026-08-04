@@ -19,7 +19,7 @@ cd admin
 make                    # builds the dashboard binary + assets
 ```
 
-The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `deps`, `css`, `sqlc`, `templ`, `tidy` targets, plus `run` (build + serve) and `clean`.
+The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `deps`, `css`, `sqlc`, `templ`, `tidy` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`.
 
 Equivalent manual steps:
 
