@@ -25,6 +25,9 @@ func (g *Generator) generateMakefile() error {
 # Binary name (module name of the generated project).
 BINARY := ` + binary + `
 
+# Listen port for the dashboard (passed to the binary as --port).
+PORT ?= 8080
+
 .PHONY: all build deps css sqlc templ tidy run clean
 
 all: build
@@ -33,13 +36,15 @@ all: build
 build: deps css sqlc templ
 	go build -o $(BINARY) .
 
-# Install the npm dependencies (tailwindcss).
+# Install the npm dependencies (tailwindcss, chart.js).
 deps:
 	npm install
 
-# Build the Tailwind CSS into static/css/styles.css.
+# Build the Tailwind CSS into static/css/styles.css and vendor Chart.js
+# into static/js/chart.js (so the dashboard needs no CDN at runtime).
 css: deps
 	npm run build:css
+	npm run copy:chartjs
 
 # Regenerate the sqlc query code into internal/data.
 sqlc:
@@ -56,7 +61,7 @@ tidy:
 
 # Build and run the dashboard server.
 run: build
-	./$(BINARY)
+	./$(BINARY) --port $(PORT)
 
 # Remove the built binary.
 clean:

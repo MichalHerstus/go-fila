@@ -843,7 +843,7 @@ func (g *Generator) detectGridColumns(widgets []types.Widget) int {
 }
 
 // generateLayoutViews writes base.templ into internal/views/layout: the Base
-// layout document (with the Chart.js CDN script and auto-rendering JS), the
+// layout document (with the vendored Chart.js script and auto-rendering JS), the
 // sidebar with the navigation groups sorted by their sort value, the topbar
 // with the logout link, and the iconNav SVG helper.
 // Returns: an error on write failure.
@@ -893,7 +893,7 @@ templ Base(title string, panelPath string, children templ.Component) {
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>{ title }</title>
         <link href="/static/css/styles.css" rel="stylesheet" />
-        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script src="/static/js/chart.js"></script>
     </head>
     <body class="bg-gray-50">
         <div class="flex h-screen">

@@ -50,6 +50,9 @@ Driver comes from the first `connections:.*.driver` value (default `"postgres"`)
 
 Helpers in `generator.go`: `driver()`, `isSQLite()`, `placeholder(n)`, `likeOp()`, `idGoType()`. **`placeholder()` is still unused** — create/update/delete handlers hardcode `$N` (works on sqlite since mattn binds positionally). Only the list handler is driver-aware.
 
+### Generated main.go: DB sanity check runs BEFORE binding the port
+`generateMain()` (`main.go`) emits `sql.Open` → `db.Ping()` → **`SELECT 1 FROM {auth.table} LIMIT 1`** (`sql.ErrNoRows` treated as OK) → only then `net.Listen` + `srv.Serve`. Rationale: mattn/go-sqlite3 silently **creates an empty DB file** when the file is missing, so `db.Ping()` succeeds against a "not found" database and the dashboard would otherwise bind the port and run broken (`no such table`) while holding it — a restart then hits `address already in use`. The sanity query makes a missing/uninitialized DB a fatal startup error **before** the port is bound. The listen port is resolved as `--port` flag → `ADDR` env → `:8080` (`flag.Int("port", 0, ...)`; stdlib `flag` accepts both `--port 9090` and `-port 9090`); the emitted `Makefile` `run` target passes `--port $(PORT)` (`PORT ?= 8080`). Generated server also does graceful shutdown on SIGINT/SIGTERM (`signal.NotifyContext` → `srv.Shutdown`) and logs a `is another dashboard instance already running?` hint on bind failure. Keep the bind AFTER the DB checks — ordering is what prevents a broken DB from occupying the port.
+
 ### sqlite list handler arg order (critical)
 mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **search args first, then `LIMIT ? OFFSET ?`**, and uses `LIKE`. The postgres branch appends `perPage, offset` first with `ILIKE $N` + `LIMIT $1 OFFSET $2`. Mixing these up silently returns wrong rows on sqlite.
 
@@ -185,7 +188,9 @@ When any form field has type `file` or `image`:
 
 ## Pages & widgets
 
-Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Chart.js CDN), `table`, `list`, `html`. Each queries DB via raw SQL at request time. Chart data serialized to JSON in `data-chart-labels` / `data-chart-values` attributes.
+Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Chart.js), `table`, `list`, `html`. Each queries DB via raw SQL at request time. Chart data serialized to JSON in `data-chart-labels` / `data-chart-values` attributes.
+
+Chart.js is **vendored at build time** — no CDN, runtime is offline. The generated `package.json` declares `chart.js` (pinned `^4.4.1`) in `devDependencies` and a `copy:chartjs` script (`mkdir -p static/js && cp node_modules/chart.js/dist/chart.umd.js static/js/chart.js`). The Makefile `css` target runs `npm run build:css` **and** `npm run copy:chartjs`; `templ.go` `Base` references `/static/js/chart.js`. Version is pinned to 4.4.x because 4.5+ renamed the UMD bundle to `chart.umd.min.js`. `go-fila generate` itself never runs npm, so chart.js is only copied by the `make`/`css` step — a plain `go build` (without `make`) will 404 on chart.js.
 
 ## Repo layout
 

@@ -54,10 +54,12 @@ module.exports = {
 	packageJSON := `{
   "private": true,
   "scripts": {
-    "build:css": "tailwindcss -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify"
+    "build:css": "tailwindcss -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify",
+    "copy:chartjs": "mkdir -p static/js && cp node_modules/chart.js/dist/chart.umd.js static/js/chart.js"
   },
   "devDependencies": {
-    "tailwindcss": "^3.4.0"
+    "tailwindcss": "^3.4.0",
+    "chart.js": "^4.4.1"
   }
 }
 `

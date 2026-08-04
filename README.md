@@ -8,7 +8,7 @@
 |---|---|---|
 | [Go](https://go.dev/dl/) 1.26+ | Running go-fila + building generated app | |
 | [SQLC](https://docs.sqlc.dev/en/latest/overview/install.html) | Generating the data layer (`internal/data/`) | Generator runs it, failure is non-fatal |
-| [Node.js](https://nodejs.org/) + npm | Building Tailwind CSS in the generated app | `make css` / `npm install && npm run build:css` in the output dir |
+| [Node.js](https://nodejs.org/) + npm | Building Tailwind CSS + vendoring Chart.js in the generated app | `make css` / `npm install && npm run build:css && npm run copy:chartjs` in the output dir |
 | [Templ](https://templ.dev/) | Compiling `.templ` files in the generated app | Optional — the generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` is handled by the Go toolchain |
 
 ## Quick start
@@ -37,7 +37,9 @@ make run
 # Individual steps: make deps / css / sqlc / templ / tidy / clean
 ```
 
-The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `npm install`, `npm run build:css`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
+The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `npm install` → `npm run build:css` → `npm run copy:chartjs` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `npm install`, `npm run build:css`, `npm run copy:chartjs`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
+
+Chart.js is vendored into `static/js/chart.js` at build time (pinned to `^4.4.1`; `copy:chartjs` copies `node_modules/chart.js/dist/chart.umd.js`), so the running dashboard serves charts locally and needs **no internet at runtime**. A plain `go build` skips the npm steps, so run `make` (or `make css`) at least once or `/static/js/chart.js` will 404.
 
 The `init` command fails if files already exist unless `--force` is passed.
 
