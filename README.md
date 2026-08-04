@@ -17,9 +17,13 @@
 # Install go-fila
 go install github.com/go-fila/go-fila/cmd/go-fila@latest
 
-# Scaffold a project
+# Option A: Scaffold from scratch
 mkdir my-admin && cd my-admin
 go-fila init                  # writes go-fila.yaml + sql/{migrations,queries}/
+
+# Option B: Introspect an existing database
+go-fila init --db "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
+go-fila init --db "./mydata.db"                    # SQLite
 
 # Write your SQL schema and queries in sql/
 # Edit go-fila.yaml to configure panel, resources, pages, auth
@@ -64,6 +68,8 @@ The `init` command fails if files already exist unless `--force` is passed.
 ```
 go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
                        with --demo flag it generates fully functional demo dashboard including data 
+                       with --db flag it introspects an existing DB and generates config + SQL
+go-fila edit           Interactive YAML config editor (TUI)
 go-fila generate       Generate admin panel Go application
 go-fila validate       Validate YAML + verify SQLC references
 go-fila version        Print version
@@ -71,6 +77,7 @@ go-fila version        Print version
 Flags:
   --config, -c   Config file path (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
+  --db DSN       Introspect database (postgres://... or sqlite file path)
   --force        Overwrite existing files
   --verbose      Verbose logging
 ```

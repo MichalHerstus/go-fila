@@ -14,10 +14,42 @@ Single binary at `cmd/go-fila/main.go` — stdlib flags, no cobra/viper.
 ```sh
 go-fila init            # writes go-fila.yaml + sql/{migrations,queries}/
 go-fila init --demo     # same + seeds sqlite demo DB (roles/users/customers/products/orders/orderlines); login admin@demo.test / admin
+go-fila init --db DSN   # introspects existing DB, generates go-fila.yaml + SQL files from discovered tables
+go-fila edit            # interactive TUI editor for go-fila.yaml
 go-fila generate        # generates admin/ app, runs sqlc + tailwind (non-fatal)
 cd admin
 make                    # builds the dashboard binary + assets
 ```
+
+### `init --db` — Database introspection
+
+`go-fila init --db {connection_string}` connects to an existing database, introspects its schema (tables, columns, primary keys, foreign keys), and generates `go-fila.yaml` + SQL migration/query files from the discovered tables. Works for both SQLite and Postgres.
+
+**Driver detection:** DSN prefix `postgres://` or `postgresql://` → postgres; everything else (file path, `:memory:`) → sqlite. Uses `github.com/jackc/pgx/v5/stdlib` for postgres and `modernc.org/sqlite` for sqlite.
+
+**What it does:**
+1. Connects to the DB, introspects schema via `information_schema` (postgres) or `PRAGMA` (sqlite)
+2. If `users`/`roles` tables are missing, creates them with default roles (admin/manager/user) and inserts an admin user (`admin@admin.test` / `admin`, bcrypt-hashed)
+3. If `users`/`roles` already exist with data, respects them as-is (no admin user inserted)
+4. Generates `go-fila.yaml` with a resource per table (excluding `users`/`roles`) — list/detail/form sections, FK relation fields with `options_query`
+5. Generates SQLC query files with LEFT JOINs for FK label display
+6. Generates `schema.sql` only when auth tables were created
+
+**Type mapping:** `int`/`serial` → `integer`, `varchar`/`text` → `string`, `bool` → `boolean`, `timestamp`/`date` → `datetime`, `real`/`float`/`numeric` → `float`, `json`/`jsonb` → `json`, `bytea`/`blob` → `file`.
+
+**FK handling:** Foreign keys become `relation` fields in forms with `options_query: List{ForeignTable}`. In list views, FK columns are replaced with LEFT JOINs showing the foreign table's label column (preferred: `name`, then `title`, then `label`, then first non-PK text column).
+
+**Auth table DDL:** Postgres uses `SERIAL`/`TIMESTAMPTZ`; SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`/`datetime('now')`.
+
+Flags: `init --db <dsn> --config <yaml> --out <dir> --force`.
+
+### `edit` — Interactive YAML config editor
+
+`go-fila edit` opens the YAML config in a terminal UI built with `charmbracelet/huh` (Bubble Tea). Navigation uses a stack-based model: push screens on enter, pop on Esc.
+
+**Supported blocks:** Panel (5 groups), Connections, SQLC, Auth, Navigation (groups + items), Resources (basic/list/detail/card/form/actions/policies), Pages (widgets).
+
+**Architecture:** `cmd/go-fila/editor/` package with stack-based navigation. `EditorModel` wraps `[]tea.Model` (the screen stack). Each screen implements `isDone()` + `popScreen()` (the `screen` interface). huh forms bind directly to config fields for in-place editing. The `s` key saves (`yaml.Marshal` → write file), `q` discards.
 
 The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `deps`, `css`, `sqlc`, `templ`, `tidy` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`.
 
@@ -197,6 +229,10 @@ Chart.js is **vendored at build time** — no CDN, runtime is offline. The gener
 | Path | Purpose |
 |---|---|
 | `cmd/go-fila/main.go` | CLI entry (init/generate/validate/version), hand-rolled flags |
+| `cmd/go-fila/demo.go` | `init --demo` — full-featured sqlite demo scaffolding + seeding |
+| `cmd/go-fila/introspect.go` | `init --db` — DB introspection, auth table creation, YAML/SQL generation |
+| `cmd/go-fila/edit.go` | `edit` — entry point for interactive YAML config editor |
+| `cmd/go-fila/editor/` | TUI editor: stack-based navigation, huh forms, list managers (10 files) |
 | `internal/types/` | YAML-tagged Go structs for config schema (4 files: config.go, panel.go, resource.go, field.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
 | `internal/generator/` | Code generation pipeline (11 files, see above) |

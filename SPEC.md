@@ -12,6 +12,8 @@ User writes:
   ├── sql/schema.sql       (DDL — CREATE TABLE)
   └── sql/queries/*.sql    (annotated SQLC queries)
 
+  OR uses `init --db` to auto-generate all of the above from an existing database.
+
 go-fila generate:
   ├── runs sqlc generate              → internal/data/ (Go structs + query fns)
   ├── generates internal/panel/       → handlers calling SQLC functions
@@ -482,6 +484,8 @@ go-fila — YAML-driven admin panel generator
 Usage:
   go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
   go-fila init --demo    Scaffold + seed sqlite demo DB (roles/users/customers/products/orders/orderlines)
+  go-fila init --db DSN  Introspect existing DB, generate config + SQL from discovered tables
+  go-fila edit           Interactive YAML config editor (TUI)
   go-fila generate       Run SQLC + generate admin panel Go application
   go-fila validate       Validate YAML + verify SQLC function references resolve
   go-fila version        Print version information
@@ -489,10 +493,24 @@ Usage:
 Flags:
   --config, -c   Path to YAML config file (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
+  --db DSN       Introspect database (postgres://... or sqlite file path)
   --force        Overwrite existing files
   --demo         With init: seed sqlite demo DB; login admin@demo.test / admin
   --verbose      Enable verbose logging
 ```
+
+### Database Introspection (`--db`)
+
+`go-fila init --db {dsn}` connects to an existing database, introspects its schema, and generates everything needed to build an admin panel:
+
+1. **Driver detection:** `postgres://`/`postgresql://` DSN → postgres driver (via `pgx/v5`); everything else → sqlite (via `modernc.org/sqlite`)
+2. **Schema introspection:** discovers tables, columns (types, nullability, defaults), primary keys, and foreign keys
+3. **Auth table management:** if `users`/`roles` tables are missing, creates them with driver-appropriate DDL and seeds default roles + admin user (`admin@admin.test` / `admin`, bcrypt-hashed). If they already exist with data, they are left untouched.
+4. **YAML generation:** one `Resource` per discovered table (excluding `users`/`roles`) with list/detail/form sections
+5. **SQL generation:** SQLC-annotated queries per table — List (with LEFT JOINs for FK labels), Count, Get, Create, Update, Delete — plus options queries for FK relation fields
+6. **Type mapping:** database column types are mapped to go-fila field types (e.g. `varchar` → `string`, `int` → `integer`, `timestamp` → `datetime`)
+
+**Foreign key handling:** FK columns become `relation` fields in forms with `options_query`. In list views, FK columns are replaced with LEFT JOINs showing the foreign table's label column (auto-detected: prefers `name`, then `title`, then `label`, then first non-PK text column).
 
 ---
 
@@ -634,7 +652,11 @@ go-fila/
 ├── go.mod
 ├── cmd/
 │   └── go-fila/
-│       └── main.go            # CLI entry point
+│       ├── main.go            # CLI entry point (init/generate/validate/version)
+│       ├── demo.go            # init --demo — full sqlite demo scaffolding + seeding
+│       ├── introspect.go      # init --db — DB introspection, auth table creation, YAML/SQL generation
+│       ├── edit.go            # edit — entry point for interactive YAML config editor
+│       └── editor/            # TUI editor: stack-based navigation, huh forms, list managers
 ├── internal/
 │   ├── parser/                # YAML parsing & validation
 │   │   ├── schema.go
