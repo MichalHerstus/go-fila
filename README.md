@@ -23,7 +23,8 @@ go-fila init                  # writes go-fila.yaml + sql/{migrations,queries}/
 
 # Option B: Introspect an existing database
 go-fila init --db "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
-go-fila init --db "./mydata.db"                    # SQLite
+go-fila init --db "./mydata.db"                                          # SQLite
+go-fila init --db "sqlserver://user:pass@localhost:1433?database=mydb"   # MSSQL
 
 # Write your SQL schema and queries in sql/
 # Edit go-fila.yaml to configure panel, resources, pages, auth
@@ -59,7 +60,7 @@ tar xzf admin-20260804.tar.gz && cd admin-20260804
 ./admin --port 8080
 ```
 
-Run the binary from the extracted directory — the sqlite DSN (`file:./data/admin.db`) is relative to the working directory. For postgres deployments, configure the database on the server and pass the DSN via the `DATABASE_URL` env var (or keep the one baked in at generation time).
+Run the binary from the extracted directory — the sqlite DSN (`file:./data/admin.db`) is relative to the working directory. For postgres/MSSQL deployments, configure the database on the server and pass the DSN via the `DATABASE_URL` env var (or keep the one baked in at generation time).
 
 The `init` command fails if files already exist unless `--force` is passed.
 
@@ -77,7 +78,7 @@ go-fila version        Print version
 Flags:
   --config, -c   Config file path (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
-  --db DSN       Introspect database (postgres://... or sqlite file path)
+  --db DSN       Introspect database (postgres://..., sqlserver://... or sqlite file path)
   --force        Overwrite existing files
   --verbose      Verbose logging
 ```
@@ -216,7 +217,7 @@ panel:
 ```yaml
 connections:
   default:             # map key — arbitrary name; only the FIRST entry is used
-    driver: postgres   # "postgres" (default) | "sqlite" | "sqlite3"
+    driver: postgres   # "postgres" (default) | "sqlite" | "sqlite3" | "mssql" | "sqlserver"
     dsn: "postgres://user:pass@localhost:5432/db?sslmode=disable"
     pool:              # parsed but NOT applied to the generated app yet
       max_open: 25
@@ -224,9 +225,19 @@ connections:
       lifetime: 5m
 ```
 
-- `driver` determines sqlc's engine, the `sql.Open` driver, LIKE operator, bind placeholders, and SQLC id type throughout generation. If every entry omits `driver`, it defaults to `postgres`. `sqlite`/`sqlite3` enable the SQLite branch.
+- `driver` determines sqlc's engine, the `sql.Open` driver, LIKE operator, bind placeholders, and SQLC id type throughout generation. If every entry omits `driver`, it defaults to `postgres`. `sqlite`/`sqlite3` enable the SQLite branch; `mssql`/`sqlserver` enable the MSSQL branch.
 - `dsn` is embedded in the generated `main.go`. At runtime, the `DATABASE_URL` environment variable overrides it. A SQLite example: `file:./data/admin.db`.
-- SQLite requires `github.com/mattn/go-sqlite3`, which is added to the generated `go.mod` automatically.
+- SQLite requires `github.com/mattn/go-sqlite3`; MSSQL requires `github.com/microsoft/go-mssqldb`. The matching driver import is added to the generated `go.mod` automatically.
+
+### MSSQL support
+
+MSSQL is a first-class database driver for both `init --db` introspection and generated apps.
+
+- **Config & detection**: set `driver: mssql` (or `sqlserver`) in the first `connections` entry, or pass a `sqlserver://` / `mssql://` DSN to `init --db`. DSN prefixes decide the driver: `sqlserver://`/`mssql://` → mssql, `postgres://`/`postgresql://` → postgres, anything else (file path, `:memory:`) → sqlite.
+- **Generated app**: opens the DB with `github.com/microsoft/go-mssqldb`. The generated `sqlc.yaml` uses the `postgresql` engine with a postgres-dialect `schema.sql` (emitted by the generator; never executed against the DB) so sqlc can infer types, and create/update SQL uses `RETURNING` clauses.
+- **Query dialect**: `LIKE` (case-insensitive default collation) instead of `ILIKE`; `$N` bind placeholders (go-mssqldb loose mode maps them to `@pN`); SQLC ids default to `int32`, or `int64` when a `bigint` primary key sets `id_type: int64`.
+- **Pagination**: list/card queries use `OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY`, which requires an ORDER BY — when no sort is configured the generator emits `ORDER BY (SELECT NULL)`.
+- **Introspection specifics**: schema discovery uses INFORMATION_SCHEMA + `sys.foreign_keys`; tables without a declared PRIMARY KEY fall back to their identity `ID` column (emitted as `id_column: ID`). PascalCase column names are normalized the same way sqlc lowercases them (`CeleJmeno` → `Celejmeno`), and `table:`/`id_type:`/`id_column:` overrides are emitted whenever the real schema doesn't match the convention.
 
 ### SQLC
 
@@ -539,7 +550,7 @@ Widget types: `stat`, `stats_grid`, `chart`, `table`, `list`, `html`.
 
 Handlers use a consistent SQL approach:
 
-- **List**: Raw SQL with dynamic WHERE/ORDER BY/LIMIT — enables search, sort, pagination without SQLC parameter limitations
+- **List**: Raw SQL with dynamic WHERE/ORDER BY/LIMIT — enables search, sort, pagination without SQLC parameter limitations. The dialect is driver-aware: postgres uses `ILIKE` + `LIMIT $1 OFFSET $2`, sqlite binds positionally with `?` + `LIKE`, MSSQL uses `OFFSET … ROWS FETCH NEXT … ROWS ONLY`.
 - **Detail**: Calls a SQLC function (`data.GetUser(db, int64(id))`) — type-safe by ID
 - **Create**: Raw SQL INSERT via `db.ExecContext` — avoids SQLC typed structs since form values are strings
 - **Update GET**: SQLC populate query to pre-fill the edit form
@@ -553,7 +564,7 @@ Handlers use a consistent SQL approach:
 | Concern | Choice |
 |---|---|
 | Language | Go (stdlib `database/sql`) |
-| Data layer | SQLC |
+| Data layer | SQLC (PostgreSQL, SQLite, MSSQL) |
 | Frontend | Templ (compiled Go templates) |
 | CSS | Tailwind CSS |
 | Router | chi |
