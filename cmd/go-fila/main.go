@@ -61,7 +61,7 @@ Usage:
 Flags:
   --config, -c   Path to YAML config file (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
-  --db DSN       Introspect database (postgres://... or sqlite file path)
+  --db DSN       Introspect database (postgres://..., sqlserver://... or sqlite file path)
   --force        Overwrite existing files
   --verbose      Enable verbose logging
   --demo         Scaffold a populated sqlite demo project (init only)`)

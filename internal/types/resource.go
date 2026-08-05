@@ -11,6 +11,9 @@ type Resource struct {
 	Label    string        `yaml:"label"`
 	Icon     string        `yaml:"icon"`
 	Group    string        `yaml:"group"`
+	Table    string        `yaml:"table"`
+	IDType   string        `yaml:"id_type"`
+	IDColumn string        `yaml:"id_column"`
 	List     *ListConfig   `yaml:"list"`
 	Card     *CardConfig   `yaml:"card"`
 	Detail   *DetailConfig `yaml:"detail"`

@@ -23,7 +23,7 @@ make                    # builds the dashboard binary + assets
 
 ### `init --db` — Database introspection
 
-`go-fila init --db {connection_string}` connects to an existing database, introspects its schema (tables, columns, primary keys, foreign keys), and generates `go-fila.yaml` + SQL migration/query files from the discovered tables. Works for both SQLite and Postgres.
+`go-fila init --db {connection_string}` connects to an existing database, introspects its schema (tables, columns, primary keys, foreign keys), and generates `go-fila.yaml` + SQL migration/query files from the discovered tables. Works for SQLite, Postgres and MSSQL (MSSQL DSN prefix `sqlserver://` or `mssql://`; see "MSSQL-specific gotchas" below).
 
 **Driver detection:** DSN prefix `postgres://` or `postgresql://` → postgres; everything else (file path, `:memory:`) → sqlite. Uses `github.com/jackc/pgx/v5/stdlib` for postgres and `modernc.org/sqlite` for sqlite.
 
@@ -67,23 +67,35 @@ go mod tidy && go build -o admin .
 
 Flags: `generate --config <yaml> --out <dir> --force --verbose`. `--out` basename becomes the module name.
 
-## Driver support (postgres default, sqlite opt-in)
+## Driver support (postgres default, sqlite opt-in, mssql opt-in)
 
-Driver comes from the first `connections:.*.driver` value (default `"postgres"`); `isSQLite()` accepts `sqlite`/`sqlite3`. Per-driver differences the generator must handle:
+Driver comes from the first `connections:.*.driver` value (default `"postgres"`); `isSQLite()` accepts `sqlite`/`sqlite3`; `isMSSQL()` accepts `mssql`/`sqlserver`. Per-driver differences the generator must handle:
 
-| Concern | postgres | sqlite |
-|---|---|---|
-| sqlc.yaml `engine` | `postgresql` | `sqlite` |
-| `sql.Open` driver | `postgres` + blank-import sqlc pkg | `sqlite3` + `github.com/mattn/go-sqlite3` |
-| go.mod | — | adds `github.com/mattn/go-sqlite3 v1.14.24` |
-| LIKE operator | `ILIKE` | `LIKE` |
-| bind placeholders | `$N` | `?` (positional, SQL-text order) |
-| sqlc id type | `int32` | `int64` |
+| Concern | postgres | sqlite | mssql |
+|---|---|---|---|
+| sqlc.yaml `engine` | `postgresql` | `sqlite` | `postgresql` (postgres-dialect schema.sql is the sqlc input) |
+| `sql.Open` driver | `postgres` + blank-import sqlc pkg | `sqlite3` + `github.com/mattn/go-sqlite3` | `mssql` + `_ "github.com/microsoft/go-mssqldb"` |
+| go.mod | — | adds `github.com/mattn/go-sqlite3 v1.14.24` | adds `github.com/microsoft/go-mssqldb v1.10.0` |
+| LIKE operator | `ILIKE` | `LIKE` | `LIKE` (case-insensitive default collation) |
+| bind placeholders | `$N` | `?` (positional, SQL-text order) | `$N` (go-mssqldb loose mode maps `$N`→`@pN`) |
+| sqlc id type | `int32` | `int64` | `int32` (unless `id_type` overrides; bigint → `int64`) |
+| pagination | `LIMIT $1 OFFSET $2` | `LIMIT ? OFFSET ?` | `OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY` (REQUIRES an ORDER BY; no ORDER BY → emit `ORDER BY (SELECT NULL)`) |
 
-Helpers in `generator.go`: `driver()`, `isSQLite()`, `placeholder(n)`, `likeOp()`, `idGoType()`. **`placeholder()` is still unused** — create/update/delete handlers hardcode `$N` (works on sqlite since mattn binds positionally). Only the list handler is driver-aware.
+Helpers in `generator.go`: `driver()`, `isSQLite()`, `isMSSQL()`, `placeholder(n)`, `likeOp()`, `idGoType()`, `idGoTypeForResource(r)` (honors `id_type`), and `tableName(r)`/`idColumn(r)` in `handler.go` (honor `table`/`id_column` overrides). **`placeholder()` is still unused** — create/update/delete handlers hardcode `$N` (works on sqlite since mattn binds positionally, and on mssql via loose `$N` parsing). Only the list/card handlers are driver-aware.
+
+### MSSQL-specific gotchas
+
+- **`init --db` DSN**: prefix `sqlserver://` or `mssql://` → driver `mssql`. Introspection uses INFORMATION_SCHEMA + `sys.foreign_keys`, and `sys.columns.is_identity` for tables with no declared PRIMARY KEY (common on MSSQL line-of-business schemas — identity `ID` columns act as the key; they are marked `IsPrimaryKey` so routes key on them and INSERT/UPDATE omit them).
+- **sqlc must see postgres-dialect schema.sql**: `generateSchemaSQL()` now emits full DDL for ALL introspected tables (postgres dialect for postgres/mssql, sqlite dialect for sqlite). This is what lets sqlc infer types on mssql projects (and fixed pre-existing type inference for user tables on postgres). Never executed against the DB.
+- **`RETURNING` is emitted for mssql Create/Update** (driver != "sqlite") — the sqlc engine is `postgresql`, so this is required; the generated handlers use raw SQL at runtime anyway.
+- **MSSQL list/card COUNT query uses its own `$1..$N` numbering**: go-mssqldb validates arg count against the HIGHEST `$N` in the SQL, so the data-query clauses (`$3..`) cannot be reused for the count query — the emitted code builds a separate `countClauses` numbered from 1 and passes `args[2:]`.
+- **ORDER BY is omitted from generated list/options queries for mssql**: a derived table (the `options_query` wrapper) cannot have ORDER BY without TOP/OFFSET/FOR XML, and `TOP` cannot combine with `OFFSET` — so mssql list queries get `ORDER BY (SELECT NULL)` as a fallback only when no sort is set.
+- **MSSQL column names are PascalCase** (`CeleJmeno`, `ZamestnanecID`). sqlc lowercases the whole identifier and only splits on `_`, so go-fila's `snakeToPascal` lowercases input first: `CeleJmeno`→`Celejmeno`, `ZamestnanecID`→`Zamestnanecid`, `role_id`→`RoleID` (still). Row maps are keyed by the raw selected column name, so introspection emits `id_column: ID` when the key column isn't literally `id`.
+- **`table:` / `id_type:` / `id_column:` overrides** are emitted by introspection when the convention doesn't match the real schema (e.g. resource `Zamestnanec` → `table: Zamestnanec`; bigint PK → `id_type: int64`; `ID` column → `id_column: ID`). The generator's `tableName()`/`idColumn()`/`idGoTypeForResource()` fall back to the old conventions when the fields are absent.
+- Sanity check in generated main.go for mssql is `SELECT TOP 1 1 FROM {table}` (`TOP 1` replaces `LIMIT 1`).
 
 ### Generated main.go: DB sanity check runs BEFORE binding the port
-`generateMain()` (`main.go`) emits `sql.Open` → `db.Ping()` → **`SELECT 1 FROM {auth.table} LIMIT 1`** (`sql.ErrNoRows` treated as OK) → only then `net.Listen` + `srv.Serve`. Rationale: mattn/go-sqlite3 silently **creates an empty DB file** when the file is missing, so `db.Ping()` succeeds against a "not found" database and the dashboard would otherwise bind the port and run broken (`no such table`) while holding it — a restart then hits `address already in use`. The sanity query makes a missing/uninitialized DB a fatal startup error **before** the port is bound. The listen port is resolved as `--port` flag → `ADDR` env → `:8080` (`flag.Int("port", 0, ...)`; stdlib `flag` accepts both `--port 9090` and `-port 9090`); the emitted `Makefile` `run` target passes `--port $(PORT)` (`PORT ?= 8080`). Generated server also does graceful shutdown on SIGINT/SIGTERM (`signal.NotifyContext` → `srv.Shutdown`) and logs a `is another dashboard instance already running?` hint on bind failure. Keep the bind AFTER the DB checks — ordering is what prevents a broken DB from occupying the port.
+`generateMain()` (`main.go`) emits `sql.Open` → `db.Ping()` → **sanity query against `{auth.table}`** (mssql: `SELECT TOP 1 1 FROM …`; others: `SELECT 1 FROM … LIMIT 1`; `sql.ErrNoRows` treated as OK) → only then `net.Listen` + `srv.Serve`. Rationale: mattn/go-sqlite3 silently **creates an empty DB file** when the file is missing, so `db.Ping()` succeeds against a "not found" database and the dashboard would otherwise bind the port and run broken (`no such table`) while holding it — a restart then hits `address already in use`. The sanity query makes a missing/uninitialized DB a fatal startup error **before** the port is bound. The listen port is resolved as `--port` flag → `ADDR` env → `:8080` (`flag.Int("port", 0, ...)`; stdlib `flag` accepts both `--port 9090` and `-port 9090`); the emitted `Makefile` `run` target passes `--port $(PORT)` (`PORT ?= 8080`). Generated server also does graceful shutdown on SIGINT/SIGTERM (`signal.NotifyContext` → `srv.Shutdown`) and logs a `is another dashboard instance already running?` hint on bind failure. Keep the bind AFTER the DB checks — ordering is what prevents a broken DB from occupying the port.
 
 ### sqlite list handler arg order (critical)
 mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **search args first, then `LIMIT ? OFFSET ?`**, and uses `LIKE`. The postgres branch appends `perPage, offset` first with `ILIKE $N` + `LIMIT $1 OFFSET $2`. Mixing these up silently returns wrong rows on sqlite.
@@ -138,11 +150,14 @@ Optional per-resource view at `GET /{panel}/{resource}/cards` (reachable via a "
 ### Format specifier counting in Sprintf
 Every `%s`/`%q`/`%d` must have a matching arg. `%%` is escaped (produce `%` in output, no arg consumed). A mismatch silently produces garbled Go source (e.g. `%!s(MISSING)` literal in emitted templ). This is especially dangerous when a templ substring is built with its own `fmt.Sprintf` and then inserted into a parent one — any `%v`/`%d`/`%s` **inside** emitted `fmt.Sprintf(...)` calls must be doubled (`%%v`) in the generator source. `buildOptionsLoader`, `preHashCode`, `fileImport` insertions, and the `cardBody`/`actions`/`gridView`/`kanbanView` strings in `templ.go` are common drift points.
 
-### `snakeToPascal` special-cases `id`
+### `snakeToPascal` matches sqlc's field naming
+`snakeToPascal` lowercases the whole input, splits only on `_`, and maps the `id` segment to `ID` — this is sqlc's exact algorithm, so:
 - `id` → `ID`
 - `role_id` → `RoleID`
 - `user_role_id` → `UserRoleID`
-Any other pattern would produce `Id`/`RoleId` (wrong). Must match SQLC's output convention.
+- `CeleJmeno` → `Celejmeno`
+- `ZamestnanecID` → `Zamestnanecid`
+Any other pattern would produce `Id`/`RoleId`/`CeleJmeno` (wrong). Must match sqlc's output convention (sqlc lowercases unquoted identifiers then camel-cases per underscore segment).
 
 ### `Options` field type
 Both `Column.Options` and `Field.Options` are `map[string]string` (key=value, value=label), never `[]string`.

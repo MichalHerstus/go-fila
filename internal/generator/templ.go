@@ -143,6 +143,7 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 	resLabel := r.Label
 	resLower := strings.ToLower(r.Name)
 	panelPath := g.Config.Panel.Path
+	idCol := idColumn(r)
 
 	var headers strings.Builder
 	var cells strings.Builder
@@ -171,23 +172,23 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 
 	var extraActions string
 	for _, a := range r.Actions {
-		extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, item["id"], %q)) } method="POST" class="inline">
+		extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, item[%q], %q)) } method="POST" class="inline">
                     <button type="submit" class="text-indigo-600 hover:text-indigo-900 text-sm mr-2">%s</button>
                 </form>
-`, panelPath, resLower, a.Name, a.Label)
+`, panelPath, resLower, idCol, a.Name, a.Label)
 	}
 	if r.Form != nil && r.Form.Delete != nil {
-		extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, item["id"])) } method="POST" class="inline" onsubmit="return confirm('Delete?')">
+		extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, item[%q])) } method="POST" class="inline" onsubmit="return confirm('Delete?')">
                     <button type="submit" class="text-red-600 hover:text-red-900 text-sm">Delete</button>
                 </form>
-`, panelPath, resLower)
+`, panelPath, resLower, idCol)
 	}
 
 	actionsCol := fmt.Sprintf(`            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 mr-3">View</a>
-                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 mr-3">Edit</a>
+                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item[%q])) } class="text-indigo-600 hover:text-indigo-900 mr-3">View</a>
+                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item[%q])) } class="text-indigo-600 hover:text-indigo-900 mr-3">Edit</a>
 %s            </td>
-`, panelPath, resLower, panelPath, resLower, extraActions)
+`, panelPath, resLower, idCol, panelPath, resLower, idCol, extraActions)
 
 	createBtn := fmt.Sprintf(`<a href="%s/%s/new" class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">Create %s</a>`, panelPath, resLower, resLabel)
 	exportBtn := fmt.Sprintf(`<a href="?export=csv" class="text-gray-600 hover:text-gray-900 px-4 py-2 text-sm">Export CSV</a>`)
@@ -250,6 +251,7 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 	resName := r.Name
 	templName := resName + "Detail"
 	resLower := strings.ToLower(resName)
+	idCol := idColumn(r)
 	panelPath := g.Config.Panel.Path
 
 	var rows strings.Builder
@@ -268,16 +270,16 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 
 	var actionBtns strings.Builder
 	for _, a := range r.Actions {
-		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, data.Item["id"], %q)) } method="POST" class="inline">
+		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, data.Item[%q], %q)) } method="POST" class="inline">
                     <button type="submit" class="%s px-4 py-2 rounded-lg text-sm hover:opacity-90">%s</button>
                 </form>
-`, panelPath, resLower, a.Name, actionColor(a.Color), a.Label))
+`, panelPath, resLower, idCol, a.Name, actionColor(a.Color), a.Label))
 	}
 	if r.Form != nil && r.Form.Delete != nil {
-		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, data.Item["id"])) } method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
+		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, data.Item[%q])) } method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
                     <button type="submit" class="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700">Delete</button>
                 </form>
-`, panelPath, resLower, resName))
+`, panelPath, resLower, idCol, resName))
 	}
 
 	code := fmt.Sprintf(`package views
@@ -290,7 +292,7 @@ templ %s(data *viewmodels.DetailData) {
             <h1 class="text-2xl font-bold text-gray-900">%s Details</h1>
             <div class="flex gap-2">
                 <a href="%s/%s" class="text-gray-600 hover:text-gray-900 px-4 py-2">Back</a>
-                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, data.Item["id"])) } class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">Edit</a>
+                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, data.Item[%q])) } class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">Edit</a>
 %s            </div>
         </div>
 
@@ -302,7 +304,7 @@ templ %s(data *viewmodels.DetailData) {
         </div>
     </div>
 }
-`, templName, resName, panelPath, resLower, panelPath, resLower, actionBtns.String(), rows.String())
+`, templName, resName, panelPath, resLower, panelPath, resLower, idCol, actionBtns.String(), rows.String())
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "detail.templ"), []byte(code), 0644)
@@ -519,6 +521,7 @@ func (g *Generator) generateCardTempl(dir string, r types.Resource) error {
 	resLabel := r.Label
 	resLower := strings.ToLower(r.Name)
 	panelPath := g.Config.Panel.Path
+	idCol := idColumn(r)
 
 	var cardBody strings.Builder
 	for _, f := range fields {
@@ -535,10 +538,10 @@ func (g *Generator) generateCardTempl(dir string, r types.Resource) error {
 	}
 
 	actions := fmt.Sprintf(`                    <div class="flex gap-2 border-t pt-3 mt-3">
-                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 text-sm">View</a>
-                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item["id"])) } class="text-indigo-600 hover:text-indigo-900 text-sm">Edit</a>
+                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item[%q])) } class="text-indigo-600 hover:text-indigo-900 text-sm">View</a>
+                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item[%q])) } class="text-indigo-600 hover:text-indigo-900 text-sm">Edit</a>
                     </div>
-`, panelPath, resLower, panelPath, resLower)
+`, panelPath, resLower, idCol, panelPath, resLower, idCol)
 
 	kanbanField := ""
 	if r.Card.KanbanField != "" {

@@ -28,11 +28,19 @@ func (g *Generator) generateMain() error {
 	if g.isSQLite() {
 		driverName = "sqlite3"
 		driverImport = `_ "github.com/mattn/go-sqlite3"`
+	} else if g.isMSSQL() {
+		driverName = "mssql"
+		driverImport = `_ "github.com/microsoft/go-mssqldb"`
 	}
 
 	authTable := g.Config.Auth.Table
 	if authTable == "" {
 		authTable = "users"
+	}
+
+	sanityQuery := fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", authTable)
+	if g.isMSSQL() {
+		sanityQuery = fmt.Sprintf("SELECT TOP 1 1 FROM %s", authTable)
 	}
 
 	code := fmt.Sprintf(`package main
@@ -74,7 +82,7 @@ func main() {
 	}
 
 	var one int
-	if err := db.QueryRow("SELECT 1 FROM %s LIMIT 1").Scan(&one); err != nil && err != sql.ErrNoRows {
+	if err := db.QueryRow(%q).Scan(&one); err != nil && err != sql.ErrNoRows {
 		log.Fatalf("database not initialized: %%v", err)
 	}
 
@@ -113,7 +121,7 @@ func main() {
 		log.Fatal(err)
 	}
 }
-`, driverImport, g.moduleImport("internal/panel"), getDSN(g.Config), driverName, authTable)
+`, driverImport, g.moduleImport("internal/panel"), getDSN(g.Config), driverName, sanityQuery)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "main.go"), []byte(code), 0644)
 }

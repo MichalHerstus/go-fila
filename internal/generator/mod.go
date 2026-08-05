@@ -17,9 +17,11 @@ import (
 // Returns an error on write failure.
 func (g *Generator) generateGoMod() error {
 	modName := filepath.Base(g.OutDir)
-	sqliteDep := ""
+	driverDep := ""
 	if g.isSQLite() {
-		sqliteDep = "\tgithub.com/mattn/go-sqlite3 v1.14.24\n"
+		driverDep = "\tgithub.com/mattn/go-sqlite3 v1.14.24\n"
+	} else if g.isMSSQL() {
+		driverDep = "\tgithub.com/microsoft/go-mssqldb v1.10.0\n"
 	}
 	code := fmt.Sprintf(`module %s
 
@@ -33,7 +35,7 @@ require (
 	github.com/gorilla/sessions v1.4.0
 %s	golang.org/x/crypto v0.31.0
 )
-`, modName, sqliteDep)
+`, modName, driverDep)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "go.mod"), []byte(code), 0644)
 }

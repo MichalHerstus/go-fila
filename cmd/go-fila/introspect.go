@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/microsoft/go-mssqldb"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -42,21 +43,34 @@ type TableInfo struct {
 }
 
 // detectDriver determines the database driver from a DSN string. Postgres DSNs
-// start with "postgres://" or "postgresql://"; everything else is treated as
-// sqlite (file path, :memory:, etc.).
+// start with "postgres://" or "postgresql://", MSSQL DSNs with "sqlserver://"
+// or "mssql://"; everything else is treated as sqlite (file path, :memory:,
+// etc.).
 func detectDriver(dsn string) string {
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
 		return "postgres"
+	}
+	if strings.HasPrefix(dsn, "sqlserver://") || strings.HasPrefix(dsn, "mssql://") {
+		return "mssql"
 	}
 	return "sqlite"
 }
 
 // openDB opens a database connection using the appropriate driver for the DSN.
+// MSSQL uses the "mssql" driver name so the driver's loose placeholder parsing
+// accepts the $N placeholders that the postgres-flavored SQL uses.
 func openDB(dsn, driver string) (*sql.DB, error) {
 	if driver == "postgres" {
 		db, err := sql.Open("pgx", dsn)
 		if err != nil {
 			return nil, fmt.Errorf("opening postgres connection: %w", err)
+		}
+		return db, nil
+	}
+	if driver == "mssql" {
+		db, err := sql.Open("mssql", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("opening mssql connection: %w", err)
 		}
 		return db, nil
 	}
@@ -72,6 +86,9 @@ func openDB(dsn, driver string) (*sql.DB, error) {
 func introspectSchema(db *sql.DB, driver string) ([]TableInfo, error) {
 	if driver == "postgres" {
 		return introspectPostgres(db)
+	}
+	if driver == "mssql" {
+		return introspectMSSQL(db)
 	}
 	return introspectSQLite(db)
 }
@@ -195,6 +212,164 @@ func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 	return tables, nil
 }
 
+// introspectMSSQL queries INFORMATION_SCHEMA and sys views to discover tables,
+// columns, primary keys and foreign keys in a SQL Server database. Table
+// discovery is restricted to the current schema (SCHEMA_NAME()). The $N
+// placeholders work because the connection uses the mssql driver name with
+// loose placeholder parsing.
+func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
+	rows, err := db.Query(`
+		SELECT table_name FROM INFORMATION_SCHEMA.TABLES
+		WHERE table_type = 'BASE TABLE' AND table_schema = SCHEMA_NAME()
+		ORDER BY table_name`)
+	if err != nil {
+		return nil, fmt.Errorf("listing tables: %w", err)
+	}
+	defer rows.Close()
+
+	var tableNames []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		tableNames = append(tableNames, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var tables []TableInfo
+	for _, name := range tableNames {
+		ti := TableInfo{Name: name}
+
+		colRows, err := db.Query(`
+			SELECT column_name, data_type, is_nullable, column_default
+			FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE table_name = $1 AND table_schema = SCHEMA_NAME()
+			ORDER BY ordinal_position`, name)
+		if err != nil {
+			return nil, fmt.Errorf("listing columns for %s: %w", name, err)
+		}
+		for colRows.Next() {
+			var c ColumnInfo
+			var nullable string
+			var defaultVal sql.NullString
+			if err := colRows.Scan(&c.Name, &c.DBType, &nullable, &defaultVal); err != nil {
+				colRows.Close()
+				return nil, err
+			}
+			c.Nullable = nullable == "YES"
+			if defaultVal.Valid {
+				c.Default = defaultVal.String
+			}
+			ti.Columns = append(ti.Columns, c)
+		}
+		colRows.Close()
+		if err := colRows.Err(); err != nil {
+			return nil, err
+		}
+
+		pkRows, err := db.Query(`
+			SELECT kcu.column_name
+			FROM INFORMATION_SCHEMA.table_constraints tc
+			JOIN INFORMATION_SCHEMA.key_column_usage kcu
+				ON tc.constraint_name = kcu.constraint_name
+				AND tc.table_schema = kcu.table_schema
+			WHERE tc.table_name = $1
+				AND tc.constraint_type = 'PRIMARY KEY'
+				AND tc.table_schema = SCHEMA_NAME()
+			ORDER BY kcu.ordinal_position`, name)
+		if err != nil {
+			return nil, fmt.Errorf("listing PKs for %s: %w", name, err)
+		}
+		for pkRows.Next() {
+			var colName string
+			if err := pkRows.Scan(&colName); err != nil {
+				pkRows.Close()
+				return nil, err
+			}
+			for i := range ti.Columns {
+				if ti.Columns[i].Name == colName {
+					ti.Columns[i].IsPrimaryKey = true
+					break
+				}
+			}
+		}
+		pkRows.Close()
+		if err := pkRows.Err(); err != nil {
+			return nil, err
+		}
+
+		// Tables without a declared PRIMARY KEY still often have an IDENTITY
+		// column that acts as the row key (e.g. legacy MSSQL schemas). Treat
+		// identity columns as the primary key so go-fila keys routes on them
+		// and omits them from INSERT/UPDATE. A declared PK takes precedence.
+		hasPK := false
+		for i := range ti.Columns {
+			if ti.Columns[i].IsPrimaryKey {
+				hasPK = true
+				break
+			}
+		}
+		if !hasPK {
+			idRows, err := db.Query(`
+				SELECT c.name
+				FROM sys.columns c
+				JOIN sys.tables t ON t.object_id = c.object_id
+				WHERE t.name = $1 AND c.is_identity = 1`, name)
+			if err != nil {
+				return nil, fmt.Errorf("listing identity columns for %s: %w", name, err)
+			}
+			for idRows.Next() {
+				var colName string
+				if err := idRows.Scan(&colName); err != nil {
+					idRows.Close()
+					return nil, err
+				}
+				for i := range ti.Columns {
+					if ti.Columns[i].Name == colName {
+						ti.Columns[i].IsPrimaryKey = true
+						break
+					}
+				}
+			}
+			idRows.Close()
+			if err := idRows.Err(); err != nil {
+				return nil, err
+			}
+		}
+
+		fkRows, err := db.Query(`
+			SELECT fk_col.name AS column_name, rt.name AS foreign_table, rc.name AS foreign_column
+			FROM sys.foreign_keys fk
+			JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+			JOIN sys.tables t ON t.object_id = fk.parent_object_id
+			JOIN sys.columns fk_col ON fk_col.object_id = fkc.parent_object_id AND fk_col.column_id = fkc.parent_column_id
+			JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
+			JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+			WHERE t.name = $1`, name)
+		if err != nil {
+			return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
+		}
+		for fkRows.Next() {
+			var fk ForeignKeyInfo
+			if err := fkRows.Scan(&fk.Column, &fk.ForeignTable, &fk.ForeignColumn); err != nil {
+				fkRows.Close()
+				return nil, err
+			}
+			ti.ForeignKeys = append(ti.ForeignKeys, fk)
+		}
+		fkRows.Close()
+		if err := fkRows.Err(); err != nil {
+			return nil, err
+		}
+
+		tables = append(tables, ti)
+	}
+	return tables, nil
+}
+
 // introspectSQLite queries sqlite_master and PRAGMA statements to discover
 // tables, columns, primary keys and foreign keys in a SQLite database.
 func introspectSQLite(db *sql.DB) ([]TableInfo, error) {
@@ -283,17 +458,17 @@ func mapDBTypeToFieldType(dbType string) string {
 	switch {
 	case strings.Contains(t, "int") || strings.Contains(t, "serial") || strings.Contains(t, "bigserial") || strings.Contains(t, "smallserial"):
 		return "integer"
-	case strings.Contains(t, "varchar") || strings.Contains(t, "text") || strings.Contains(t, "char") || strings.Contains(t, "character"):
+	case strings.Contains(t, "varchar") || strings.Contains(t, "text") || strings.Contains(t, "char") || strings.Contains(t, "character") || strings.Contains(t, "uniqueidentifier") || strings.Contains(t, "xml"):
 		return "string"
-	case strings.Contains(t, "bool"):
+	case strings.Contains(t, "bool") || t == "bit":
 		return "boolean"
-	case strings.Contains(t, "timestamp") || strings.Contains(t, "datetime") || strings.Contains(t, "date"):
+	case strings.Contains(t, "timestamp") || strings.Contains(t, "datetime") || strings.Contains(t, "date") || t == "time":
 		return "datetime"
-	case strings.Contains(t, "real") || strings.Contains(t, "float") || strings.Contains(t, "double") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal"):
+	case strings.Contains(t, "real") || strings.Contains(t, "float") || strings.Contains(t, "double") || strings.Contains(t, "numeric") || strings.Contains(t, "decimal") || strings.Contains(t, "money"):
 		return "float"
 	case strings.Contains(t, "json"):
 		return "json"
-	case strings.Contains(t, "bytea") || strings.Contains(t, "blob"):
+	case strings.Contains(t, "bytea") || strings.Contains(t, "blob") || strings.Contains(t, "varbinary") || strings.Contains(t, "binary") || strings.Contains(t, "image"):
 		return "file"
 	default:
 		return "string"
@@ -422,6 +597,21 @@ func findPKColumn(ti TableInfo) string {
 	return "id"
 }
 
+// idColumnName returns the actual column name go-fila should treat as the row
+// key for a table: the primary key column when declared, otherwise the column
+// conventionally named "id" (any case). Returns "" when neither exists. Unlike
+// findPKColumn, this preserves the real column case so the key matches the
+// names in list row maps (e.g. "ID" on MSSQL).
+func idColumnName(ti TableInfo) string {
+	pk := findPKColumn(ti)
+	for _, c := range ti.Columns {
+		if strings.EqualFold(c.Name, pk) {
+			return c.Name
+		}
+	}
+	return ""
+}
+
 // placeholder returns the SQL bind placeholder for the given 1-based argument
 // position. Postgres uses $N; sqlite uses "?".
 func placeholder(n int, driver string) string {
@@ -466,6 +656,34 @@ func ensureAuthTables(db *sql.DB, driver string, tables []TableInfo) error {
 					role_name VARCHAR(100) DEFAULT 'user',
 					status VARCHAR(20) DEFAULT 'active',
 					created_at TIMESTAMPTZ DEFAULT NOW()
+				)`); err != nil {
+				return fmt.Errorf("creating users table: %w", err)
+			}
+		}
+	} else if driver == "mssql" {
+		if !hasRoles {
+			if _, err := db.Exec(`
+				CREATE TABLE roles (
+					id INT IDENTITY(1,1) PRIMARY KEY,
+					name NVARCHAR(100) NOT NULL
+				)`); err != nil {
+				return fmt.Errorf("creating roles table: %w", err)
+			}
+			if _, err := db.Exec(`INSERT INTO roles (name) VALUES ('admin'), ('manager'), ('user')`); err != nil {
+				return fmt.Errorf("seeding roles: %w", err)
+			}
+		}
+		if !hasUsers {
+			if _, err := db.Exec(`
+				CREATE TABLE users (
+					id INT IDENTITY(1,1) PRIMARY KEY,
+					name NVARCHAR(255) NOT NULL,
+					email NVARCHAR(255) UNIQUE NOT NULL,
+					password NVARCHAR(255) NOT NULL,
+					role_id INT REFERENCES roles(id),
+					role_name NVARCHAR(100) DEFAULT 'user',
+					status NVARCHAR(20) DEFAULT 'active',
+					created_at DATETIME2 DEFAULT SYSUTCDATETIME()
 				)`); err != nil {
 				return fmt.Errorf("creating users table: %w", err)
 			}
@@ -649,6 +867,23 @@ func writeResourceYAML(b *strings.Builder, ti TableInfo, allTables []TableInfo, 
 	b.WriteString(fmt.Sprintf("  - name: %s\n", resourceName))
 	b.WriteString(fmt.Sprintf("    label: %s\n", pluralPascal))
 
+	if strings.ToLower(resourceName)+"s" != ti.Name {
+		b.WriteString(fmt.Sprintf("    table: %s\n", ti.Name))
+	}
+
+	if idCol := idColumnName(ti); idCol != "" && idCol != "id" {
+		b.WriteString(fmt.Sprintf("    id_column: %s\n", idCol))
+	}
+
+	pkGo := pkGoType(ti, driver)
+	defaultPKGo := "int32"
+	if driver == "sqlite" {
+		defaultPKGo = "int64"
+	}
+	if pkGo != "" && pkGo != defaultPKGo {
+		b.WriteString(fmt.Sprintf("    id_type: %s\n", pkGo))
+	}
+
 	defaultSort := findDefaultSort(ti)
 
 	// list section
@@ -784,41 +1019,23 @@ func findDefaultSort(ti TableInfo) string {
 	return findPKColumn(ti)
 }
 
-// generateSchemaSQL produces the DDL for auth tables (roles + users) if they
-// were created by ensureAuthTables. Returns empty string if auth tables already
-// existed.
-func generateSchemaSQL(hasRoles, hasUsers bool, driver string) string {
-	if hasRoles && hasUsers {
-		return ""
+// generateSchemaSQL produces the DDL for every introspected user table plus
+// the auth tables (roles + users) if they were created by ensureAuthTables.
+// The output is the sqlc schema input, so it is written in the dialect the
+// sqlc engine expects: postgres dialect for postgres and mssql projects (the
+// mssql engine is postgres-flavored by design), sqlite dialect for sqlite.
+func generateSchemaSQL(tables []TableInfo, hasRoles, hasUsers bool, driver string) string {
+	var b strings.Builder
+
+	for _, ti := range tables {
+		if ti.Name == "users" || ti.Name == "roles" {
+			continue
+		}
+		b.WriteString(tableDDL(ti, driver))
+		b.WriteString("\n")
 	}
 
-	var b strings.Builder
-	if driver == "postgres" {
-		if !hasRoles {
-			b.WriteString(`CREATE TABLE roles (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL
-);
-
-INSERT INTO roles (name) VALUES ('admin'), ('manager'), ('user');
-
-`)
-		}
-		if !hasUsers {
-			b.WriteString(`CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password VARCHAR(255) NOT NULL,
-    role_id INT REFERENCES roles(id),
-    role_name VARCHAR(100) DEFAULT 'user',
-    status VARCHAR(20) DEFAULT 'active',
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-`)
-		}
-	} else {
+	if driver == "sqlite" {
 		if !hasRoles {
 			b.WriteString(`CREATE TABLE roles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -843,8 +1060,114 @@ INSERT INTO roles (name) VALUES ('admin'), ('manager'), ('user');
 
 `)
 		}
+	} else {
+		if !hasRoles {
+			b.WriteString(`CREATE TABLE roles (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL
+);
+
+INSERT INTO roles (name) VALUES ('admin'), ('manager'), ('user');
+
+`)
+		}
+		if !hasUsers {
+			b.WriteString(`CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    role_id INT REFERENCES roles(id),
+    role_name VARCHAR(100) DEFAULT 'user',
+    status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+`)
+		}
 	}
 	return b.String()
+}
+
+// tableDDL renders a CREATE TABLE statement for one introspected table in the
+// dialect used as the sqlc schema input: postgres types for postgres/mssql
+// (MSSQL types are mapped via mssqlTypeToPostgres), native types for sqlite.
+func tableDDL(ti TableInfo, driver string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", ti.Name))
+	for i, c := range ti.Columns {
+		colType := c.DBType
+		if driver == "mssql" {
+			colType = mssqlTypeToPostgres(colType)
+		}
+		parts := []string{fmt.Sprintf("    %s %s", c.Name, colType)}
+		if !c.Nullable {
+			parts = append(parts, "NOT NULL")
+		}
+		if c.IsPrimaryKey {
+			parts = append(parts, "PRIMARY KEY")
+		}
+		comma := ","
+		if i == len(ti.Columns)-1 {
+			comma = ""
+		}
+		b.WriteString(strings.Join(parts, " ") + comma + "\n")
+	}
+	b.WriteString(");\n")
+	return b.String()
+}
+
+// mssqlTypeToPostgres maps a SQL Server column data type to the equivalent
+// postgres type used in the sqlc schema input for mssql projects. The mapping
+// only needs to be parseable by sqlc and type-inferable to the desired Go
+// types; it is not executed against a database.
+func mssqlTypeToPostgres(dbType string) string {
+	switch strings.ToLower(dbType) {
+	case "int", "smallint", "tinyint":
+		return "INTEGER"
+	case "bigint":
+		return "BIGINT"
+	case "bit":
+		return "BOOLEAN"
+	case "nvarchar", "varchar", "nchar", "char", "text", "ntext", "xml", "uniqueidentifier":
+		return "TEXT"
+	case "datetime", "datetime2", "smalldatetime", "date", "time", "datetimeoffset":
+		return "TIMESTAMP"
+	case "decimal", "numeric", "money", "smallmoney", "real", "float":
+		return "DOUBLE PRECISION"
+	case "varbinary", "binary", "image":
+		return "BYTEA"
+	default:
+		return "TEXT"
+	}
+}
+
+// pkGoType returns the Go type sqlc generates for the primary key column of a
+// table, matching sqlc's postgres engine mapping for the schema type emitted
+// by tableDDL (int32 for INTEGER, int16 for SMALLINT, int64 for BIGINT;
+// sqlite INTEGER always maps to int64). When the table declares no primary
+// key, the conventional "id" column (findPKColumn's fallback) is used so the
+// type of the column the generated app keys routes on is still inferred
+// correctly. Returns "" when no matching column is found.
+func pkGoType(ti TableInfo, driver string) string {
+	pk := findPKColumn(ti)
+	for _, c := range ti.Columns {
+		if !strings.EqualFold(c.Name, pk) {
+			continue
+		}
+		if driver == "sqlite" {
+			return "int64"
+		}
+		switch strings.ToLower(c.DBType) {
+		case "bigint":
+			return "int64"
+		case "smallint":
+			return "int16"
+		default:
+			return "int32"
+		}
+	}
+	return ""
 }
 
 // generateQueries produces SQLC-annotated query files for each table
@@ -890,7 +1213,10 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 			b.WriteString(fmt.Sprintf("\nLEFT JOIN %s f_%s ON f_%s.%s = t.%s",
 				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, foreignPK, fk.Column))
 		}
-		b.WriteString(fmt.Sprintf("\nORDER BY t.%s DESC;\n\n", pk))
+		if driver != "mssql" {
+			b.WriteString(fmt.Sprintf("\nORDER BY t.%s DESC", pk))
+		}
+		b.WriteString(";\n\n")
 
 		// Count
 		b.WriteString(fmt.Sprintf("-- name: Count%s :one\n", pluralName))
@@ -928,7 +1254,7 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 		// Create
 		var insertCols []string
 		for _, c := range ti.Columns {
-			if c.IsPrimaryKey && (driver == "postgres" || strings.ToLower(c.DBType) == "integer") {
+			if c.IsPrimaryKey && driver != "sqlite" {
 				continue
 			}
 			insertCols = append(insertCols, c.Name)
@@ -948,7 +1274,7 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 			}
 			b.WriteString(placeholder(i+1, driver))
 		}
-		if driver == "postgres" {
+		if driver != "sqlite" {
 			b.WriteString(")\nRETURNING *;\n\n")
 		} else {
 			b.WriteString(");\n\n")
@@ -970,7 +1296,7 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 			argN++
 		}
 		b.WriteString(fmt.Sprintf("WHERE %s = %s", pk, placeholder(1, driver)))
-		if driver == "postgres" {
+		if driver != "sqlite" {
 			b.WriteString("\nRETURNING *;\n\n")
 		} else {
 			b.WriteString(";\n\n")
@@ -1003,8 +1329,13 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 
 			var b strings.Builder
 			b.WriteString(fmt.Sprintf("-- name: List%s :many\n", foreignPluralName))
-			b.WriteString(fmt.Sprintf("SELECT %s, %s FROM %s ORDER BY %s;\n\n",
-				foreignPKColumn(*foreignTI), labelCol, foreignTI.Name, labelCol))
+			if driver == "mssql" {
+				b.WriteString(fmt.Sprintf("SELECT %s, %s FROM %s;\n\n",
+					foreignPKColumn(*foreignTI), labelCol, foreignTI.Name))
+			} else {
+				b.WriteString(fmt.Sprintf("SELECT %s, %s FROM %s ORDER BY %s;\n\n",
+					foreignPKColumn(*foreignTI), labelCol, foreignTI.Name, labelCol))
+			}
 
 			fname := foreignTI.Name + "_options.sql"
 			if _, exists := queries[fname]; !exists {
@@ -1100,11 +1431,9 @@ func cmdInitFromDB(configPath, outDir, dsn string, force bool) error {
 		return fmt.Errorf("creating queries directory: %w", err)
 	}
 
-	schemaSQL := generateSchemaSQL(hasRoles, hasUsers, driver)
-	if schemaSQL != "" {
-		if err := os.WriteFile(filepath.Join(sqlDir, "migrations", "schema.sql"), []byte(schemaSQL), 0644); err != nil {
-			return fmt.Errorf("writing schema.sql: %w", err)
-		}
+	schemaSQL := generateSchemaSQL(tables, hasRoles, hasUsers, driver)
+	if err := os.WriteFile(filepath.Join(sqlDir, "migrations", "schema.sql"), []byte(schemaSQL), 0644); err != nil {
+		return fmt.Errorf("writing schema.sql: %w", err)
 	}
 
 	for name, content := range generateQueries(tables, driver) {

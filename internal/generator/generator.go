@@ -66,9 +66,20 @@ func (g *Generator) isSQLite() bool {
 	return d == "sqlite" || d == "sqlite3"
 }
 
+// isMSSQL reports whether the configured database driver is Microsoft SQL
+// Server. MSSQL connections use the go-mssqldb "mssql" driver name so the
+// driver's loose placeholder parsing accepts the $N placeholders required by
+// the postgres-flavored SQL (sqlc's postgres engine cannot parse @name).
+// Returns: true when the driver is "mssql" or "sqlserver".
+func (g *Generator) isMSSQL() bool {
+	d := g.driver()
+	return d == "mssql" || d == "sqlserver"
+}
+
 // placeholder returns the SQL bind placeholder for the given 1-based argument
 // index. Postgres uses numbered placeholders ($1, $2, ...) while sqlite uses
-// a positional "?".
+// a positional "?". MSSQL keeps $N placeholders because the mssql driver name
+// loosely parses them into named T-SQL parameters.
 // Params: n (1-based argument position).
 // Returns: the placeholder token for the configured driver.
 func (g *Generator) placeholder(n int) string {
@@ -79,10 +90,11 @@ func (g *Generator) placeholder(n int) string {
 }
 
 // likeOp returns the case-insensitive LIKE operator for the configured driver.
-// Postgres uses ILIKE; sqlite's LIKE is already case-insensitive for ASCII.
-// Returns: "ILIKE" for postgres, "LIKE" for sqlite.
+// Postgres uses ILIKE; sqlite's LIKE is already case-insensitive for ASCII and
+// MSSQL's default collations are case-insensitive (LIKE).
+// Returns: "ILIKE" for postgres, "LIKE" for sqlite and mssql.
 func (g *Generator) likeOp() string {
-	if g.isSQLite() {
+	if g.isSQLite() || g.isMSSQL() {
 		return "LIKE"
 	}
 	return "ILIKE"
@@ -97,6 +109,19 @@ func (g *Generator) idGoType() string {
 		return "int64"
 	}
 	return "int32"
+}
+
+// idGoTypeForResource returns the Go type used to cast the :id path parameter
+// when calling a resource's sqlc query. It honours the resource's optional
+// id_type override (emitted by init --db for e.g. BIGINT/SMALLINT identity
+// primary keys) and falls back to the driver default otherwise.
+// Params: r (the resource definition).
+// Returns: the Go type name, e.g. "int32", "int64" or "int16".
+func (g *Generator) idGoTypeForResource(r types.Resource) string {
+	if r.IDType != "" {
+		return r.IDType
+	}
+	return g.idGoType()
 }
 
 // Generate runs the full generation pipeline in dependency order: it ensures

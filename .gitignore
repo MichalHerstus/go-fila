@@ -4,3 +4,4 @@ admin/
 .idea/
 *.log
 session-*.md
+mssql.txt

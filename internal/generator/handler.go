@@ -120,12 +120,31 @@ func fieldDefsFromDetail(fields []types.Field) string {
 	return fieldDefsStr(fields)
 }
 
-// tableName derives the default SQL table name for a resource: the lowercase
-// resource name plus a plural "s" (e.g. "User" -> "users").
-// Params: resourceName (PascalCase resource name from the YAML config).
-// Returns: the plural lowercase table name.
-func tableName(resourceName string) string {
-	return strings.ToLower(resourceName) + "s"
+// tableName derives the SQL table name for a resource: the explicit "table"
+// override when set, otherwise the lowercase resource name plus a plural "s"
+// (e.g. "User" -> "users"). Introspected projects emit "table" whenever the
+// convention does not match the real table (e.g. "Zamestnanec" -> table
+// "Zamestnanec", not "zamestnanecs").
+// Params: r (the resource definition).
+// Returns: the SQL table name.
+func tableName(r types.Resource) string {
+	if r.Table != "" {
+		return r.Table
+	}
+	return strings.ToLower(r.Name) + "s"
+}
+
+// idColumn returns the name of the row-key column for a resource: the explicit
+// "id_column" override when set, otherwise "id". Row maps in list/card/detail
+// views are keyed by the real column name, so MSSQL tables with an "ID" column
+// must emit id_column to keep View/Edit/action links working.
+// Params: r (the resource definition).
+// Returns: the row-key column name.
+func idColumn(r types.Resource) string {
+	if r.IDColumn != "" {
+		return r.IDColumn
+	}
+	return "id"
 }
 
 // resourceTitle returns the page title used for a resource view: the YAML
@@ -147,7 +166,7 @@ func resourceTitle(r types.Resource) string {
 // Returns: an error on write failure.
 func (g *Generator) generateListHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
-	tName := tableName(r.Name)
+	tName := tableName(r)
 
 	var searchCols []string
 	var sortableCols []string
@@ -272,6 +291,60 @@ func List(db *sql.DB) http.HandlerFunc {
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         fullArgs = append(fullArgs, perPage, offset)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        defer rows.Close()
+
+`, searchableColsLiteral, tName, colsJoin, tName)
+	} else if g.isMSSQL() {
+		listCore = fmt.Sprintf(`        var args []interface{}
+        args = append(args, perPage, offset)
+        argIdx := 3
+
+        var whereClauses []string
+        var countClauses []string
+        countIdx := 1
+        if search != "" {
+            searchableCols := []string{%s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, fmt.Sprintf("%%s LIKE $%%d", col, argIdx))
+                countClauses = append(countClauses, fmt.Sprintf("%%s LIKE $%%d", col, countIdx))
+                args = append(args, "%%"+search+"%%")
+                argIdx++
+                countIdx++
+            }
+        }
+
+        whereSQL := ""
+        if len(whereClauses) > 0 {
+            whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
+        }
+        countWhereSQL := ""
+        if len(countClauses) > 0 {
+            countWhereSQL = " WHERE " + strings.Join(countClauses, " OR ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+        }
+        if orderSQL == "" {
+            orderSQL = " ORDER BY (SELECT NULL)"
+        }
+
+        countQuery := "SELECT COUNT(*) FROM %s" + countWhereSQL
+        var total int64
+        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
             http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -416,7 +489,7 @@ func quoteList(words []string) string {
 // Returns: an error on write failure.
 func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
-	tName := tableName(r.Name)
+	tName := tableName(r)
 	card := r.Card
 	panelPath := g.Config.Panel.Path
 
@@ -482,6 +555,59 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         fullArgs = append(fullArgs, perPage, offset)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        defer rows.Close()
+`, searchable, tName, fieldsJoin, tName)
+	} else if g.isMSSQL() {
+		queryCore = fmt.Sprintf(`        var args []interface{}
+        args = append(args, perPage, offset)
+        argIdx := 3
+
+        var whereClauses []string
+        var countClauses []string
+        countIdx := 1
+        if search != "" {
+            searchableCols := []string{%s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, fmt.Sprintf("%%s LIKE $%%d", col, argIdx))
+                countClauses = append(countClauses, fmt.Sprintf("%%s LIKE $%%d", col, countIdx))
+                args = append(args, "%%"+search+"%%")
+                argIdx++
+                countIdx++
+            }
+        }
+
+        whereSQL := ""
+        if len(whereClauses) > 0 {
+            whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
+        }
+        countWhereSQL := ""
+        if len(countClauses) > 0 {
+            countWhereSQL = " WHERE " + strings.Join(countClauses, " OR ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+        }
+        if orderSQL == "" {
+            orderSQL = " ORDER BY (SELECT NULL)"
+        }
+
+        countQuery := "SELECT COUNT(*) FROM %s" + countWhereSQL
+        var total int64
+        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+
+        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
             http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -717,7 +843,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/views/layout"),
 		queryName,
-		g.idGoType(),
+		g.idGoTypeForResource(r),
 		detailFieldMap(r.Detail.Fields),
 		fieldDefsFromDetail(r.Detail.Fields),
 		r.Name,
@@ -743,13 +869,14 @@ func detailFieldMap(fields []types.Field) string {
 	return strings.Join(entries, "\n")
 }
 
-// snakeToPascal converts a snake_case string to PascalCase so it matches the
-// field names that sqlc generates. The "id" segment is special-cased to "ID"
-// (e.g. "user_role_id" -> "UserRoleID").
-// Params: s (the snake_case input, e.g. a column name).
+// snakeToPascal converts a column name to the PascalCase struct field name
+// that sqlc generates. sqlc lowercases the whole identifier, splits only on
+// underscores, and maps the "id" segment to "ID" (e.g. "user_role_id" ->
+// "UserRoleID", "CeleJmeno" -> "Celejmeno", "ZamestnanecID" -> "Zamestnanecid").
+// Params: s (a column name, e.g. from a YAML field definition).
 // Returns: the PascalCase variant.
 func snakeToPascal(s string) string {
-	parts := strings.Split(s, "_")
+	parts := strings.Split(strings.ToLower(s), "_")
 	for i, p := range parts {
 		if p == "id" {
 			parts[i] = "ID"
@@ -791,7 +918,7 @@ func (g *Generator) generateFormHandlers(dir string, r types.Resource) error {
 func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
-	tName := tableName(r.Name)
+	tName := tableName(r)
 
 	code := fmt.Sprintf(`package %s
 
@@ -831,7 +958,7 @@ func Delete(db *sql.DB) http.HandlerFunc {
 // Returns: an error on write failure.
 func (g *Generator) generateCSVHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
-	tName := tableName(r.Name)
+	tName := tableName(r)
 
 	var colNames []string
 	for _, c := range r.List.Columns {
@@ -946,7 +1073,7 @@ func Action(db *sql.DB) http.HandlerFunc {
 func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
-	tName := tableName(r.Name)
+	tName := tableName(r)
 
 	paramFields := r.Form.Create.Fields
 
@@ -1190,7 +1317,7 @@ func colsLiteral(cols []string) string {
 func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
-	tName := tableName(r.Name)
+	tName := tableName(r)
 	populateQuery := r.Form.Update.PopulateQuery
 	if populateQuery == "" {
 		populateQuery = "GetByID"
@@ -1341,7 +1468,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/views/layout"),
 		populateQuery,
-		g.idGoType(),
+		g.idGoTypeForResource(r),
 		strings.Join(populateFields, "\n"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
