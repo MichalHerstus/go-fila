@@ -92,6 +92,9 @@ func (g *Generator) generateRouter() error {
 		if len(res.Actions) > 0 {
 			code += fmt.Sprintf("\t\tr.Post(\"/%s/{id}/action/{action}\", %s.Action(db))\n", name, name)
 		}
+		if hasBulkActions(res) {
+			code += fmt.Sprintf("\t\tr.Post(\"/%s/bulk/{action}\", %s.Bulk(db))\n", name, name)
+		}
 		if res.List != nil {
 			code += fmt.Sprintf("\t\t%sGet(\"/%s/export/csv\", %s.ExportCSV(db))\n", rbacPrefix("view_any"), name, name)
 		}
@@ -253,6 +256,50 @@ func (g *Generator) generatePage(p types.Page) error {
             Type: "stats_grid",
             SubWidgets: subWidgets%d,
         })`, i))
+		case "list":
+			widgetInit = append(widgetInit, fmt.Sprintf(`
+        {
+        var listRows []map[string]interface{}
+        if q := %q; q != "" {
+            listQueryRows, err := db.QueryContext(r.Context(), q)
+            if err == nil {
+                defer listQueryRows.Close()
+                listCols, _ := listQueryRows.Columns()
+                for listQueryRows.Next() {
+                    listVals := make([]interface{}, len(listCols))
+                    listPtrs := make([]interface{}, len(listCols))
+                    for i := range listVals {
+                        listPtrs[i] = &listVals[i]
+                    }
+                    if err := listQueryRows.Scan(listPtrs...); err == nil {
+                        listRow := make(map[string]interface{})
+                        for i, col := range listCols {
+                            listRow[col] = listVals[i]
+                        }
+                        listRows = append(listRows, listRow)
+                    }
+                }
+            }
+        }
+        widgets = append(widgets, viewmodels.WidgetData{
+            Type: "list",
+            Label: %q,
+            TableRows: listRows,
+        })
+        }`, w.Query, w.Label))
+		case "html":
+			widgetInit = append(widgetInit, fmt.Sprintf(`
+        {
+        var htmlVal string
+        if q := %q; q != "" {
+            _ = db.QueryRowContext(r.Context(), q).Scan(&htmlVal)
+        }
+        widgets = append(widgets, viewmodels.WidgetData{
+            Type: "html",
+            Label: %q,
+            Value: template.HTML(htmlVal),
+        })
+        }`, w.Query, w.Label))
 		}
 	}
 
@@ -291,7 +338,7 @@ func %s(db *sql.DB) http.HandlerFunc {
             Widgets:   widgets,
         }
 
-        err := layoutviews.Base(pd.Name, pd.PanelPath, pageviews.%s(pd)).Render(r.Context(), w)
+        err := layoutviews.Base(pd.Name, pd.PanelPath, viewmodels.DefaultTheme(), pageviews.%s(pd)).Render(r.Context(), w)
         if err != nil {
             http.Error(w, err.Error(), http.StatusInternalServerError)
         }

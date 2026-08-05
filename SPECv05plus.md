@@ -1,6 +1,6 @@
 # go-fila — Phase v0.5+ Specification & Implementation Plan
 
-**Status:** Plan (not yet implemented)
+**Status:** Milestones 1 & 2 implemented (see `session-ses_04c7.md`); M3+ planned.
 **Audience:** contributors implementing phase v0.5+
 **Source:** `SPEC.md` Phased Development table row `v0.5+` — *"Plugins, custom actions, hooks, file uploads, CSV export, dark mode, multi-panel"*
 
@@ -12,18 +12,18 @@ The SPEC v0.5+ row lists seven deliverables. Three are already implemented and v
 
 | Item | Status | Plan phase |
 |---|---|---|
-| Custom actions | **Done** (core) — raw-SQL switch dispatch, `POST /{res}/{id}/action/{action}` | **M1** — wire `requires_confirmation`, `bulk`, `icon` |
+| Custom actions | **Done** — raw-SQL switch dispatch, `POST /{res}/{id}/action/{action}`; M1 wired `requires_confirmation`, `bulk`, `icon` | **M1 — done** |
 | File uploads | **Done** — `file`/`image` fields, `saveUploadedFile`, multipart | — |
-| CSV export | **Done**, but the **Export button is broken** (`?export=csv` vs `/{res}/export/csv` route) | **M1** |
-| Dark mode | **Missing** — `panel.theme.dark_mode` parsed but unused | **M2** |
+| CSV export | **Done** — M1 fixed the list button to link to `/{res}/export/csv` | **M1 — done** |
+| Dark mode | **Done** — M2 wired `panel.theme.dark_mode` (class-based, toggled + persisted), brand colors, fonts, layout widths | **M2 — done** |
 | Hooks | **Missing** — no concept anywhere in the schema/generator | **M3** |
 | Plugins | **Missing** — nothing parses `plugins:` | **M4** |
 | Multi-panel | **Missing** — `Config.Panel` is a single struct | **M5** |
 
-Latent bugs folded into this phase:
+Latent bugs folded into this phase (both fixed in M1):
 
-- The `list` and `html` page widgets exist only in the generated templ (`templ.go:555`, `templ.go:567`) but the page handler (`generatePage`, `router.go:132`) never populates them — they render empty.
-- The CSV export button in the list view links to `?export=csv` (`templ.go:181`) while the router registers `/{res}/export/csv` — the button does not export.
+- The `list` and `html` page widgets existed only in the generated templ (`templ.go:555`, `templ.go:567`) — `generatePage` (`router.go:132`) now populates them from `w.Query`.
+- The CSV export button in the list view linked to `?export=csv` (`templ.go:181`) while the router registers `/{res}/export/csv` — the button now links to the route.
 
 ---
 
@@ -37,7 +37,7 @@ Out of scope (deferred to a later phase): `auth.registration`, `auth.password_re
 
 ---
 
-## 3. Milestone 1 — v0.5 polish (no schema changes)
+## 3. Milestone 1 — v0.5 polish (no schema changes) — DONE
 
 ### 3.1 Fix CSV Export button
 - `templ.go` `generateListTempl`: change `exportBtn` from `?export=csv` to `fmt.Sprintf("%s/%s/export/csv", panelPath, resLower)`.
@@ -65,7 +65,7 @@ Out of scope (deferred to a later phase): `auth.registration`, `auth.password_re
 
 ---
 
-## 4. Milestone 2 — Dark mode + theming
+## 4. Milestone 2 — Dark mode + theming — DONE
 
 ### 4.1 Tailwind config (`tailwind.go`)
 - Add `darkMode: 'class'` to `tailwind.config.js`.

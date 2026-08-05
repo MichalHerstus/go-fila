@@ -6,22 +6,74 @@
 package generator
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
 // generateViewModels writes internal/viewmodels/models.go containing the view
 // data structs (ColumnDef, ListData, DetailData, FormData, PageData,
-// WidgetData, AuthData, NavGroupData, NavItemData). Returns an error on write
-// failure.
+// WidgetData, AuthData, NavGroupData, NavItemData, ThemeConfig) plus the
+// DefaultTheme constructor that packs the panel's theming/layout config for the
+// templ Base layout. Returns an error on write failure.
 func (g *Generator) generateViewModels() error {
-	code := `package viewmodels
+	panel := g.Config.Panel
+	primary := panel.Brand.Colors.Primary
+	if primary == "" {
+		primary = "#6366f1"
+	}
+	secondary := panel.Brand.Colors.Secondary
+	if secondary == "" {
+		secondary = "#8b5cf6"
+	}
+	width := panel.Layout.Sidebar.Width
+	if width == 0 {
+		width = 256
+	}
+	collapsed := panel.Layout.Sidebar.CollapsedWidth
+	if collapsed == 0 {
+		collapsed = 64
+	}
+	maxWidth := panel.Layout.MaxContentWidth
+	if maxWidth == "" {
+		maxWidth = "none"
+	}
+
+	code := fmt.Sprintf(`package viewmodels
 
 import (
     "database/sql"
     "fmt"
     "html/template"
 )
+
+type ThemeConfig struct {
+	DarkMode            bool
+	BrandPrimary        string
+	BrandSecondary      string
+	FontFamily          string
+	FontMono            string
+	SidebarWidth        int
+	SidebarCollapsedWidth int
+	SidebarCollapsible  bool
+	TopbarSticky        bool
+	MaxContentWidth     string
+}
+
+func DefaultTheme() ThemeConfig {
+    return ThemeConfig{
+        DarkMode: %t,
+        BrandPrimary: %q,
+        BrandSecondary: %q,
+        FontFamily: %q,
+        FontMono: %q,
+        SidebarWidth: %d,
+        SidebarCollapsedWidth: %d,
+        SidebarCollapsible: %t,
+        TopbarSticky: %t,
+        MaxContentWidth: %q,
+    }
+}
 
 type ColumnDef struct {
 	Name       string
@@ -31,6 +83,11 @@ type ColumnDef struct {
 	Searchable bool
 	Options    map[string]string
 }
+`,
+		panel.Theme.DarkMode, primary, secondary, panel.Theme.Font.Family, panel.Theme.Font.Mono,
+		width, collapsed, panel.Layout.Sidebar.Collapsible, panel.Layout.Topbar.Sticky, maxWidth)
+
+	code += `
 
 type ListData struct {
 	Items      []map[string]interface{}

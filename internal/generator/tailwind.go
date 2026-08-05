@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 // generateAssets generates all static assets for the project: the Tailwind
@@ -35,18 +36,50 @@ func (g *Generator) generateTailwindCSS() error {
 }
 
 // generateStaticAssets writes tailwind.config.js (scanning the templ views
-// for class names) and package.json (with the build:css script) into the
-// output directory. Returns an error if either file cannot be written.
+// for class names, with dark mode enabled via the 'class' strategy and brand
+// colors/fonts from the config) and package.json (with the build:css script)
+// into the output directory. Returns an error if either file cannot be written.
 func (g *Generator) generateStaticAssets() error {
-	tailwindConfig := `/** @type {import('tailwindcss').Config} */
+	primary := g.Config.Panel.Brand.Colors.Primary
+	if primary == "" {
+		primary = "#6366f1"
+	}
+	secondary := g.Config.Panel.Brand.Colors.Secondary
+	if secondary == "" {
+		secondary = "#8b5cf6"
+	}
+
+	fontExtend := ""
+	if g.Config.Panel.Theme.Font.Family != "" || g.Config.Panel.Theme.Font.Mono != "" {
+		var sb strings.Builder
+		sb.WriteString(",\n      fontFamily: {")
+		if g.Config.Panel.Theme.Font.Family != "" {
+			sb.WriteString(fmt.Sprintf("\n        sans: %s,", fontStack(g.Config.Panel.Theme.Font.Family)))
+		}
+		if g.Config.Panel.Theme.Font.Mono != "" {
+			sb.WriteString(fmt.Sprintf("\n        mono: %s,", fontStack(g.Config.Panel.Theme.Font.Mono)))
+		}
+		sb.WriteString("\n      }")
+		fontExtend = sb.String()
+	}
+
+	tailwindConfig := fmt.Sprintf(`/** @type {import('tailwindcss').Config} */
 module.exports = {
+  darkMode: 'class',
   content: ["./internal/views/**/*.templ", "./internal/panel/auth/**/*.templ"],
   theme: {
-    extend: {},
+    extend: {
+      colors: {
+        brand: {
+          primary: %q,
+          secondary: %q,
+        },
+      }%s,
+    },
   },
   plugins: [],
 }
-`
+`, primary, secondary, fontExtend)
 	if err := os.WriteFile(filepath.Join(g.OutDir, "tailwind.config.js"), []byte(tailwindConfig), 0644); err != nil {
 		return err
 	}
@@ -68,6 +101,27 @@ module.exports = {
 	}
 
 	return nil
+}
+
+// fontStack converts a comma-separated CSS font stack ("Inter, sans-serif")
+// into a Tailwind fontFamily array of individually quoted names
+// (['Inter', 'sans-serif']), so Tailwind emits unquoted, comma-separated
+// family names instead of treating the whole stack as one quoted family.
+// Params: family (the comma-separated font stack from the config).
+// Returns: the JS array literal as a string.
+func fontStack(family string) string {
+	var parts []string
+	for _, p := range strings.Split(family, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("'%s'", p))
+	}
+	if len(parts) == 0 {
+		return "[]"
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 // RunTailwind executes `npx tailwindcss` to build the compiled CSS into

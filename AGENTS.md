@@ -113,7 +113,7 @@ mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **
 4. `generateMain()` (`main.go`) — `main.go` with driver-aware `sql.Open`
 5. `generateRouter()` (`router.go`) — chi routes + RBAC wiring, page handlers
 6. `generateAuth()` (`auth.go`) — login/logout, session, RBAC middleware
-7. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, CSV export**
+7. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, bulk, CSV export**
 8. `generatePage()` — page handlers with widget DB queries
 9. `generateViews()` (`templ.go`) — all `.templ` views
 10. `generateGoMod()` (`mod.go`, declares the templ `tool` directive), `generateMakefile()` (`makefile.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
@@ -132,6 +132,7 @@ All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 | Update POST | Raw SQL UPDATE via `db.ExecContext` |
 | Delete | Raw SQL DELETE via `db.ExecContext` |
 | Action | Raw SQL per action name (switch dispatch) |
+| Bulk | Raw SQL per bulk action name, looped once per selected id (switch dispatch) |
 | CSV Export | Raw SQL SELECT + `encoding/csv` |
 
 Create/update avoid SQLC params because `r.FormValue` returns `string` but SQLC generates typed structs (`int32` for `INTEGER`). Raw SQL `ExecContext` accepts `interface{}`.
@@ -179,6 +180,15 @@ All `.templ` files in `internal/views/*` declare `package views` — layout, com
 
 ### templ `templ.SafeURL` on every URL-bearing attr
 templ v0.3.819 requires `templ.SafeURL(...)` for `<a href>` **and** `<form action>` — a bare `fmt.Sprintf(...)` in those attrs is a compile error in generated code. Verified fixes needed this on: list/detail View+Edit links, action/delete form actions, mailto links.
+
+### `formaction` is NOT a SafeURL attr — and no `if`/expressions in `style`
+templ treats `formaction`/`formmethod` as plain string attributes: wrapping the value in `templ.SafeURL(...)` is a **compile error** (`cannot use templ.SafeURL as string in templ.JoinStringErrs`). The bulk-action buttons and per-row submit buttons (which must escape the wrapping bulk `<form method="POST">`) use `formaction={ fmt.Sprintf(...) }` + `formmethod="POST"` without SafeURL. Related templ parser rules that fail `go tool templ generate` at parse time: **`style={ expr }` is rejected** ("style attributes cannot be a templ expression") — emit widths via `data-width`/`data-collapsed` attrs and set `el.style.width` from JS instead; **`class={ if cond { "x" } }` is rejected** — use a plain Go helper function (`darkClass(theme)`) returning the class string.
+
+### Dark mode + theming (`viewmodels.ThemeConfig`, `DefaultTheme()`)
+M2 wiring: Tailwind runs `darkMode: 'class'`; `theme.extend.colors.brand.{primary,secondary}` + `fontFamily` come from the YAML. `internal/generator/viewmodels.go` defines `ThemeConfig` (DarkMode, BrandPrimary, BrandSecondary, FontFamily, FontMono, SidebarWidth, SidebarCollapsedWidth, SidebarCollapsible, TopbarSticky, MaxContentWidth) built by `DefaultTheme()` with hex defaults `#6366f1`/`#8b5cf6`. Every `layoutviews.Base(title, panelPath, theme, views.Xxx(vd))` call site passes `viewmodels.DefaultTheme()`. `Base` sets `:root { --brand-primary/--brand-secondary }`, `<html class={ darkClass(theme) }>`, a `toggleTheme()` JS + `localStorage['gf-theme']` persistence (login.templ re-reads it too), and Chart.js reads `--brand-primary` at runtime. `Sidebar`/`Topbar` take the theme param; the sidebar gets its width from a JS init using `data-width`/`data-collapsed`. **Tailwind `fontFamily` values are comma-separated stacks** ("Inter, sans-serif") — emit them through the `fontStack()` helper in `tailwind.go` which splits/quotes each name (`['Inter', 'sans-serif']`); a single quoted `'Inter, sans-serif'` array item becomes one bogus font-family.
+
+### Bulk actions (`bulk: true`)
+`hasBulkActions(r)` (handler.go) guards the router line `r.Post("/{name}/bulk/{action}", name.Bulk(db))` — plain `r.Post`, no RBAC (matches custom-action routes). `generateBulkHandler` writes `bulk.go` (package `{resource}`): `Bulk(db)` reads `r.PathValue("action")`, `ParseForm`, collects `r.Form["ids"]` via `strconv.ParseInt`, `switch`es over bulk-action SQL, loops `db.ExecContext(ctx, q, id)`, redirects to the list (302). The list templ wraps the table in one `<form method="POST">` when bulk actions exist: a select-all checkbox (`toggleSelectAll`), per-row `name="ids"` checkboxes, per-row action buttons + Edit/Delete as `formaction`/`formmethod` submit buttons (NOT SafeURL), and a "N Selected" toolbar posting to `/{res}/bulk/{action}`. Bulk actions must NOT also render as per-row action buttons.
 
 ### Select options render from `data.Fields`, not static HTML
 Form select options are rendered at runtime by looping `data.Fields` for the matching field and ranging its `Options`. The generated handler wires `options_query` into `ColumnDef.Options` (`formFieldDefsWithOpts`); the templ compares with `viewmodels.OptionValue(data.Item[f.Name])` because sqlc populates `sql.NullInt64`/`sql.NullString` (a bare `fmt.Sprintf("%v")` on `{1 true}` won't match key `"1"`).

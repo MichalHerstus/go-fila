@@ -187,7 +187,7 @@ panel:
   name: "My Admin"     # Display name shown in the sidebar and login page.
 ```
 
-The `brand`, `layout`, and `theme` sub-sections are parsed by the config schema but are **not yet wired into the generated output** (they are accepted for forward-compatibility):
+The `brand`, `layout`, and `theme` sub-sections are wired into the generated output. `brand.colors` becomes the Tailwind `brand.primary`/`brand.secondary` palette and `--brand-primary`/`--brand-secondary` CSS variables; `layout.sidebar` controls the collapsible sidebar width (via `data-width`/`data-collapsed` and a JS toggle), `layout.topbar.sticky` pins the topbar, `layout.max_content_width` wraps the main content; `theme.dark_mode` turns dark mode on by default (togglable in the topbar and persisted in `localStorage`), and `theme.font` adds `body`/`code` font families to the layout and login pages:
 
 ```yaml
 panel:
@@ -445,14 +445,14 @@ The card view is view-only (no CRUD wiring of its own). It is served at `GET /{p
     actions:
       - name: activate          # REQUIRED action id, used in the POST route + switch case
         label: "Activate"       # button text
-        icon: check             # parsed but not yet used
+        icon: check             # inline SVG icon rendered next to the label
         color: success          # button color: success | danger | warning | (default: gray)
-        requires_confirmation: true  # parsed but not yet used
-        bulk: true              # parsed but not yet used
+        requires_confirmation: true  # JS confirm() dialog before submitting
+        bulk: true              # render as a bulk action (row checkboxes + toolbar)
         query: ActivateUser     # REQUIRED raw SQL executed via db.ExecContext on POST
 ```
 
-Each action produces a POST route `/<panel>/<resource>/{id}/action/<name>`. On submit the handler `switch`es on the action name and runs its `query` with `int64(id)`, then redirects to the list. Unknown action names return 404.
+Each action produces a POST route `/<panel>/<resource>/{id}/action/<name>`. On submit the handler `switch`es on the action name and runs its `query` with `int64(id)`, then redirects to the list. Unknown action names return 404. A `requires_confirmation` action shows a `confirm()` dialog (using `label`) before POSTing; an `icon` renders a small SVG next to the label; a `bulk: true` action adds row checkboxes + a select-all and a "N Selected" toolbar in the list view that posts to `/<panel>/<resource>/bulk/<name>` (a plain, non-RBAC POST route handled by the generated `bulk.go`, which loops the action's SQL once per selected id).
 
 #### policies (RBAC)
 

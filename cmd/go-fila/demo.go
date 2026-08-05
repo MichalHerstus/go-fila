@@ -3,7 +3,8 @@
 // Implements `go-fila init --demo`: scaffolds a full-featured sqlite demo
 // project built around an order-management domain. Besides the go-fila.yaml
 // config (resources, pages, widgets, navigation, auth, RBAC policies, card and
-// kanban views, custom actions) it writes a sqlite schema with related tables
+// kanban views, custom and bulk actions, dark-mode brand theme) it writes a
+// sqlite schema with related tables
 // (roles, users, customers, products, orders, orderlines) and seeds the
 // database with realistic demo data (~50-100 rows per table) including an
 // admin user (admin@demo.test / admin) and bcrypt-hashed passwords.
@@ -705,6 +706,13 @@ resources:
         color: danger
         requires_confirmation: true
         query: "UPDATE orders SET status = 'cancelled' WHERE id = $1"
+      - name: complete_selected
+        label: "Complete Selected"
+        icon: check
+        color: success
+        requires_confirmation: true
+        bulk: true
+        query: "UPDATE orders SET status = 'completed' WHERE id = $1"
     policies:
       view_any: "admin|manager"
       view: "admin|manager"
@@ -869,6 +877,12 @@ pages:
         label: "Recent Orders"
         query: SELECT id, customer_name, total, status, created_at FROM orders ORDER BY created_at DESC LIMIT 5
         data_columns: [id, customer_name, total, status, created_at]
+      - type: list
+        label: "Store Snapshot"
+        query: SELECT 'Customers' AS label, COUNT(*) AS value FROM customers UNION ALL SELECT 'Products', COUNT(*) FROM products UNION ALL SELECT 'Open Orders', COUNT(*) FROM orders WHERE status IN ('pending', 'processing') UNION ALL SELECT 'Orders Completed', COUNT(*) FROM orders WHERE status = 'completed'
+      - type: html
+        label: "Announcement"
+        query: SELECT '<p class="text-sm leading-relaxed">Welcome to the <strong class="font-semibold">Acme Shop</strong> admin panel. Use the sidebar to manage orders, customers, products and staff. The <strong class="font-semibold">Orders</strong> list supports bulk actions — select rows and press <em>Complete Selected</em>.</p>'
   - name: Reports
     path: /Reports
     widgets:

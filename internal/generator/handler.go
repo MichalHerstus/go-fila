@@ -55,7 +55,25 @@ func (g *Generator) generateResource(r types.Resource) error {
 			return err
 		}
 	}
+	if hasBulkActions(r) {
+		if err := g.generateBulkHandler(dir, r); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// hasBulkActions reports whether any action on the resource declares the bulk
+// flag, which enables the bulk route and the bulk UI on the list view.
+// Params: r (the resource definition).
+// Returns: true when at least one action is bulk-enabled.
+func hasBulkActions(r types.Resource) bool {
+	for _, a := range r.Actions {
+		if a.Bulk {
+			return true
+		}
+	}
+	return false
 }
 
 // colDefsStr renders the []viewmodels.ColumnDef literal for a list of
@@ -229,7 +247,7 @@ func List(db *sql.DB) http.HandlerFunc {
 	}()+`
         }
 
-        validSorts := map[string]bool{`, 		pkgName,
+        validSorts := map[string]bool{`, pkgName,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/views/layout")))
 
@@ -423,7 +441,7 @@ func List(db *sql.DB) http.HandlerFunc {
             PanelPath: ` + fmt.Sprintf("%q", g.Config.Panel.Path) + `,
         }
 
-        ` + fmt.Sprintf("layoutviews.Base(%q, %q, views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
+        ` + fmt.Sprintf("layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
     }
 }
 `)
@@ -765,7 +783,7 @@ func Cards(db *sql.DB) http.HandlerFunc {
             PanelPath:     %q,
         }
 
-        layoutviews.Base(%q, %q, views.%sCards(vd)).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sCards(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
@@ -836,7 +854,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
             PanelPath: %q,
         }
 
-        layoutviews.Base(%q, %q, views.%sDetail(vd)).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sDetail(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
@@ -1063,6 +1081,70 @@ func Action(db *sql.DB) http.HandlerFunc {
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
 
+// generateBulkHandler writes bulk.go: a Bulk(db) handler that parses the
+// :action path parameter and the repeated "ids" form values, switching over the
+// configured bulk actions and executing each action's SQL once per selected id,
+// then redirecting to the resource list. Unknown action names return 404.
+// Params: dir (resource package directory), r (the resource definition).
+// Returns: an error on write failure.
+func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
+	pkgName := strings.ToLower(r.Name)
+	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
+
+	var dispatch []string
+	for _, a := range r.Actions {
+		if !a.Bulk {
+			continue
+		}
+		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+        for _, id := range ids {
+            _, err := db.ExecContext(r.Context(), %q, id)
+            if err != nil {
+                http.Error(w, err.Error(), http.StatusInternalServerError)
+                return
+            }
+        }
+`, a.Name, a.Query))
+	}
+
+	code := fmt.Sprintf(`package %s
+
+import (
+    "database/sql"
+    "net/http"
+    "strconv"
+)
+
+func Bulk(db *sql.DB) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        actionName := r.PathValue("action")
+
+        if err := r.ParseForm(); err != nil {
+            http.Error(w, "invalid form", http.StatusBadRequest)
+            return
+        }
+
+        ids := make([]int64, 0)
+        for _, raw := range r.Form["ids"] {
+            if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
+                ids = append(ids, id)
+            }
+        }
+
+        switch actionName {
+%s    default:
+            http.Error(w, "unknown action", http.StatusNotFound)
+            return
+        }
+
+        http.Redirect(w, r, %q, http.StatusFound)
+    }
+}
+`, pkgName, strings.Join(dispatch, "\n"), listPath)
+
+	return os.WriteFile(filepath.Join(dir, "bulk.go"), []byte(code), 0644)
+}
+
 // generateCreateHandler writes create.go: a Create(db) handler serving the
 // create form on GET and inserting a new row on POST. It builds the INSERT
 // statement from the create form fields, bcrypt-hashes password fields, saves
@@ -1183,7 +1265,7 @@ func Create(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  true,
             }
-            layoutviews.Base(%q, %q, views.%sForm(vd)).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -1437,7 +1519,7 @@ func Update(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  false,
             }
-            layoutviews.Base(%q, %q, views.%sForm(vd)).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 

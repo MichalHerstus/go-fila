@@ -316,60 +316,96 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 // generateAuthLoginTempl writes the login.templ page: a full standalone HTML
 // document (Tailwind styled) that posts the email/password form to
-// panelPath/login and shows any login error message.
+// panelPath/login and shows any login error message. The page honors the
+// panel's dark-mode default and persists the user's toggle via localStorage
+// like the Base layout does.
 // Params: dir (the auth package directory), panelName (panel display name),
 // panelPath (panel base path used in the form action).
 // Returns: an error on write failure.
 func (g *Generator) generateAuthLoginTempl(dir string, panelName, panelPath string) error {
+	primary := g.Config.Panel.Brand.Colors.Primary
+	if primary == "" {
+		primary = "#6366f1"
+	}
+	secondary := g.Config.Panel.Brand.Colors.Secondary
+	if secondary == "" {
+		secondary = "#8b5cf6"
+	}
+	styleFonts := ""
+	if g.Config.Panel.Theme.Font.Family != "" {
+		styleFonts += fmt.Sprintf("\n    body { font-family: %s; }", g.Config.Panel.Theme.Font.Family)
+	}
+	if g.Config.Panel.Theme.Font.Mono != "" {
+		styleFonts += fmt.Sprintf("\n    code, pre { font-family: %s; }", g.Config.Panel.Theme.Font.Mono)
+	}
+	htmlClass := ""
+	if g.Config.Panel.Theme.DarkMode {
+		htmlClass = ` class="dark"`
+	}
+
 	code := fmt.Sprintf(`package auth
 
 templ LoginPage(data LoginPageData) {
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="en"%s>
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Login - %s</title>
         <link href="/static/css/styles.css" rel="stylesheet" />
+        <style>
+            :root {
+                --brand-primary: %s;
+                --brand-secondary: %s;
+            }%s
+        </style>
     </head>
-    <body class="bg-gray-50 min-h-screen flex items-center justify-center">
+    <body class="bg-gray-50 dark:bg-gray-900 min-h-screen flex items-center justify-center">
         <div class="w-full max-w-md">
-            <div class="bg-white shadow rounded-lg p-8">
+            <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-8">
                 <div class="text-center mb-8">
-                    <h1 class="text-2xl font-bold text-gray-900">%s</h1>
-                    <p class="text-sm text-gray-500 mt-1">Sign in to your account</p>
+                    <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">%s</h1>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Sign in to your account</p>
                 </div>
 
                 if data.Error != "" {
-                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-4 text-sm">
+                <div class="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-700 text-red-700 dark:text-red-300 px-4 py-3 rounded mb-4 text-sm">
                     { data.Error }
                 </div>
                 }
 
                 <form action="%s/login" method="POST" class="space-y-4">
                     <div>
-                        <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                        <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
                         <input type="email" id="email" name="email" value={ data.Email } required
-                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+                            class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
                     </div>
                     <div>
-                        <label for="password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                        <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
                         <input type="password" id="password" name="password" required
-                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm border px-3 py-2" />
+                            class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
                     </div>
                     <div>
                         <button type="submit"
-                            class="w-full bg-indigo-600 text-white py-2 px-4 rounded-md text-sm font-medium hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            class="w-full bg-brand-primary text-white py-2 px-4 rounded-md text-sm font-medium hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-brand-primary">
                             Sign in
                         </button>
                     </div>
                 </form>
             </div>
         </div>
+        <script>
+            (function() {
+                var html = document.documentElement;
+                var saved = localStorage.getItem('gf-theme');
+                if (saved === 'dark') { html.classList.add('dark'); }
+                else if (saved === 'light') { html.classList.remove('dark'); }
+            })();
+        </script>
     </body>
     </html>
 }
-`, panelName, panelName, panelPath)
+`, htmlClass, panelName, primary, secondary, styleFonts, panelName, panelPath)
 
 	return os.WriteFile(filepath.Join(dir, "login.templ"), []byte(code), 0644)
 }
