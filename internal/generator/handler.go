@@ -938,13 +938,38 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
 	tName := tableName(r)
 
+	hooksImport := ""
+	if r.Form.Delete.Hooks != nil {
+		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
+	}
+
+	middle := ""
+	if r.Form.Delete.Hooks != nil {
+		middle += fmt.Sprintf(`        scope := hooks.Scope{
+            Table:  %q,
+            Action: "delete",
+            ID:     int64(id),
+        }
+`, tName)
+		middle += hookCallsStr(r.Form.Delete.Hooks.Before, "scope", "        ") + "\n"
+	}
+	middle += fmt.Sprintf(`        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE id = $1", int64(id))
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+`, tName)
+	if r.Form.Delete.Hooks != nil {
+		middle += hookCallsStr(r.Form.Delete.Hooks.After, "scope", "        ") + "\n"
+	}
+
 	code := fmt.Sprintf(`package %s
 
 import (
     "database/sql"
     "net/http"
     "strconv"
-)
+%s)
 
 func Delete(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -955,16 +980,11 @@ func Delete(db *sql.DB) http.HandlerFunc {
             return
         }
 
-        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE id = $1", int64(id))
-        if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
+%s
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, tName, listPath)
+`, pkgName, hooksImport, middle, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
@@ -1035,10 +1055,13 @@ func ExportCSV(db *sql.DB) http.HandlerFunc {
 func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
+	tName := tableName(r)
 
+	hasHooks := false
 	var dispatch []string
 	for _, a := range r.Actions {
-		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+		if a.Hooks == nil {
+			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
         {
             _, err := db.ExecContext(r.Context(), %q, int64(id))
             if err != nil {
@@ -1047,6 +1070,32 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
             }
         }
 `, a.Name, a.Query))
+			continue
+		}
+		hasHooks = true
+		before := hookCallsStr(a.Hooks.Before, "scope", "            ")
+		after := hookCallsStr(a.Hooks.After, "scope", "            ")
+		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+        {
+            scope := hooks.Scope{
+                Table:  %q,
+                Action: %q,
+                ID:     int64(id),
+            }
+%s
+            _, err := db.ExecContext(r.Context(), %q, int64(id))
+            if err != nil {
+                http.Error(w, err.Error(), http.StatusInternalServerError)
+                return
+            }
+%s
+        }
+`, a.Name, tName, a.Name, before, a.Query, after))
+	}
+
+	hooksImport := ""
+	if hasHooks {
+		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1055,7 +1104,7 @@ import (
     "database/sql"
     "net/http"
     "strconv"
-)
+%s)
 
 func Action(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1076,7 +1125,7 @@ func Action(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, strings.Join(dispatch, "\n"), listPath)
+`, pkgName, hooksImport, strings.Join(dispatch, "\n"), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
@@ -1158,6 +1207,7 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	tName := tableName(r)
 
 	paramFields := r.Form.Create.Fields
+	create := r.Form.Create
 
 	var optLoadCode string
 	var optVars map[string]string
@@ -1192,6 +1242,11 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	if hasPassword {
 		bcryptImport = `    "golang.org/x/crypto/bcrypt"
 `
+	}
+
+	hooksImport := ""
+	if create.Hooks != nil {
+		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
 
 	fileImport := ""
@@ -1232,9 +1287,38 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
 		formParseCode = "r.ParseMultipartForm(32 << 20)"
 	}
 
-	placeholders := make([]string, len(colNames))
-	for i := range colNames {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
+	postCode := fmt.Sprintf(`        cols := []string{%s}
+        vals := []interface{}{%s}
+        placeholders := make([]string, len(cols))
+        for i := range cols {
+            placeholders[i] = fmt.Sprintf("$%%d", i+1)
+        }
+        query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
+`, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
+	if create.Hooks != nil {
+		postCode += fmt.Sprintf(`        scope := hooks.Scope{
+            Table:  %q,
+            Action: "create",
+            Values: map[string]interface{}{
+%s        },
+        }
+`, tName, scopeValuesStr(colNames))
+		postCode += hookCallsStr(create.Hooks.Before, "scope", "        ") + "\n"
+		postCode += fmt.Sprintf(`        var newID int64
+        if err := db.QueryRowContext(r.Context(), query+%q, vals...).Scan(&newID); err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+        scope.ID = newID
+`, g.returningClause(r))
+		postCode += hookCallsStr(create.Hooks.After, "scope", "        ") + "\n"
+	} else {
+		postCode += `        _, err := db.ExecContext(r.Context(), query, vals...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+`
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1244,7 +1328,7 @@ import (
     "fmt"
     "net/http"
     "strings"
-%s%s
+%s%s%s
     %q
     %q
     layoutviews %q
@@ -1275,25 +1359,14 @@ func Create(db *sql.DB) http.HandlerFunc {
         }
 
 %s
-        cols := []string{%s}
-        vals := []interface{}{%s}
-        placeholders := make([]string, len(cols))
-        for i := range cols {
-            placeholders[i] = fmt.Sprintf("$%%d", i+1)
-        }
-        query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-        _, err := db.ExecContext(r.Context(), query, vals...)
-        if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
+%s
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
 %s`, pkgName,
 		bcryptImport,
 		fileImport,
+		hooksImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/views/layout"),
 		optLoadCode,
@@ -1306,9 +1379,7 @@ func Create(db *sql.DB) http.HandlerFunc {
 		r.Name,
 		formParseCode,
 		preHashCode,
-		colsLiteral(colNames),
-		strings.Join(valExprs, ", "),
-		tName,
+		postCode,
 		listPath,
 		uploadHelper)
 
@@ -1406,6 +1477,7 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	}
 
 	paramFields := r.Form.Update.Fields
+	update := r.Form.Update
 
 	var optLoadCode string
 	var optVars map[string]string
@@ -1428,6 +1500,11 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 		} else {
 			valExprs = append(valExprs, fmt.Sprintf("r.FormValue(%q)", f.Name))
 		}
+	}
+
+	hooksImport := ""
+	if update.Hooks != nil {
+		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
 
 	fileImport := ""
@@ -1473,6 +1550,36 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
 		populateFields = append(populateFields, fmt.Sprintf("            %q: item.%s,", f.Name, goName))
 	}
 
+	postCode := fmt.Sprintf(`        cols := []string{%s}
+        vals := []interface{}{%s}
+        setClauses := make([]string, len(cols))
+        for i, col := range cols {
+            setClauses[i] = fmt.Sprintf("%%s = $%%d", col, i+1)
+        }
+        vals = append(vals, int64(id))
+        query := fmt.Sprintf("UPDATE %%s SET %%s WHERE id = $%%d", %q, strings.Join(setClauses, ", "), len(cols)+1)
+`, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
+	if update.Hooks != nil {
+		postCode += fmt.Sprintf(`        scope := hooks.Scope{
+            Table:  %q,
+            Action: "update",
+            ID:     int64(id),
+            Values: map[string]interface{}{
+%s        },
+        }
+`, tName, scopeValuesStr(colNames))
+		postCode += hookCallsStr(update.Hooks.Before, "scope", "        ") + "\n"
+	}
+	postCode += `        _, err = db.ExecContext(r.Context(), query, vals...)
+        if err != nil {
+            http.Error(w, err.Error(), http.StatusInternalServerError)
+            return
+        }
+`
+	if update.Hooks != nil {
+		postCode += hookCallsStr(update.Hooks.After, "scope", "        ") + "\n"
+	}
+
 	code := fmt.Sprintf(`package %s
 
 import (
@@ -1481,7 +1588,7 @@ import (
     "net/http"
     "strconv"
     "strings"
-%s
+%s%s
     %q
     %q
     %q
@@ -1528,25 +1635,13 @@ func Update(db *sql.DB) http.HandlerFunc {
             return
         }
 
-        cols := []string{%s}
-        vals := []interface{}{%s}
-        setClauses := make([]string, len(cols))
-        for i, col := range cols {
-            setClauses[i] = fmt.Sprintf("%%s = $%%d", col, i+1)
-        }
-        vals = append(vals, int64(id))
-        query := fmt.Sprintf("UPDATE %%s SET %%s WHERE id = $%%d", %q, strings.Join(setClauses, ", "), len(cols)+1)
-        _, err = db.ExecContext(r.Context(), query, vals...)
-        if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
+%s
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
 %s`, pkgName,
 		fileImport,
+		hooksImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/views/layout"),
 		populateQuery,
@@ -1561,9 +1656,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 		g.Config.Panel.Path,
 		r.Name,
 		formParseCode,
-		colsLiteral(colNames),
-		strings.Join(valExprs, ", "),
-		tName,
+		postCode,
 		listPath,
 		uploadHelper)
 

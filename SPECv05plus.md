@@ -1,6 +1,6 @@
 # go-fila — Phase v0.5+ Specification & Implementation Plan
 
-**Status:** Milestones 1 & 2 implemented (see `session-ses_04c7.md`); M3+ planned.
+**Status:** Milestones 1, 2 & 3 implemented (see `session-ses_04c7.md`); M4+ planned.
 **Audience:** contributors implementing phase v0.5+
 **Source:** `SPEC.md` Phased Development table row `v0.5+` — *"Plugins, custom actions, hooks, file uploads, CSV export, dark mode, multi-panel"*
 
@@ -16,7 +16,7 @@ The SPEC v0.5+ row lists seven deliverables. Three are already implemented and v
 | File uploads | **Done** — `file`/`image` fields, `saveUploadedFile`, multipart | — |
 | CSV export | **Done** — M1 fixed the list button to link to `/{res}/export/csv` | **M1 — done** |
 | Dark mode | **Done** — M2 wired `panel.theme.dark_mode` (class-based, toggled + persisted), brand colors, fonts, layout widths | **M2 — done** |
-| Hooks | **Missing** — no concept anywhere in the schema/generator | **M3** |
+| Hooks | **Done** — `before`/`after` hooks on create/update/delete + custom actions; fn stubs in `internal/hooks`, inline SQL hooks, `RETURNING id` id capture | **M3 — done** |
 | Plugins | **Missing** — nothing parses `plugins:` | **M4** |
 | Multi-panel | **Missing** — `Config.Panel` is a single struct | **M5** |
 
@@ -90,7 +90,7 @@ Apply `dark:` variants to all shared surfaces: `bg-white` → `bg-white dark:bg-
 
 ---
 
-## 5. Milestone 3 — Hooks
+## 5. Milestone 3 — Hooks — DONE
 
 ### 5.1 YAML schema (`types/hook.go`, `types/resource.go`)
 ```go
@@ -152,10 +152,11 @@ Stubs compile out of the box; the user fills them in. The generated handlers imp
 - **update.go POST:** before → UPDATE → after (id known).
 - **delete.go:** before → DELETE → after.
 - **actions.go:** per case `{ before → ExecContext(query, id) → after }` inside the block scope (block scope is required — AGENTS.md gotcha).
-- `fn` hooks call `hooks.<Fn>(r.Context(), db, scope)`; `sql` hooks are inlined as `db.ExecContext(r.Context(), "<sql>", int64(id))`.
-- **Sprintf format-specifier drift is the #1 risk here** (AGENTS.md) — this milestone adds many new `%s` emissions.
+- `fn` hooks call `hooks.<Fn>(r.Context(), db, scope)`; `sql` hooks are inlined as `db.ExecContext(r.Context(), "<sql>", scope.ID)` (the scope id is 0 for before-create, the new row id after-create, and the path id for update/delete/actions).
+- **The generated handler imports the hooks package whenever a hook block is declared** (not only when an fn hook exists) — the `hooks.Scope{...}` literal itself lives in that package, so a sql-only hook still needs the import. Verified against a sqlite demo: `before_create` fn + `after_create`/`after_delete` sql hooks + an action fn hook all fire and are observable in an audit table.
+- **Sprintf format-specifier drift is the #1 risk here** (AGENTS.md) — this milestone adds many new `%s` emissions. Every hook SQL string is passed as a Sprintf *arg* (`%q`), never concatenated into a template.
 
-**Exit criteria:** e2e — a `before_create` fn hook and an `after_delete` sql hook both fire and are observable (e.g., audit-table rows).
+**Exit criteria (met):** e2e — a `before_create` fn hook and an `after_delete` sql hook both fire and are observable (e.g., audit-table rows). sqlite create id capture via `RETURNING id` verified (`QueryRowContext(...).Scan(&newID)`); mssql uses `OUTPUT INSERTED.<id>` (best-effort, untested on live MSSQL).
 
 ---
 

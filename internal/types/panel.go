@@ -17,17 +17,17 @@ type Page struct {
 // stat (label/query/icon/color), chart (label/query + Chart), table
 // (label/query/data_columns), stats_grid (columns + nested Widgets), list/html.
 type Widget struct {
-	Type        string        `yaml:"type"`
-	Label       string        `yaml:"label"`
-	Query       string        `yaml:"query"`
-	Icon        string        `yaml:"icon"`
-	Color       string        `yaml:"color"`
-	Prefix      string        `yaml:"prefix"`
-	Limit       int           `yaml:"limit"`
-	Columns     int           `yaml:"columns"`
-	DataColumns []string      `yaml:"data_columns"`
-	Widgets     []Widget      `yaml:"widgets"`
-	Chart       *ChartConfig  `yaml:"chart"`
+	Type        string       `yaml:"type"`
+	Label       string       `yaml:"label"`
+	Query       string       `yaml:"query"`
+	Icon        string       `yaml:"icon"`
+	Color       string       `yaml:"color"`
+	Prefix      string       `yaml:"prefix"`
+	Limit       int          `yaml:"limit"`
+	Columns     int          `yaml:"columns"`
+	DataColumns []string     `yaml:"data_columns"`
+	Widgets     []Widget     `yaml:"widgets"`
+	Chart       *ChartConfig `yaml:"chart"`
 }
 
 // ChartConfig configures a chart widget: the chart type and optional query

@@ -82,6 +82,7 @@ type FormAction struct {
 	PopulateQuery  string            `yaml:"populate_query"`
 	PopulateParams map[string]string `yaml:"populate_params"`
 	Fields         []Field           `yaml:"fields"`
+	Hooks          *Hooks            `yaml:"hooks"`
 }
 
 // Field is a single form/detail field: its name, label, type, required flag,
@@ -116,6 +117,7 @@ type Action struct {
 	RequiresConfirmation bool   `yaml:"requires_confirmation"`
 	Bulk                 bool   `yaml:"bulk"`
 	Query                string `yaml:"query"`
+	Hooks                *Hooks `yaml:"hooks"`
 }
 
 // Policy lists the roles allowed for each resource action (view_any, view,

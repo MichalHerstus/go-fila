@@ -454,6 +454,24 @@ The card view is view-only (no CRUD wiring of its own). It is served at `GET /{p
 
 Each action produces a POST route `/<panel>/<resource>/{id}/action/<name>`. On submit the handler `switch`es on the action name and runs its `query` with `int64(id)`, then redirects to the list. Unknown action names return 404. A `requires_confirmation` action shows a `confirm()` dialog (using `label`) before POSTing; an `icon` renders a small SVG next to the label; a `bulk: true` action adds row checkboxes + a select-all and a "N Selected" toolbar in the list view that posts to `/<panel>/<resource>/bulk/<name>` (a plain, non-RBAC POST route handled by the generated `bulk.go`, which loops the action's SQL once per selected id).
 
+#### hooks
+
+`before`/`after` lifecycle hooks can be attached to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is either a user-implemented Go function or an inline SQL statement:
+
+```yaml
+    form:
+      create:
+        hooks:
+          before:
+            - name: validate_domain
+              fn: ValidateUserDomain      # stub generated in internal/hooks/hooks.go
+          after:
+            - name: notify
+              sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"
+```
+
+The generator emits `internal/hooks/hooks.go` with a `Scope` struct (`ID`, `Table`, `Action`, `Values`) and one compile-ready stub per `fn` hook — you fill the bodies in. `sql` hooks run inline via `db.ExecContext(..., <sql>, scope.ID)`. On create, the insert switches to a driver-aware `RETURNING <id>` (postgres/sqlite) / `OUTPUT INSERTED.<id>` (mssql) so after-create hooks receive the new row id. Hook failures abort the request with HTTP 500.
+
 #### policies (RBAC)
 
 ```yaml

@@ -107,16 +107,17 @@ mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **
 
 `generator.go` orchestrates calls to (in order):
 
-1. `ensureDirs()` — directory layout (also creates `sql/queries` + `sql/migrations`)
+1. `ensureDirs()` — directory layout (also creates `sql/queries` + `sql/migrations` + `internal/hooks`)
 2. `generateSQLCConfig()` (`sqlc.go`) — sqlc.yaml, driver-aware engine
 3. `copySQLFiles()` (`generator.go`) — copies user SQL into the out dir
 4. `generateMain()` (`main.go`) — `main.go` with driver-aware `sql.Open`
 5. `generateRouter()` (`router.go`) — chi routes + RBAC wiring, page handlers
 6. `generateAuth()` (`auth.go`) — login/logout, session, RBAC middleware
-7. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, bulk, CSV export**
+7. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, bulk, CSV export** (hooks wired into create/update/delete/action)
 8. `generatePage()` — page handlers with widget DB queries
 9. `generateViews()` (`templ.go`) — all `.templ` views
-10. `generateGoMod()` (`mod.go`, declares the templ `tool` directive), `generateMakefile()` (`makefile.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
+10. `generateHooks()` (`hooks.go`) — shared `internal/hooks/hooks.go` (Scope + stubs)
+11. `generateGoMod()` (`mod.go`, declares the templ `tool` directive), `generateMakefile()` (`makefile.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
 
 All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 
@@ -149,7 +150,7 @@ Optional per-resource view at `GET /{panel}/{resource}/cards` (reachable via a "
 ## Critical gotchas
 
 ### Format specifier counting in Sprintf
-Every `%s`/`%q`/`%d` must have a matching arg. `%%` is escaped (produce `%` in output, no arg consumed). A mismatch silently produces garbled Go source (e.g. `%!s(MISSING)` literal in emitted templ). This is especially dangerous when a templ substring is built with its own `fmt.Sprintf` and then inserted into a parent one — any `%v`/`%d`/`%s` **inside** emitted `fmt.Sprintf(...)` calls must be doubled (`%%v`) in the generator source. `buildOptionsLoader`, `preHashCode`, `fileImport` insertions, and the `cardBody`/`actions`/`gridView`/`kanbanView` strings in `templ.go` are common drift points.
+Every `%s`/`%q`/`%d` must have a matching arg. `%%` is escaped (produce `%` in output, no arg consumed). A mismatch silently produces garbled Go source (e.g. `%!s(MISSING)` literal in emitted templ). This is especially dangerous when a templ substring is built with its own `fmt.Sprintf` and then inserted into a parent one — any `%v`/`%d`/`%s` **inside** emitted `fmt.Sprintf(...)` calls must be doubled (`%%v`) in the generator source. `buildOptionsLoader`, `preHashCode`, `fileImport` insertions, the `cardBody`/`actions`/`gridView`/`kanbanView` strings in `templ.go`, and the `hookCallsStr`/`scopeValuesStr`/postCode builders in `hooks.go`/`handler.go` are common drift points.
 
 ### `snakeToPascal` matches sqlc's field naming
 `snakeToPascal` lowercases the whole input, splits only on `_`, and maps the `id` segment to `ID` — this is sqlc's exact algorithm, so:
@@ -189,6 +190,14 @@ M2 wiring: Tailwind runs `darkMode: 'class'`; `theme.extend.colors.brand.{primar
 
 ### Bulk actions (`bulk: true`)
 `hasBulkActions(r)` (handler.go) guards the router line `r.Post("/{name}/bulk/{action}", name.Bulk(db))` — plain `r.Post`, no RBAC (matches custom-action routes). `generateBulkHandler` writes `bulk.go` (package `{resource}`): `Bulk(db)` reads `r.PathValue("action")`, `ParseForm`, collects `r.Form["ids"]` via `strconv.ParseInt`, `switch`es over bulk-action SQL, loops `db.ExecContext(ctx, q, id)`, redirects to the list (302). The list templ wraps the table in one `<form method="POST">` when bulk actions exist: a select-all checkbox (`toggleSelectAll`), per-row `name="ids"` checkboxes, per-row action buttons + Edit/Delete as `formaction`/`formmethod` submit buttons (NOT SafeURL), and a "N Selected" toolbar posting to `/{res}/bulk/{action}`. Bulk actions must NOT also render as per-row action buttons.
+
+### Hooks (`hooks.go`, `RETURNING id`)
+Hooks attach to `FormAction` (create/update/delete) and `Action`. `internal/generator/hooks.go` emits the shared `internal/hooks/hooks.go` (Scope struct + one stub per unique fn hook, deduped across the whole config) and the `hookCallsStr`/`scopeValuesStr`/`returningClause` snippet builders. Gotchas:
+- **Any hook block forces the `hooks` import in the generated handler** — the `hooks.Scope{...}` literal lives in the hooks package, so a sql-only hook still needs `import hooks "…/internal/hooks"`. Condition on `Hooks != nil`, NOT on `HasFn()`.
+- **create id capture**: only when `create.Hooks != nil` does the create POST switch from `db.ExecContext(query, vals...)` to `db.QueryRowContext(r.Context(), query+" RETURNING <id>", vals...).Scan(&newID)` (postgres/sqlite) or `" OUTPUT INSERTED.<id>"` (mssql, no RETURNING in T-SQL) — `idColumn(r)` drives the column. `scope.ID = newID` runs before after-hooks. The hookless path stays byte-identical (`ExecContext`, no RETURNING).
+- `sql` hooks are emitted as `db.ExecContext(r.Context(), "<sql>", scope.ID)` — always pass the SQL as a Sprintf **arg** (`%q`), never concatenate it into a template (a `%` inside hook SQL would corrupt the emitted source). `scope.ID` is 0 for before-create, the new row id after-create, the parsed path id otherwise; `$1` works on sqlite (named-param syntax + positional binding) and mssql (loose `$N`).
+- Hooks run inside the action case's mandatory `{ }` block scope (actions.go); the hook lines use `if err := …` so the later `_, err :=` in the block still compiles. A hook error aborts the request with HTTP 500.
+- `bulk.go` does NOT run hooks — bulk reuses the action SQL without the before/after lifecycle.
 
 ### Select options render from `data.Fields`, not static HTML
 Form select options are rendered at runtime by looping `data.Fields` for the matching field and ranging its `Options`. The generated handler wires `options_query` into `ColumnDef.Options` (`formFieldDefsWithOpts`); the templ compares with `viewmodels.OptionValue(data.Item[f.Name])` because sqlc populates `sql.NullInt64`/`sql.NullString` (a bare `fmt.Sprintf("%v")` on `{1 true}` won't match key `"1"`).
@@ -258,9 +267,9 @@ Chart.js is **vendored at build time** — no CDN, runtime is offline. The gener
 | `cmd/go-fila/introspect.go` | `init --db` — DB introspection, auth table creation, YAML/SQL generation |
 | `cmd/go-fila/edit.go` | `edit` — entry point for interactive YAML config editor |
 | `cmd/go-fila/editor/` | TUI editor: stack-based navigation, huh forms, list managers (10 files) |
-| `internal/types/` | YAML-tagged Go structs for config schema (4 files: config.go, panel.go, resource.go, field.go) |
+| `internal/types/` | YAML-tagged Go structs for config schema (5 files: config.go, panel.go, resource.go, field.go, hook.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (11 files, see above) |
+| `internal/generator/` | Code generation pipeline (12 files, see above) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/go-fila/main.go`'s `cmdInit` |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
 | `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |

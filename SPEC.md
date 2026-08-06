@@ -270,6 +270,30 @@ resources:
       delete: "admin"
 ```
 
+### Hooks (v0.5+)
+
+`before`/`after` lifecycle hooks attach to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is either a user-implemented Go function (`fn`) or an inline SQL statement (`sql`):
+
+```yaml
+    form:
+      create:
+        hooks:
+          before:
+            - name: validate_domain
+              fn: ValidateUserDomain      # stub generated in internal/hooks/hooks.go
+          after:
+            - name: notify
+              sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"
+    actions:
+      - name: deactivate
+        query: ActivateUser
+        hooks:
+          before: []
+          after: []
+```
+
+`internal/hooks/hooks.go` defines `Scope{ID int64, Table, Action string, Values map[string]interface{}}` and one compile-ready stub per declared `fn` hook; the user implements the stubs. `sql` hooks are inlined as `db.ExecContext(..., <sql>, scope.ID)`. Create handlers capture the new row id via a driver-aware `QueryRowContext(...).Scan(&newID)` using `RETURNING <id>` (postgres/sqlite) or `OUTPUT INSERTED.<id>` (mssql) so after-create hooks see it. A hook error aborts the request with HTTP 500.
+
 **Field types (UI rendering only, no DB mapping):**
 
 | Type | Renders As |

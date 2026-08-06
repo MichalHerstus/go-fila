@@ -172,6 +172,10 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("generating views: %w", err)
 	}
 
+	if err := g.generateHooks(); err != nil {
+		return fmt.Errorf("generating hooks: %w", err)
+	}
+
 	if err := g.generateGoMod(); err != nil {
 		return fmt.Errorf("generating go.mod: %w", err)
 	}
@@ -200,6 +204,7 @@ func (g *Generator) ensureDirs() error {
 		"internal/panel/auth",
 		"internal/panel/resources",
 		"internal/panel/pages",
+		"internal/hooks",
 		"internal/views/layout",
 		"internal/views/resources",
 		"internal/views/pages",
