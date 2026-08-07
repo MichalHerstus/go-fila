@@ -24,7 +24,7 @@ import (
 // routes are always plain POST. Returns an error on write failure.
 func (g *Generator) generateRouter() error {
 	var importPaths []string
-	importPaths = append(importPaths, `"database/sql"`, `"net/http"`)
+	importPaths = append(importPaths, `"database/sql"`, `"log"`, `"net/http"`)
 	importPaths = append(importPaths, `"github.com/go-chi/chi/v5"`, `"github.com/go-chi/chi/v5/middleware"`)
 	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/auth")))
 	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/pages")))
@@ -40,10 +40,14 @@ func (g *Generator) generateRouter() error {
 	}
 	code += ")\n\n"
 
-	code += `func NewRouter(db *sql.DB) http.Handler {
+	code += `func NewRouter(db *sql.DB, logLevel string) http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(middleware.Logger)
+	if logLevel == "err" {
+		r.Use(errorOnlyLogger)
+	} else {
+		r.Use(middleware.Logger)
+	}
 	r.Use(middleware.Recoverer)
 	r.Use(auth.SessionMiddleware)
 
@@ -122,6 +126,17 @@ func (g *Generator) generateRouter() error {
 	})
 
 	return r
+}
+
+// errorOnlyLogger logs only requests that produced an error response (>= 400).
+func errorOnlyLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		if ww.Status() >= http.StatusBadRequest {
+			log.Printf("%s %s -> %d", r.Method, r.RequestURI, ww.Status())
+		}
+	})
 }
 `
 
@@ -321,6 +336,7 @@ import (
     "net/http"
 
     %q
+    auth %q
     layoutviews %q
     pageviews %q
 )
@@ -338,13 +354,13 @@ func %s(db *sql.DB) http.HandlerFunc {
             Widgets:   widgets,
         }
 
-        err := layoutviews.Base(pd.Name, pd.PanelPath, viewmodels.DefaultTheme(), pageviews.%s(pd)).Render(r.Context(), w)
+        err := layoutviews.Base(pd.Name, pd.PanelPath, viewmodels.DefaultTheme(), auth.UserName(r), pageviews.%s(pd)).Render(r.Context(), w)
         if err != nil {
             http.Error(w, err.Error(), http.StatusInternalServerError)
         }
     }
 }
-`, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
+`, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
 		handlerName, strings.Join(widgetInit, "\n"), name, panelID, panelPath, viewName)
 
 	return os.WriteFile(filepath.Join(dir, name+".go"), []byte(code), 0644)

@@ -28,6 +28,9 @@ BINARY := ` + binary + `
 # Listen port for the dashboard (passed to the binary as --port).
 PORT ?= 8080
 
+# Log level for the dashboard (passed to the binary as --log): full or err.
+LOG ?= full
+
 # Release archive name (binary name + date stamp). Override to customize:
 #   make package PACKAGE_NAME=my-release
 PACKAGE_NAME ?= $(BINARY)-$(shell date +%Y%m%d)
@@ -65,7 +68,7 @@ tidy:
 
 # Build and run the dashboard server.
 run: build
-	./$(BINARY) --port $(PORT)
+	./$(BINARY) --port $(PORT) --log $(LOG)
 
 # Package the binary and every file the dashboard needs at runtime (static
 # assets incl. uploads, sql/ migrations and the sqlite data/ dir when present)

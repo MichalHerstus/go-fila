@@ -64,6 +64,7 @@ import (
 
 func main() {
 	port := flag.Int("port", 0, "listen port (overrides ADDR env)")
+	logLevel := flag.String("log", "full", "log level: full (default) or err (errors only)")
 	flag.Parse()
 
 	dsn := os.Getenv("DATABASE_URL")
@@ -96,7 +97,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: panel.NewRouter(db),
+		Handler: panel.NewRouter(db, *logLevel),
 	}
 
 	ln, err := net.Listen("tcp", addr)

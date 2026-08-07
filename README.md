@@ -187,7 +187,7 @@ panel:
   name: "My Admin"     # Display name shown in the sidebar and login page.
 ```
 
-The `brand`, `layout`, and `theme` sub-sections are wired into the generated output. `brand.colors` becomes the Tailwind `brand.primary`/`brand.secondary` palette and `--brand-primary`/`--brand-secondary` CSS variables; `layout.sidebar` controls the collapsible sidebar width (via `data-width`/`data-collapsed` and a JS toggle), `layout.topbar.sticky` pins the topbar, `layout.max_content_width` wraps the main content; `theme.dark_mode` turns dark mode on by default (togglable in the topbar and persisted in `localStorage`), and `theme.font` adds `body`/`code` font families to the layout and login pages:
+The `brand`, `layout`, and `theme` sub-sections are wired into the generated output. `brand.colors` becomes the Tailwind `brand.primary`/`brand.secondary` palette and `--brand-primary`/`--brand-secondary` CSS variables; `layout.sidebar` controls the sidebar (a JS toggle shows/hides it entirely via `display`, with `data-width` controlling its width), `layout.topbar.sticky` pins the topbar, `layout.max_content_width` wraps the main content; `theme.dark_mode` turns dark mode on by default (togglable in the topbar and persisted in `localStorage`), and `theme.font` adds `body`/`code` font families to the layout and login pages:
 
 ```yaml
 panel:

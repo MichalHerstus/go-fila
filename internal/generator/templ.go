@@ -23,8 +23,20 @@ import (
 // qualified import path to substitute).
 // Returns: the source with the bare import rewritten.
 func prefixImports(code string, moduleImport string) string {
+	var extras []string
 	if strings.Contains(code, "fmt.") && !strings.Contains(code, `"fmt"`) {
-		code = strings.Replace(code, `import "internal/viewmodels"`, "import (\n    \"fmt\"\n    \"internal/viewmodels\"\n)", 1)
+		extras = append(extras, "fmt")
+	}
+	if strings.Contains(code, "sort.") && !strings.Contains(code, `"sort"`) {
+		extras = append(extras, "sort")
+	}
+	if len(extras) > 0 {
+		block := "import (\n"
+		for _, e := range extras {
+			block += "    \"" + e + "\"\n"
+		}
+		block += "    \"internal/viewmodels\"\n)"
+		code = strings.Replace(code, `import "internal/viewmodels"`, block, 1)
 	}
 	return strings.ReplaceAll(code, `"internal/viewmodels"`, fmt.Sprintf("%q", moduleImport))
 }
@@ -507,18 +519,21 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
                 <label for="%s" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">%s</label>
 `, f.Name, label))
 
-		switch f.Type {
-		case "text":
-			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="3" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
+		if isPickerField(f) {
+			inputs.WriteString(pickerMarkup(f, label))
+		} else {
+			switch f.Type {
+			case "text":
+				inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="3" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
 `, f.Name, f.Name, f.Name))
-		case "password":
-			inputs.WriteString(fmt.Sprintf(`                <input type="password" id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "password":
+				inputs.WriteString(fmt.Sprintf(`                <input type="password" id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
-		case "email":
-			inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "email":
+				inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
-		case "select":
-			inputs.WriteString(fmt.Sprintf(`                <select id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">
+			case "select":
+				inputs.WriteString(fmt.Sprintf(`                <select id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">
                     <option value="">Select...</option>
                     for _, fd := range data.Fields {
                         if fd.Name == %q {
@@ -529,43 +544,44 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
                     }
                 </select>
 `, f.Name, f.Name, f.Name, f.Name))
-		case "boolean":
-			inputs.WriteString(fmt.Sprintf(`                <input type="checkbox" id="%s" name="%s" value="true" class="rounded border-gray-300 dark:border-gray-600 text-brand-primary focus:ring-brand-primary"
+			case "boolean":
+				inputs.WriteString(fmt.Sprintf(`                <input type="checkbox" id="%s" name="%s" value="true" class="rounded border-gray-300 dark:border-gray-600 text-brand-primary focus:ring-brand-primary"
                     if fmt.Sprintf("%%v", data.Item[%q]) == "true" {
                         checked
                     }
                 />
 `, f.Name, f.Name, f.Name))
-		case "integer", "float":
-			inputs.WriteString(fmt.Sprintf(`                <input type="number" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "integer", "float":
+				inputs.WriteString(fmt.Sprintf(`                <input type="number" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
-		case "datetime":
-			inputs.WriteString(fmt.Sprintf(`                <input type="datetime-local" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "datetime":
+				inputs.WriteString(fmt.Sprintf(`                <input type="datetime-local" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
-		case "date":
-			inputs.WriteString(fmt.Sprintf(`                <input type="date" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "date":
+				inputs.WriteString(fmt.Sprintf(`                <input type="date" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
-		case "file":
-			inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "file":
+				inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
-		case "image":
-			inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" accept="image/*" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			case "image":
+				inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" accept="image/*" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
-		case "badge":
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="badge value" />
+			case "badge":
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="badge value" />
 `, f.Name, f.Name, f.Name))
-		case "relation":
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="related ID" />
+			case "relation":
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="related ID" />
 `, f.Name, f.Name, f.Name))
-		case "json":
-			inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 font-mono text-xs">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
+			case "json":
+				inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 font-mono text-xs">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
 `, f.Name, f.Name, f.Name))
-		case "gps":
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="lat, lng" />
+			case "gps":
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="lat, lng" />
 `, f.Name, f.Name, f.Name))
-		default:
-			inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+			default:
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
+			}
 		}
 
 		if f.Required {
@@ -590,13 +606,25 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 		}
 	}
 
+	hasPicker := false
+	for _, f := range formFields.Fields {
+		if isPickerField(f) {
+			hasPicker = true
+			break
+		}
+	}
+
 	enctype := ""
 	if hasFile {
 		enctype = ` enctype="multipart/form-data"`
 	}
 
-	actionPath := fmt.Sprintf("%s/%s", panelPath, resLower)
 	listPath := fmt.Sprintf("%s/%s", panelPath, resLower)
+
+	footerStr := ""
+	if hasPicker {
+		footerStr = pickerFooter()
+	}
 
 	code := fmt.Sprintf(`package views
 
@@ -616,7 +644,7 @@ templ %s(data *viewmodels.FormData) {
         </div>
 
         <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-6">
-            <form action="%s" method="POST"%s class="space-y-6">
+            <form action={ templ.SafeURL(data.Action) } method="POST"%s class="space-y-6">
 %s                <div class="flex justify-end pt-4">
                     <button type="submit" class="bg-brand-primary text-white px-6 py-2 rounded-lg text-sm hover:opacity-90">
                         if data.IsCreate {
@@ -629,11 +657,131 @@ templ %s(data *viewmodels.FormData) {
             </form>
         </div>
     </div>
-}
-`, templName, resLabel, resLabel, listPath, actionPath, enctype, inputs.String())
+%s}
+`, templName, resLabel, resLabel, listPath, enctype, inputs.String(), footerStr)
+
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "form.templ"), []byte(code), 0644)
+}
+
+// isPickerField reports whether a form field should render as a modal record
+// picker: a select/relation field backed by an options_query. Such fields get
+// a read-only display input plus a "Browse" button instead of a raw select.
+func isPickerField(f types.Field) bool {
+	return f.OptionsQuery != "" && (f.Type == "select" || f.Type == "relation")
+}
+
+// pickerMarkup renders the options data (as a data attribute), the hidden
+// input + read-only display row + "Browse" button for a picker field, and a
+// per-field script that fills the shared modal (emitted once at the end of the
+// form) from the field's current option set and wires row-click selection.
+// Rows are rendered client-side from the JSON-encoded options map; the search
+// box filters rows by label. The options expression must live in a data
+// attribute, not inside the <script>, because templ treats script content as
+// raw text and never evaluates expressions there.
+func pickerMarkup(f types.Field, label string) string {
+	display := fmt.Sprintf(`viewmodels.OptionLabel(data.Fields, %q, viewmodels.ItemValue(data.Item, %q))`, f.Name, f.Name)
+	return fmt.Sprintf(`                <div hidden data-field="%s" data-picker-options={ viewmodels.OptionsJS(data.Fields, %q) }></div>
+                <input type="hidden" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } />
+                <div class="flex items-center gap-2">
+                    <input type="text" id="%s-display" value={ %s } readonly class="flex-1 w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 bg-gray-50 dark:bg-gray-700" />
+                    <button type="button" data-picker-open="%s" class="whitespace-nowrap border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 px-3 py-2 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Browse…</button>
+                </div>
+                <script data-picker="%s">
+                    (function() {
+                    const pickerBtn = document.querySelector('[data-picker-open="%s"]');
+                    const pickerHidden = document.getElementById('%s');
+                    const pickerDisplay = document.getElementById('%s-display');
+                    const pickerOptionsEl = document.querySelector('[data-picker-options][data-field="%s"]');
+                    if (pickerBtn) {
+                        pickerBtn.addEventListener('click', () => {
+                            const pickerModal = document.getElementById('record-picker-modal');
+                            if (!pickerModal) return;
+                            let opts = {};
+                            try {
+                                opts = JSON.parse(pickerOptionsEl ? pickerOptionsEl.dataset.pickerOptions : '{}');
+                            } catch (e) {
+                                opts = {};
+                            }
+                            let html = '<tr><td class="px-4 py-2 text-gray-500 dark:text-gray-400 text-sm">No matches</td></tr>';
+                            const keys = Object.keys(opts).sort();
+                            if (keys.length > 0) {
+                                html = keys.map(k => {
+                                    const v = opts[k] == null ? k : String(opts[k]);
+                                    return '<tr class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700" data-value="' + k.replace(/"/g, '&quot;') + '"><td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-300">' + v + '</td></tr>';
+                                }).join('');
+                            }
+                            pickerModal.querySelector('[data-picker-rows]').innerHTML = html;
+                            pickerModal.querySelector('[data-picker-title]').textContent = 'Pick ' + %q;
+                            const modalList = pickerModal.querySelector('[data-picker-list]');
+                            if (modalList) modalList.value = '';
+                            pickerModal.querySelectorAll('tr[data-value]').forEach(row => {
+                                row.style.display = '';
+                                row.addEventListener('click', () => {
+                                    pickerHidden.value = row.dataset.value;
+                                    pickerDisplay.value = opts[row.dataset.value] == null ? row.dataset.value : String(opts[row.dataset.value]);
+                                    pickerModal.classList.add('hidden');
+                                });
+                            });
+                            pickerModal.classList.remove('hidden');
+                        });
+                    }
+                    })();
+                </script>
+`, f.Name, f.Name, f.Name, f.Name, f.Name, f.Name, display, f.Name, f.Name, f.Name, f.Name, f.Name, f.Name, label)
+}
+
+// pickerFooter is the shared modal markup + wiring emitted at the end of a
+// form that contains at least one picker field. The modal is hidden by
+// default; each picker field's script populates its tbody and opens it. The
+// wiring handles the modal's own search filtering, close button and
+// click-outside dismissal.
+func pickerFooter() string {
+	return `
+    <div id="record-picker-modal" class="hidden fixed inset-0 z-50 flex items-start justify-center bg-black bg-opacity-50 p-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-xl w-full max-w-lg flex flex-col max-h-[80vh]">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+                <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100" data-picker-title>Pick...</h2>
+                <button type="button" data-picker-close class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 text-2xl leading-none">&times;</button>
+            </div>
+            <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
+                <input type="text" data-picker-list placeholder="Search..." class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+            </div>
+            <div class="flex-1 overflow-y-auto">
+                <table class="w-full">
+                    <tbody data-picker-rows></tbody>
+                </table>
+            </div>
+            <div class="px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex justify-end">
+                <button type="button" data-picker-close class="border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 px-4 py-2 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Cancel</button>
+            </div>
+        </div>
+    </div>
+    <script>
+        const gfPickerModal = document.getElementById('record-picker-modal');
+        if (gfPickerModal) {
+            const gfPickerList = gfPickerModal.querySelector('[data-picker-list]');
+            const gfPickerRows = gfPickerModal.querySelector('[data-picker-rows]');
+            const gfPickerClose = gfPickerModal.querySelectorAll('[data-picker-close]');
+            if (gfPickerList) {
+                gfPickerList.addEventListener('input', () => {
+                    const q = gfPickerList.value.trim().toLowerCase();
+                    gfPickerRows.querySelectorAll('tr[data-value]').forEach(row => {
+                        const txt = (row.textContent || '').toLowerCase();
+                        row.style.display = txt.indexOf(q) !== -1 ? '' : 'none';
+                    });
+                });
+            }
+            gfPickerClose.forEach(btn => {
+                btn.addEventListener('click', () => gfPickerModal.classList.add('hidden'));
+            });
+            gfPickerModal.addEventListener('click', (e) => {
+                if (e.target === gfPickerModal) gfPickerModal.classList.add('hidden');
+            });
+        }
+    </script>
+`
 }
 
 // generateCardTempl writes cards.templ for a resource: a card grid view (or a
@@ -1057,7 +1205,7 @@ func darkClass(theme viewmodels.ThemeConfig) string {
     return ""
 }
 
-templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, children templ.Component) {
+templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userName string, children templ.Component) {
     <!DOCTYPE html>
     <html lang="en" class={ darkClass(theme) }>
     <head>
@@ -1077,7 +1225,7 @@ templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, childre
         <div class="flex h-screen">
             @Sidebar(panelPath, theme)
             <div class="flex-1 flex flex-col min-w-0">
-                @Topbar(panelPath, theme)
+                @Topbar(panelPath, theme, userName)
                 <main class="flex-1 overflow-y-auto p-6">
                     <div class={ fmt.Sprintf("max-w-%%s mx-auto", theme.MaxContentWidth) }>
                         @children
@@ -1089,8 +1237,7 @@ templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, childre
             function toggleSidebar() {
                 var aside = document.getElementById('app-sidebar');
                 if (!aside) { return; }
-                var open = aside.style.width === aside.getAttribute('data-width') + 'px';
-                aside.style.width = open ? aside.getAttribute('data-collapsed') + 'px' : aside.getAttribute('data-width') + 'px';
+                aside.style.display = aside.style.display === 'none' ? '' : 'none';
             }
             function toggleSelectAll(checkbox) {
                 var form = checkbox.closest('form');
@@ -1168,7 +1315,7 @@ templ iconNav(name string) {
 }
 
 templ Sidebar(panelPath string, theme viewmodels.ThemeConfig) {
-    <aside id="app-sidebar" data-width={ fmt.Sprintf("%%d", theme.SidebarWidth) } data-collapsed={ fmt.Sprintf("%%d", theme.SidebarCollapsedWidth) } class="bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 shadow-md h-screen overflow-y-auto shrink-0 transition-[width] duration-150">
+    <aside id="app-sidebar" data-width={ fmt.Sprintf("%%d", theme.SidebarWidth) } class="bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 shadow-md h-screen overflow-y-auto shrink-0">
         <div class="p-4 border-b border-gray-200 dark:border-gray-700">
             <h1 class="text-xl font-bold text-gray-900 dark:text-gray-100">%s</h1>
         </div>
@@ -1177,23 +1324,26 @@ templ Sidebar(panelPath string, theme viewmodels.ThemeConfig) {
     </aside>
 }
 
-templ Topbar(panelPath string, theme viewmodels.ThemeConfig) {
+templ Topbar(panelPath string, theme viewmodels.ThemeConfig, userName string) {
     <header class="bg-white dark:bg-gray-800 shadow-sm px-6 py-3 flex items-center justify-between %s">
         <div class="flex items-center gap-4">
             if theme.SidebarCollapsible {
-            <button class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200" onclick="toggleSidebar()">
+            <button class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200" onclick="toggleSidebar()" title="Toggle navigation">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
             </button>
             }
-        </div>
-        <div class="flex items-center gap-4">
             <button class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200" onclick="toggleTheme()" title="Toggle dark mode">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
                 </svg>
             </button>
+        </div>
+        <div class="flex items-center gap-4">
+            if userName != "" {
+            <span class="text-sm text-gray-700 dark:text-gray-300">{ userName }</span>
+            }
             <a href="%s/logout" class="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">Logout</a>
         </div>
     </header>

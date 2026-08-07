@@ -81,12 +81,12 @@ Apply `dark:` variants to all shared surfaces: `bg-white` → `bg-white dark:bg-
 - Chart.js auto-render picks its line color from the `--brand-primary` CSS variable (or a `.dark` class check) instead of hardcoded `#6366f1`.
 
 ### 4.4 Layout wiring
-- Sidebar: `style="width: <width>px"` plus `collapsed_width`; `toggleSidebar()` JS flips the width and the Topbar `ml-*` offset matches. `collapsible: false` hides the toggle button.
-- Topbar: `sticky` only when `panel.layout.topbar.sticky` (currently always sticky).
+- Sidebar: `style="width: <width>px"` (via `data-width` + a JS init); `toggleSidebar()` JS flips `aside.style.display` between shown and hidden (the sidebar no longer collapses to a narrow strip). `collapsible: false` hides the toggle button.
+- Topbar: `sticky` only when `panel.layout.topbar.sticky` (currently always sticky). Left group holds the nav-toggle + dark-mode toggle buttons; right group shows the logged-in user name (from the session, set at login) before the Logout link.
 - `max_content_width`: apply `max-w-{value} mx-auto` to `<main>`.
 - Because `Base`/`Sidebar`/`Topbar` signatures change and are called from resource, page, and auth handlers, add a generated `viewmodels.ThemeConfig` struct (dark flag, brand hexes, font stacks, sidebar widths, sticky, max width) passed through every `views.Base(...)` call site. All call sites are generated, so this is mechanical.
 
-**Exit criteria:** build + visual smoke — light/dark toggle persists across reload, brand color renders on buttons/links, sidebar collapses.
+**Exit criteria:** build + visual smoke — light/dark toggle persists across reload, brand color renders on buttons/links, sidebar shows/hides.
 
 ---
 

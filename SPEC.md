@@ -309,7 +309,7 @@ resources:
 | `date` | Date only |
 | `image` | Thumbnail |
 | `file` | Download link |
-| `select` | Dropdown (static or SQLC-backed) |
+| `select` | Dropdown (static or SQLC-backed); with `options_query` renders as a modal record picker (Browse button + searchable list, only row selection active) |
 | `relation` | Link to related record |
 | `json` | Pretty-printed |
 | `float` | Decimal / number input |
@@ -680,11 +680,16 @@ go-fila/
 │       ├── demo.go            # init --demo — full sqlite demo scaffolding + seeding
 │       ├── introspect.go      # init --db — DB introspection, auth table creation, YAML/SQL generation
 │       ├── edit.go            # edit — entry point for interactive YAML config editor
-│       └── editor/            # TUI editor: stack-based navigation, huh forms, list managers
+│       └── editor/            # tview TUI editor: 3-pane shell, sections, sync + preview (see SPEC_yaml_editor.md)
 ├── internal/
 │   ├── parser/                # YAML parsing & validation
 │   │   ├── schema.go
 │   │   └── validator.go
+│   ├── schema/                # File-level SQL↔YAML analysis (editor sync tool)
+│   │   ├── schema.go          # CREATE TABLE parser (sqlite/postgres dialects)
+│   │   ├── queries.go         # SQLC query parser + SELECT projection extraction
+│   │   ├── references.go      # YAML query/table/column reference collection
+│   │   └── generate.go        # SQL/YAML stub emitters (query files, resource blocks)
 │   ├── generator/             # Code generation pipeline
 │   │   ├── sqlc.go            # SQLC invocation
 │   │   ├── handler.go         # Handler generation

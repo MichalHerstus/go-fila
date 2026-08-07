@@ -43,6 +43,7 @@ func (g *Generator) generateViewModels() error {
 
 import (
     "database/sql"
+    "encoding/json"
     "fmt"
     "html/template"
 )
@@ -81,6 +82,7 @@ type ColumnDef struct {
 	FieldType  string
 	Sortable   bool
 	Searchable bool
+	Picker     bool
 	Options    map[string]string
 }
 `,
@@ -223,6 +225,45 @@ func OptionValue(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// OptionLabel returns the label for a field option key, falling back to the
+// raw key when the field has no matching option (or the field is unknown).
+func OptionLabel(fields []ColumnDef, name string, raw string) string {
+	for _, fd := range fields {
+		if fd.Name == name {
+			if l, ok := fd.Options[raw]; ok {
+				return l
+			}
+			return raw
+		}
+	}
+	return raw
+}
+
+// ItemValue formats a form item value for display/input, returning "" for
+// missing (nil) values instead of Go's "<nil>".
+func ItemValue(item map[string]interface{}, name string) string {
+	if v, ok := item[name]; ok && v != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return ""
+}
+
+// OptionsJS renders a field's option map as a JSON object literal (keys
+// sorted, proper escaping) for use by the modal picker. Returns "{}" when the
+// field is unknown or has no options.
+func OptionsJS(fields []ColumnDef, name string) string {
+	for _, fd := range fields {
+		if fd.Name == name {
+			b, err := json.Marshal(fd.Options)
+			if err != nil {
+				return "{}"
+			}
+			return string(b)
+		}
+	}
+	return "{}"
 }
 `
 

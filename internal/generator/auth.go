@@ -166,12 +166,16 @@ func LoginHandler(db *sql.DB) http.HandlerFunc {
         }
 
         var userID int64
+        var displayName string
         var hashedPassword string
         var userRole string
         err := db.QueryRowContext(r.Context(),
-            "SELECT id, password, COALESCE(role_name, '') FROM %s WHERE %s = $1",
+            "SELECT id, COALESCE(name, ''), password, COALESCE(role_name, '') FROM %s WHERE %s = $1",
             email,
-        ).Scan(&userID, &hashedPassword, &userRole)
+        ).Scan(&userID, &displayName, &hashedPassword, &userRole)
+        if displayName == "" {
+            displayName = email
+        }
         if err != nil {
             vd := LoginPageData{
                 Email:     email,
@@ -202,6 +206,7 @@ func LoginHandler(db *sql.DB) http.HandlerFunc {
 
         session.Values["user_id"] = userID
         session.Values["role"] = userRole
+        session.Values["name"] = displayName
         if err := session.Save(r, w); err != nil {
             http.Error(w, "Session save error", http.StatusInternalServerError)
             return
@@ -217,6 +222,7 @@ func LogoutHandler(db *sql.DB) http.HandlerFunc {
         if err == nil {
             session.Values["user_id"] = nil
             session.Values["role"] = nil
+            session.Values["name"] = nil
             session.Options.MaxAge = -1
             session.Save(r, w)
         }
@@ -275,6 +281,7 @@ type contextKey string
 
 const UserKey contextKey = "user"
 const UserRoleKey contextKey = "role"
+const UserNameKey contextKey = "user_name"
 
 func SessionMiddleware(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -301,8 +308,18 @@ func AuthMiddleware(next http.Handler) http.Handler {
         if role, ok := session.Values["role"].(string); ok {
             ctx = context.WithValue(ctx, UserRoleKey, role)
         }
+        if name, ok := session.Values["name"].(string); ok {
+            ctx = context.WithValue(ctx, UserNameKey, name)
+        }
         next.ServeHTTP(w, r.WithContext(ctx))
     })
+}
+
+func UserName(r *http.Request) string {
+    if name, ok := r.Context().Value(UserNameKey).(string); ok {
+        return name
+    }
+    return ""
 }
 %s`, panelPath, panelPath, rbacMiddleware)
 

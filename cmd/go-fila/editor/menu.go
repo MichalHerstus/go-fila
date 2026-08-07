@@ -2,297 +2,456 @@ package editor
 
 import (
 	"fmt"
-	"strings"
+	"sort"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/gdamore/tcell/v2"
 	"github.com/go-fila/go-fila/internal/types"
+	"github.com/rivo/tview"
 )
 
-var (
-	menuTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("62")).MarginBottom(1)
-	menuItemStyle  = lipgloss.NewStyle().PaddingLeft(2)
-	menuSelStyle   = lipgloss.NewStyle().PaddingLeft(0).Foreground(lipgloss.Color("212")).Bold(true)
-	menuHintStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).MarginTop(1)
-)
-
-type menuItem struct {
-	label  string
-	count  string
-	action func()
+// formShell builds a bordered form and adds a Back button.
+func (e *Editor) formShell(title string, fill func(*tview.Form)) tview.Primitive {
+	f := tview.NewForm()
+	f.SetBorder(true).SetBorderColor(colBorder).SetTitle(title)
+	f.SetLabelColor(colText)
+	f.SetFieldBackgroundColor(tcell.NewHexColor(0x27272a))
+	f.SetButtonBackgroundColor(colAccent)
+	f.SetButtonTextColor(tcell.ColorWhite)
+	fill(f)
+	f.AddButton("Back", e.back)
+	return f
 }
 
-type MainMenuModel struct {
-	ed         *EditorModel
-	items      []menuItem
-	cursor     int
-	done       bool
-	pushScreen tea.Model
+// panelPage edits the panel identity/brand/layout/theme sections.
+func (e *Editor) panelPage() tview.Primitive {
+	p := &e.cfg.Panel
+	return e.formShell("Panel", func(f *tview.Form) {
+		e.str(f, "ID", p.ID, func(v string) { p.ID = v })
+		e.str(f, "Name", p.Name, func(v string) { p.Name = v })
+		e.str(f, "Path", p.Path, func(v string) { p.Path = v })
+		f.AddButton("Brand", func() { e.showPage("panel/brand", e.brandPage()) })
+		f.AddButton("Layout", func() { e.showPage("panel/layout", e.layoutPage()) })
+		f.AddButton("Theme", func() { e.showPage("panel/theme", e.themePage()) })
+	})
 }
 
-func (m *MainMenuModel) isDone() bool { return m.done }
-func (m *MainMenuModel) popScreen() tea.Model {
-	ps := m.pushScreen
-	m.pushScreen = nil
-	return ps
+// brandPage edits the logo/favicon/brand colors.
+func (e *Editor) brandPage() tview.Primitive {
+	b := &e.cfg.Panel.Brand
+	return e.formShell("Panel / Brand", func(f *tview.Form) {
+		e.str(f, "Logo", b.Logo, func(v string) { b.Logo = v })
+		e.str(f, "Favicon", b.Favicon, func(v string) { b.Favicon = v })
+		e.str(f, "Color Primary", b.Colors.Primary, func(v string) { b.Colors.Primary = v })
+		e.str(f, "Color Secondary", b.Colors.Secondary, func(v string) { b.Colors.Secondary = v })
+	})
 }
 
-func NewMainMenu(ed *EditorModel) *MainMenuModel {
-	m := &MainMenuModel{ed: ed}
-	cfg := ed.cfg
-
-	m.items = []menuItem{
-		{label: "Panel", count: "3 fields", action: func() {
-			form, applies := buildPanelForm(m.ed.cfg)
-			m.pushScreen = NewFormScreen(form, applies...)
-		}},
-		{label: "Connections", count: fmt.Sprintf("%d conn", len(cfg.Connections)), action: func() {
-			form, applies := buildConnectionForm(m.ed.cfg)
-			m.pushScreen = NewFormScreen(form, applies...)
-		}},
-		{label: "SQLC", count: "4 fields", action: func() {
-			m.pushScreen = NewFormScreen(buildSQLCForm(m.ed.cfg))
-		}},
-		{label: "Auth", count: "8 fields", action: func() {
-			m.pushScreen = NewFormScreen(buildAuthForm(m.ed.cfg))
-		}},
-		{label: "Navigation", count: fmt.Sprintf("%d groups", len(cfg.Navigation)), action: func() {
-			m.pushScreen = NewNavigationListScreen(m.ed)
-		}},
-		{label: "Resources", count: fmt.Sprintf("%d items", len(cfg.Resources)), action: func() {
-			m.pushScreen = NewResourceListScreen(m.ed)
-		}},
-		{label: "Pages", count: fmt.Sprintf("%d items", len(cfg.Pages)), action: func() {
-			m.pushScreen = NewPageListScreen(m.ed)
-		}},
-	}
-	return m
+// layoutPage edits the sidebar/topbar/content layout.
+func (e *Editor) layoutPage() tview.Primitive {
+	l := &e.cfg.Panel.Layout
+	return e.formShell("Panel / Layout", func(f *tview.Form) {
+		e.yesno(f, "Sidebar collapsible", l.Sidebar.Collapsible, func(v bool) { l.Sidebar.Collapsible = v })
+		e.num(f, "Sidebar width", l.Sidebar.Width, func(v int) { l.Sidebar.Width = v })
+		e.num(f, "Sidebar collapsed width", l.Sidebar.CollapsedWidth, func(v int) { l.Sidebar.CollapsedWidth = v })
+		e.yesno(f, "Topbar sticky", l.Topbar.Sticky, func(v bool) { l.Topbar.Sticky = v })
+		e.str(f, "Max content width", l.MaxContentWidth, func(v string) { l.MaxContentWidth = v })
+	})
 }
 
-func (m *MainMenuModel) Init() tea.Cmd { return nil }
+// themePage edits dark mode and fonts.
+func (e *Editor) themePage() tview.Primitive {
+	t := &e.cfg.Panel.Theme
+	return e.formShell("Panel / Theme", func(f *tview.Form) {
+		e.yesno(f, "Dark mode", t.DarkMode, func(v bool) { t.DarkMode = v })
+		e.str(f, "Font family", t.Font.Family, func(v string) { t.Font.Family = v })
+		e.str(f, "Mono font", t.Font.Mono, func(v string) { t.Font.Mono = v })
+	})
+}
 
-func (m *MainMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc", "q":
-			m.ed.Quit()
-			return m, nil
-		case "s":
-			m.ed.Save()
-			return m, nil
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.items)-1 {
-				m.cursor++
-			}
-		case "enter":
-			if m.cursor < len(m.items) {
-				m.items[m.cursor].action()
-			}
+// connectionsPage manages the named database connections.
+func (e *Editor) connectionsPage() tview.Primitive {
+	names := func() []string {
+		out := make([]string, 0, len(e.cfg.Connections))
+		for n := range e.cfg.Connections {
+			out = append(out, n)
 		}
-	case tea.WindowSizeMsg:
-		return m, nil
+		sort.Strings(out)
+		return out
 	}
-	return m, nil
-}
-
-func (m *MainMenuModel) View() string {
-	var s strings.Builder
-	s.WriteString("\n")
-	s.WriteString(menuTitleStyle.Render("go-fila config editor"))
-	s.WriteString("\n\n")
-
-	for i, item := range m.items {
-		cursor := "  "
-		label := menuItemStyle.Render(item.label)
-		if i == m.cursor {
-			cursor = menuSelStyle.Render("> ")
-			label = menuSelStyle.Render(item.label)
-		}
-		count := lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render(item.count)
-		s.WriteString(fmt.Sprintf("  %s%-20s %s\n", cursor, label, count))
-	}
-
-	hint := "  s:save  q:quit  ↑↓:navigate  Enter:edit"
-	s.WriteString("\n" + menuHintStyle.Render(hint))
-	s.WriteString("\n")
-	return s.String()
-}
-
-type ResourceListScreen struct {
-	ed         *EditorModel
-	cursor     int
-	done       bool
-	pushScreen tea.Model
-}
-
-func (m *ResourceListScreen) isDone() bool { return m.done }
-func (m *ResourceListScreen) popScreen() tea.Model {
-	ps := m.pushScreen
-	m.pushScreen = nil
-	return ps
-}
-
-func NewResourceListScreen(ed *EditorModel) *ResourceListScreen {
-	return &ResourceListScreen{ed: ed}
-}
-
-func (m *ResourceListScreen) Init() tea.Cmd { return nil }
-
-func (m *ResourceListScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc":
-			m.done = true
-			return m, tea.Quit
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.ed.cfg.Resources)-1 {
-				m.cursor++
-			}
-		case "enter":
-			if m.cursor < len(m.ed.cfg.Resources) {
-				idx := m.cursor
-				m.pushScreen = NewResourceMenuScreen(m.ed, idx)
-				return m, nil
-			}
-		case "a":
-			m.ed.cfg.Resources = append(m.ed.cfg.Resources, types.Resource{
-				Name:  "NewResource",
-				Label: "New Resource",
+	spec := listSpec{
+		title:  "Connections",
+		labels: names,
+		sub: func(i int) string {
+			n := names()[i]
+			c := e.cfg.Connections[n]
+			return fmt.Sprintf("%s  %s", c.Driver, c.DSN)
+		},
+		add: func() {
+			e.namePrompt("New connection", "name", names, func(name string) {
+				e.cfg.Connections[name] = types.Connection{Driver: "postgres"}
+				e.markModified()
 			})
-			m.ed.SetModified()
-			m.cursor = len(m.ed.cfg.Resources) - 1
-		case "d", "delete", "backspace":
-			if len(m.ed.cfg.Resources) > 0 {
-				m.ed.cfg.Resources = append(m.ed.cfg.Resources[:m.cursor], m.ed.cfg.Resources[m.cursor+1:]...)
-				if m.cursor >= len(m.ed.cfg.Resources) {
-					if len(m.ed.cfg.Resources) == 0 {
-						m.cursor = 0
-					} else {
-						m.cursor = len(m.ed.cfg.Resources) - 1
-					}
+		},
+		edit: func(i int) {
+			n := names()[i]
+			e.showPage("connections/"+n, e.connectionPage(n))
+		},
+		remove: func(i int) {
+			delete(e.cfg.Connections, names()[i])
+			e.markModified()
+		},
+	}
+	return e.recordList("connections", spec)
+}
+
+// connectionPage edits a single named connection.
+func (e *Editor) connectionPage(name string) tview.Primitive {
+	c := e.cfg.Connections[name]
+	set := func(mutate func(*types.Connection)) {
+		mutate(&c)
+		e.cfg.Connections[name] = c
+		e.markModified()
+	}
+	return e.formShell("Connection: "+name, func(f *tview.Form) {
+		e.pick(f, "Driver", driverOptions, c.Driver, func(v string) { set(func(x *types.Connection) { x.Driver = v }) })
+		e.str(f, "DSN", c.DSN, func(v string) { set(func(x *types.Connection) { x.DSN = v }) })
+		e.head(f, "Pool")
+		e.num(f, "Max open", c.Pool.MaxOpen, func(v int) { set(func(x *types.Connection) { x.Pool.MaxOpen = v }) })
+		e.num(f, "Max idle", c.Pool.MaxIdle, func(v int) { set(func(x *types.Connection) { x.Pool.MaxIdle = v }) })
+		e.str(f, "Lifetime", c.Pool.Lifetime, func(v string) { set(func(x *types.Connection) { x.Pool.Lifetime = v }) })
+	})
+}
+
+// sqlcPage edits the sqlc configuration.
+func (e *Editor) sqlcPage() tview.Primitive {
+	s := &e.cfg.SQLC
+	return e.formShell("SQLC", func(f *tview.Form) {
+		e.str(f, "Config", s.Config, func(v string) { s.Config = v })
+		e.str(f, "Queries dir", s.QueriesDir, func(v string) { s.QueriesDir = v })
+		e.str(f, "Schema dir", s.SchemaDir, func(v string) { s.SchemaDir = v })
+		e.str(f, "Output package", s.OutputPkg, func(v string) { s.OutputPkg = v })
+	})
+}
+
+// authPage edits the authentication configuration.
+func (e *Editor) authPage() tview.Primitive {
+	a := &e.cfg.Auth
+	return e.formShell("Auth", func(f *tview.Form) {
+		e.pick(f, "Guard", authGuardOptions, a.Guard, func(v string) { a.Guard = v })
+		e.pick(f, "Provider", authProviderOptions, a.Provider, func(v string) { a.Provider = v })
+		e.str(f, "Table", a.Table, func(v string) { a.Table = v })
+		e.str(f, "Login redirect", a.Login.Redirect, func(v string) { a.Login.Redirect = v })
+		e.yesno(f, "Registration", a.Registration, func(v bool) { a.Registration = v })
+		e.yesno(f, "Password reset", a.PasswordReset, func(v bool) { a.PasswordReset = v })
+		e.yesno(f, "Remember me", a.RememberMe, func(v bool) { a.RememberMe = v })
+		f.AddButton("Login fields", func() {
+			e.showPage("auth/login-fields", e.tagsPage("auth/login-fields", "Auth / Login fields", loginFieldOptions, func() []string {
+				return a.Login.Fields
+			}, func(v []string) { a.Login.Fields = v }))
+		})
+	})
+}
+
+// navGroupsPage manages the sidebar navigation groups.
+func (e *Editor) navGroupsPage() tview.Primitive {
+	spec := listSpec{
+		title: "Navigation groups",
+		labels: func() []string {
+			out := make([]string, len(e.cfg.Navigation))
+			for i, g := range e.cfg.Navigation {
+				label := g.Group
+				if label == "" {
+					label = "(untitled)"
 				}
-				m.ed.SetModified()
+				out[i] = label
 			}
-		}
+			return out
+		},
+		sub: func(i int) string {
+			g := e.cfg.Navigation[i]
+			return fmt.Sprintf("%d items  sort=%d", len(g.Items), g.Sort)
+		},
+		add: func() {
+			e.cfg.Navigation = append(e.cfg.Navigation, types.NavigationGroup{Group: "New group"})
+			e.markModified()
+		},
+		edit: func(i int) {
+			e.showPage("navigation/group/"+fmt.Sprint(i), e.navGroupPage(i))
+		},
+		remove: func(i int) {
+			e.cfg.Navigation = append(e.cfg.Navigation[:i], e.cfg.Navigation[i+1:]...)
+			e.markModified()
+		},
 	}
-	return m, nil
+	return e.recordList("navigation", spec)
 }
 
-func (m *ResourceListScreen) View() string {
-	var s strings.Builder
-	s.WriteString("\n  Resources\n\n")
-
-	if len(m.ed.cfg.Resources) == 0 {
-		s.WriteString("  (no resources)\n")
-	} else {
-		for i, r := range m.ed.cfg.Resources {
-			cursor := "  "
-			if i == m.cursor {
-				cursor = menuSelStyle.Render("> ")
-			}
-			s.WriteString(fmt.Sprintf("  %s%s (%s)\n", cursor, r.Name, r.Label))
-		}
-	}
-
-	s.WriteString("\n  a:add  d:del  enter:edit  esc:back\n")
-	return s.String()
+// navGroupPage edits a group's meta and item list.
+func (e *Editor) navGroupPage(idx int) tview.Primitive {
+	g := &e.cfg.Navigation[idx]
+	return e.formShell("Navigation group", func(f *tview.Form) {
+		e.str(f, "Group", g.Group, func(v string) { g.Group = v })
+		e.pick(f, "Icon", iconOptions, g.Icon, func(v string) { g.Icon = v })
+		e.num(f, "Sort", g.Sort, func(v int) { g.Sort = v })
+		f.AddButton("Items", func() {
+			e.showPage("navigation/group/"+fmt.Sprint(idx)+"/items", e.navItemsPage(idx))
+		})
+	})
 }
 
-type PageListScreen struct {
-	ed         *EditorModel
-	cursor     int
-	done       bool
-	pushScreen tea.Model
-}
-
-func (m *PageListScreen) isDone() bool { return m.done }
-func (m *PageListScreen) popScreen() tea.Model {
-	ps := m.pushScreen
-	m.pushScreen = nil
-	return ps
-}
-
-func NewPageListScreen(ed *EditorModel) *PageListScreen {
-	return &PageListScreen{ed: ed}
-}
-
-func (m *PageListScreen) Init() tea.Cmd { return nil }
-
-func (m *PageListScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch msg.String() {
-		case "esc":
-			m.done = true
-			return m, tea.Quit
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
-		case "down", "j":
-			if m.cursor < len(m.ed.cfg.Pages)-1 {
-				m.cursor++
-			}
-		case "enter":
-			if m.cursor < len(m.ed.cfg.Pages) {
-				idx := m.cursor
-				m.pushScreen = NewFormScreen(buildPageForm(&m.ed.cfg.Pages[idx]))
-				return m, nil
-			}
-		case "a":
-			m.ed.cfg.Pages = append(m.ed.cfg.Pages, types.Page{
-				Name: "NewPage",
-				Path: "/new-page",
-			})
-			m.ed.SetModified()
-			m.cursor = len(m.ed.cfg.Pages) - 1
-		case "d", "delete", "backspace":
-			if len(m.ed.cfg.Pages) > 0 {
-				m.ed.cfg.Pages = append(m.ed.cfg.Pages[:m.cursor], m.ed.cfg.Pages[m.cursor+1:]...)
-				if m.cursor >= len(m.ed.cfg.Pages) {
-					if len(m.ed.cfg.Pages) == 0 {
-						m.cursor = 0
-					} else {
-						m.cursor = len(m.ed.cfg.Pages) - 1
-					}
+// navItemsPage manages a group's items.
+func (e *Editor) navItemsPage(gidx int) tview.Primitive {
+	g := &e.cfg.Navigation[gidx]
+	spec := listSpec{
+		title: "Navigation items",
+		labels: func() []string {
+			out := make([]string, len(g.Items))
+			for i, it := range g.Items {
+				label := it.Label
+				if label == "" {
+					label = it.Resource + it.Page + it.URL
 				}
-				m.ed.SetModified()
+				out[i] = label
 			}
-		}
+			return out
+		},
+		sub: func(i int) string {
+			it := g.Items[i]
+			return it.Type + "  " + it.Resource + it.Page + it.URL
+		},
+		add: func() {
+			g.Items = append(g.Items, types.NavigationItem{Type: "resource"})
+			e.markModified()
+		},
+		edit: func(i int) {
+			e.showPage("navigation/item/"+fmt.Sprint(i), e.navItemPage(gidx, i))
+		},
+		remove: func(i int) {
+			g.Items = append(g.Items[:i], g.Items[i+1:]...)
+			e.markModified()
+		},
 	}
-	return m, nil
+	return e.recordList("navigation/items", spec)
 }
 
-func (m *PageListScreen) View() string {
-	var s strings.Builder
-	s.WriteString("\n  Pages\n\n")
-
-	if len(m.ed.cfg.Pages) == 0 {
-		s.WriteString("  (no pages)\n")
-	} else {
-		for i, p := range m.ed.cfg.Pages {
-			cursor := "  "
-			if i == m.cursor {
-				cursor = menuSelStyle.Render("> ")
+// navItemPage edits a single navigation item.
+func (e *Editor) navItemPage(gidx, idx int) tview.Primitive {
+	it := &e.cfg.Navigation[gidx].Items[idx]
+	resourceNames := func() []string {
+		out := make([]string, 0, len(e.cfg.Resources))
+		for _, r := range e.cfg.Resources {
+			out = append(out, r.Name)
+		}
+		return out
+	}
+	return e.formShell("Navigation item", func(f *tview.Form) {
+		e.pick(f, "Type", navItemTypeOptions, it.Type, func(v string) { it.Type = v })
+		e.str(f, "Label", it.Label, func(v string) { it.Label = v })
+		if it.Type == "resource" {
+			e.pick(f, "Resource", freeOptions(resourceNames()), it.Resource, func(v string) { it.Resource = v })
+		} else if it.Type == "page" {
+			pageNames := make([]Option, 0, len(e.cfg.Pages))
+			for _, p := range e.cfg.Pages {
+				pageNames = append(pageNames, Option{Label: p.Name, Value: p.Name})
 			}
+			e.pick(f, "Page", pageNames, it.Page, func(v string) { it.Page = v })
+		} else {
+			e.str(f, "URL", it.URL, func(v string) { it.URL = v })
+			e.yesno(f, "Open in new tab", it.OpensInNewTab, func(v bool) { it.OpensInNewTab = v })
+		}
+	})
+}
+
+// pagesPage manages the dashboard pages.
+func (e *Editor) pagesPage() tview.Primitive {
+	spec := listSpec{
+		title: "Pages",
+		labels: func() []string {
+			out := make([]string, len(e.cfg.Pages))
+			for i, p := range e.cfg.Pages {
+				out[i] = p.Name
+			}
+			return out
+		},
+		sub: func(i int) string {
+			p := e.cfg.Pages[i]
 			def := ""
 			if p.Default {
-				def = " [default]"
+				def = "  (default)"
 			}
-			s.WriteString(fmt.Sprintf("  %s%s (%s)%s\n", cursor, p.Name, p.Path, def))
-		}
+			return fmt.Sprintf("%s  %d widgets%s", p.Path, len(p.Widgets), def)
+		},
+		add: func() {
+			e.cfg.Pages = append(e.cfg.Pages, types.Page{Name: "New page", Path: "/new-page"})
+			e.markModified()
+		},
+		edit: func(i int) {
+			e.showPage("pages/"+fmt.Sprint(i), e.pagePage(i))
+		},
+		remove: func(i int) {
+			e.cfg.Pages = append(e.cfg.Pages[:i], e.cfg.Pages[i+1:]...)
+			e.markModified()
+		},
 	}
+	return e.recordList("pages", spec)
+}
 
-	s.WriteString("\n  a:add  d:del  enter:edit  esc:back\n")
-	return s.String()
+// pagePage edits a single page and its widgets.
+func (e *Editor) pagePage(idx int) tview.Primitive {
+	p := &e.cfg.Pages[idx]
+	return e.formShell("Page: "+p.Name, func(f *tview.Form) {
+		e.str(f, "Name", p.Name, func(v string) { p.Name = v })
+		e.str(f, "Path", p.Path, func(v string) { p.Path = v })
+		e.yesno(f, "Default", p.Default, func(v bool) { p.Default = v })
+		f.AddButton("Widgets", func() {
+			e.showPage("pages/"+fmt.Sprint(idx)+"/widgets", e.widgetsPage(idx))
+		})
+	})
+}
+
+// widgetsPage manages a page's widgets.
+func (e *Editor) widgetsPage(pidx int) tview.Primitive {
+	p := &e.cfg.Pages[pidx]
+	spec := listSpec{
+		title: "Widgets",
+		labels: func() []string {
+			out := make([]string, len(p.Widgets))
+			for i, w := range p.Widgets {
+				out[i] = w.Label
+			}
+			return out
+		},
+		sub: func(i int) string {
+			return p.Widgets[i].Type
+		},
+		add: func() {
+			p.Widgets = append(p.Widgets, types.Widget{Type: "stat", Label: "New widget"})
+			e.markModified()
+		},
+		edit: func(i int) {
+			e.showPage("pages/"+fmt.Sprint(pidx)+"/widget/"+fmt.Sprint(i), e.widgetPage(pidx, i))
+		},
+		remove: func(i int) {
+			p.Widgets = append(p.Widgets[:i], p.Widgets[i+1:]...)
+			e.markModified()
+		},
+	}
+	return e.recordList("pages/widgets", spec)
+}
+
+// widgetPage edits a single widget by type.
+func (e *Editor) widgetPage(pidx, idx int) tview.Primitive {
+	w := &e.cfg.Pages[pidx].Widgets[idx]
+	return e.formShell("Widget", func(f *tview.Form) {
+		e.pick(f, "Type", widgetTypeOptions, w.Type, func(v string) {
+			w.Type = v
+			if v == "chart" && w.Chart == nil {
+				w.Chart = &types.ChartConfig{Type: "line"}
+			}
+			if v != "stats_grid" && v != "chart" {
+				w.Chart = nil
+			}
+		})
+		e.str(f, "Label", w.Label, func(v string) { w.Label = v })
+		switch w.Type {
+		case "stat":
+			e.str(f, "Query", w.Query, func(v string) { w.Query = v })
+			e.pick(f, "Icon", iconOptions, w.Icon, func(v string) { w.Icon = v })
+			e.pick(f, "Color", actionColorOptions, w.Color, func(v string) { w.Color = v })
+			e.str(f, "Prefix", w.Prefix, func(v string) { w.Prefix = v })
+		case "stats_grid":
+			e.num(f, "Columns", w.Columns, func(v int) { w.Columns = v })
+			f.AddButton("Sub-widgets", func() {
+				e.showPage("widget/subs/"+fmt.Sprint(idx), e.subWidgetsPage(pidx, idx))
+			})
+		case "chart":
+			if w.Chart == nil {
+				w.Chart = &types.ChartConfig{Type: "line"}
+			}
+			e.pick(f, "Chart type", chartTypeOptions, w.Chart.Type, func(v string) { w.Chart.Type = v })
+			e.str(f, "Query", w.Chart.Query, func(v string) { w.Chart.Query = v })
+			e.str(f, "X axis", w.Chart.X, func(v string) { w.Chart.X = v })
+			e.str(f, "Y axis", w.Chart.Y, func(v string) { w.Chart.Y = v })
+		case "table", "list":
+			e.str(f, "Query", w.Query, func(v string) { w.Query = v })
+			e.num(f, "Limit", w.Limit, func(v int) { w.Limit = v })
+			f.AddButton("Data columns", func() {
+				e.showPage("widget/columns/"+fmt.Sprint(idx), e.stringListPage("widget/columns/"+fmt.Sprint(idx), "Data columns", func() []string {
+					return w.DataColumns
+				}, func(v []string) { w.DataColumns = v }))
+			})
+		case "html":
+			e.str(f, "Query", w.Query, func(v string) { w.Query = v })
+		}
+	})
+}
+
+// subWidgetsPage manages the nested stat widgets of a stats_grid widget.
+func (e *Editor) subWidgetsPage(pidx, idx int) tview.Primitive {
+	parent := &e.cfg.Pages[pidx].Widgets[idx]
+	spec := listSpec{
+		title: "Sub-widgets",
+		labels: func() []string {
+			out := make([]string, len(parent.Widgets))
+			for i, w := range parent.Widgets {
+				out[i] = w.Label
+			}
+			return out
+		},
+		sub: func(i int) string {
+			return parent.Widgets[i].Type
+		},
+		add: func() {
+			parent.Widgets = append(parent.Widgets, types.Widget{Type: "stat", Label: "New widget"})
+			e.markModified()
+		},
+		edit: func(i int) {
+			e.showPage("widget/sub/"+fmt.Sprint(i), e.subWidgetPage(pidx, idx, i))
+		},
+		remove: func(i int) {
+			parent.Widgets = append(parent.Widgets[:i], parent.Widgets[i+1:]...)
+			e.markModified()
+		},
+	}
+	return e.recordList("widget/subs", spec)
+}
+
+// subWidgetPage edits one nested stat widget.
+func (e *Editor) subWidgetPage(pidx, widx, idx int) tview.Primitive {
+	w := &e.cfg.Pages[pidx].Widgets[widx].Widgets[idx]
+	return e.formShell("Sub-widget", func(f *tview.Form) {
+		e.str(f, "Label", w.Label, func(v string) { w.Label = v })
+		e.str(f, "Query", w.Query, func(v string) { w.Query = v })
+		e.pick(f, "Icon", iconOptions, w.Icon, func(v string) { w.Icon = v })
+		e.pick(f, "Color", actionColorOptions, w.Color, func(v string) { w.Color = v })
+		e.str(f, "Prefix", w.Prefix, func(v string) { w.Prefix = v })
+	})
+}
+
+// freeOptions turns arbitrary strings into self-labelled options.
+func freeOptions(values []string) []Option {
+	out := make([]Option, 0, len(values))
+	for _, v := range values {
+		out = append(out, Option{Label: v, Value: v})
+	}
+	return out
+}
+
+// namePrompt asks for a new collection member name and runs onDone.
+func (e *Editor) namePrompt(title, label string, existing func() []string, onDone func(string)) {
+	input := tview.NewInputField().SetLabel(label)
+	form := e.promptForm(title, input, func(name string) {
+		for _, ex := range existing() {
+			if ex == name {
+				e.toast("Name already exists")
+				return
+			}
+		}
+		if name == "" {
+			e.toast("Name is required")
+			return
+		}
+		onDone(name)
+	})
+	e.showModal(form)
 }

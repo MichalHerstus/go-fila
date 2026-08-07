@@ -216,6 +216,7 @@ import (
 
     %q
     %q
+    auth %q
     layoutviews %q
 )
 
@@ -249,7 +250,7 @@ func List(db *sql.DB) http.HandlerFunc {
 
         validSorts := map[string]bool{`, pkgName,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/views/layout")))
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout")))
 
 	// Valid sort columns
 	for i, c := range sortableCols {
@@ -441,7 +442,7 @@ func List(db *sql.DB) http.HandlerFunc {
             PanelPath: ` + fmt.Sprintf("%q", g.Config.Panel.Path) + `,
         }
 
-        ` + fmt.Sprintf("layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
+        ` + fmt.Sprintf("layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
     }
 }
 `)
@@ -736,6 +737,7 @@ import (
 
     %q
     %q
+    auth %q
     layoutviews %q
 )
 
@@ -783,12 +785,12 @@ func Cards(db *sql.DB) http.HandlerFunc {
             PanelPath:     %q,
         }
 
-        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sCards(vd)).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sCards(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
 		perPage,
 		sortStmt,
 		queryCore,
@@ -824,6 +826,7 @@ import (
     %q
     %q
     %q
+    auth %q
     layoutviews %q
 )
 
@@ -854,12 +857,12 @@ func Detail(db *sql.DB) http.HandlerFunc {
             PanelPath: %q,
         }
 
-        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sDetail(vd)).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sDetail(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
 		queryName,
 		g.idGoTypeForResource(r),
 		detailFieldMap(r.Detail.Fields),
@@ -1328,9 +1331,10 @@ import (
     "fmt"
     "net/http"
     "strings"
-%s%s%s
+    %s%s%s
     %q
     %q
+    auth %q
     layoutviews %q
 )
 
@@ -1349,7 +1353,7 @@ func Create(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  true,
             }
-            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sForm(vd)).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -1368,10 +1372,10 @@ func Create(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		hooksImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
-		listPath,
+		fmt.Sprintf("%s/%s/new", g.Config.Panel.Path, pkgName),
 		r.Name,
 		g.Config.Panel.Path,
 		resourceTitle(r),
@@ -1443,7 +1447,11 @@ func formFieldDefsWithOpts(fields []types.Field, optVars map[string]string) stri
 			}
 			opts += "}"
 		}
-		defs = append(defs, fmt.Sprintf("{Name: %q, Label: %q, FieldType: %q, Options: %s}", f.Name, label, f.Type, opts))
+		picker := false
+		if _, ok := optVars[f.Name]; ok && (f.Type == "select" || f.Type == "relation") {
+			picker = true
+		}
+		defs = append(defs, fmt.Sprintf("{Name: %q, Label: %q, FieldType: %q, Picker: %t, Options: %s}", f.Name, label, f.Type, picker, opts))
 	}
 	return strings.Join(defs, ",\n")
 }
@@ -1592,6 +1600,7 @@ import (
     %q
     %q
     %q
+    auth %q
     layoutviews %q
 )
 
@@ -1620,13 +1629,13 @@ func Update(db *sql.DB) http.HandlerFunc {
                 Fields: []viewmodels.ColumnDef{
                     %s,
                 },
-                Action:    %q,
+                Action:    %s,
                 Method:    "POST",
                 Resource:  %q,
                 PanelPath: %q,
                 IsCreate:  false,
             }
-            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), views.%sForm(vd)).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -1643,13 +1652,13 @@ func Update(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		hooksImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
 		populateQuery,
 		g.idGoTypeForResource(r),
 		strings.Join(populateFields, "\n"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
-		fmt.Sprintf("%s/%s/%%d", g.Config.Panel.Path, pkgName),
+		fmt.Sprintf("fmt.Sprintf(\"%%s/%%s/%%d\", %q, %q, id)", g.Config.Panel.Path, pkgName),
 		r.Name,
 		g.Config.Panel.Path,
 		resourceTitle(r),
