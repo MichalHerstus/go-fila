@@ -14,14 +14,13 @@ import (
 	"github.com/go-fila/go-fila/internal/types"
 )
 
-// generateMain writes main.go for the generated app: it imports the sqlc
-// output package (for the postgres driver registration) and the panel router,
-// opens the database connection using getDSN, verifies the database is usable
-// (Ping plus a sanity query against the auth table) BEFORE binding the listen
-// port, then serves on a port chosen by the --port flag (or the ADDR env var,
-// default ":8080") with graceful shutdown on SIGINT/SIGTERM. For sqlite it
-// additionally registers the sqlite driver. Returns an error if the file
-// cannot be written.
+// generateMain writes main.go for the generated app: it imports the driver
+// package (pgx stdlib for postgres, mattn/go-sqlite3 for sqlite, go-mssqldb
+// for mssql), opens the database connection using getDSN, verifies the
+// database is usable (Ping plus a sanity query against the auth table) BEFORE
+// binding the listen port, then serves on a port chosen by the --port flag (or
+// the ADDR env var, default ":8080") with graceful shutdown on SIGINT/SIGTERM.
+// Returns an error if the file cannot be written.
 func (g *Generator) generateMain() error {
 	driverName := "postgres"
 	driverImport := fmt.Sprintf("_ %q", g.moduleImport(g.Config.SQLC.OutputPkg))
@@ -31,6 +30,9 @@ func (g *Generator) generateMain() error {
 	} else if g.isMSSQL() {
 		driverName = "mssql"
 		driverImport = `_ "github.com/microsoft/go-mssqldb"`
+	} else {
+		driverName = "pgx"
+		driverImport = `_ "github.com/jackc/pgx/v5/stdlib"`
 	}
 
 	authTable := g.Config.Auth.Table
@@ -60,12 +62,27 @@ import (
 
 	%s
 	"%s"
+	"%s"
 )
 
 func main() {
 	port := flag.Int("port", 0, "listen port (overrides ADDR env)")
+	flag.IntVar(port, "p", 0, "shorthand for --port")
 	logLevel := flag.String("log", "full", "log level: full (default) or err (errors only)")
+	flag.StringVar(logLevel, "l", "full", "shorthand for --log")
+	help := flag.Bool("help", false, "print command line syntax and exit")
+	flag.BoolVar(help, "h", false, "shorthand for --help")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage: %%s [options]\n\nOptions:\n", os.Args[0])
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+	if *help {
+		flag.Usage()
+		os.Exit(0)
+	}
+
+	auth.Init()
 
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -122,7 +139,7 @@ func main() {
 		log.Fatal(err)
 	}
 }
-`, driverImport, g.moduleImport("internal/panel"), getDSN(g.Config), driverName, sanityQuery)
+`, driverImport, g.moduleImport("internal/panel"), g.moduleImport("internal/panel/auth"), getDSN(g.Config), driverName, sanityQuery)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "main.go"), []byte(code), 0644)
 }

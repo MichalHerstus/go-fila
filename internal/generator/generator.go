@@ -24,6 +24,10 @@ type Generator struct {
 	Config    *types.Config
 	OutDir    string
 	ConfigDir string
+	// SkipPlugins disables the plugin loader (escape hatch for --skip-plugins).
+	SkipPlugins bool
+	// Verbose enables per-plugin load summaries.
+	Verbose bool
 }
 
 // New creates a Generator for the given parsed configuration and output
@@ -144,6 +148,17 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("copying sql files: %w", err)
 	}
 
+	// Plugins run after the user's SQL is copied (plugin SQL must land in the
+	// out dir before sqlc runs) and before any resource/page generation. The
+	// second ensureDirs call creates handler/view dirs for plugin-contributed
+	// resources.
+	if err := g.loadPlugins(); err != nil {
+		return fmt.Errorf("loading plugins: %w", err)
+	}
+	if err := g.ensureDirs(); err != nil {
+		return fmt.Errorf("creating resource directories: %w", err)
+	}
+
 	if err := g.generateMain(); err != nil {
 		return fmt.Errorf("generating main.go: %w", err)
 	}
@@ -154,6 +169,10 @@ func (g *Generator) Generate() error {
 
 	if err := g.generateAuth(); err != nil {
 		return fmt.Errorf("generating auth: %w", err)
+	}
+
+	if err := g.generateHTTPErr(); err != nil {
+		return fmt.Errorf("generating httperr: %w", err)
 	}
 
 	for _, r := range g.Config.Resources {
@@ -202,6 +221,7 @@ func (g *Generator) Generate() error {
 func (g *Generator) ensureDirs() error {
 	dirs := []string{
 		"internal/panel/auth",
+		"internal/panel/httperr",
 		"internal/panel/resources",
 		"internal/panel/pages",
 		"internal/hooks",

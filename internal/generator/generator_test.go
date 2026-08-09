@@ -1,6 +1,8 @@
 package generator
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -149,5 +151,844 @@ func TestGenerateNoHooksRegression(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dir, "internal/hooks", "hooks.go")); !os.IsNotExist(err) {
 		t.Error("hooks.go should not be generated without fn hooks")
+	}
+}
+
+// procConfig returns a config exercising stored-procedure hooks (create after,
+// delete before) and a proc-backed custom action (single + bulk) for the given
+// driver. The driver drives emission: CALL on postgres, EXEC on mssql, skipped
+// on sqlite.
+func procConfig(driver string) *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: driver, DSN: "x"},
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Label: "User",
+				List: &types.ListConfig{
+					Columns: []types.Column{{Name: "name", Label: "Name"}},
+				},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{{Name: "name", Type: "text"}},
+						Hooks: &types.Hooks{
+							After: []types.Hook{{Name: "archive_created", Proc: "sp_archive_user"}},
+						},
+					},
+					Delete: &types.FormAction{
+						Hooks: &types.Hooks{
+							Before: []types.Hook{{Name: "archive_delete", Proc: "sp_archive_user"}},
+						},
+					},
+				},
+				Actions: []types.Action{
+					{Name: "archive", Proc: "sp_archive_user", Bulk: true},
+				},
+			},
+		},
+	}
+}
+
+// assertGeneratedGoParses parses every generated .go file under dir, failing on
+// syntax errors. It catches malformed Sprintf output in the emission builders
+// (e.g. a mangled case block) without needing the full generated module to
+// type-check.
+func assertGeneratedGoParses(t *testing.T, dir string) {
+	t.Helper()
+	var files []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(path, ".go") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk output dir: %v", err)
+	}
+	for _, f := range files {
+		if _, err := parser.ParseFile(token.NewFileSet(), f, nil, parser.SkipObjectResolution); err != nil {
+			t.Errorf("%s failed to parse: %v", f, err)
+		}
+	}
+}
+
+func TestGenerateProcPostgres(t *testing.T) {
+	dir := t.TempDir()
+	g := New(procConfig("postgres"), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	assert := func(file string, wants []string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s missing %q\n--- generated:\n%s", file, want, data)
+			}
+		}
+		return string(data)
+	}
+	assert("internal/panel/resources/user/create.go", []string{
+		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", scope.ID)`,
+		`RETURNING id`,
+		`hooks "`,
+	})
+	assert("internal/panel/resources/user/delete.go", []string{
+		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", scope.ID)`,
+		`hooks "`,
+	})
+	assert("internal/panel/resources/user/actions.go", []string{
+		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", int64(id))`,
+	})
+	assert("internal/panel/resources/user/bulk.go", []string{
+		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", id)`,
+	})
+}
+
+func TestGenerateProcMSSQL(t *testing.T) {
+	dir := t.TempDir()
+	g := New(procConfig("mssql"), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	assert := func(file string, wants []string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s missing %q\n--- generated:\n%s", file, want, data)
+			}
+		}
+		return string(data)
+	}
+	assert("internal/panel/resources/user/create.go", []string{
+		`db.ExecContext(r.Context(), "EXEC sp_archive_user $1", scope.ID)`,
+		`OUTPUT INSERTED.id`,
+		`hooks "`,
+	})
+	assert("internal/panel/resources/user/actions.go", []string{
+		`db.ExecContext(r.Context(), "EXEC sp_archive_user $1", int64(id))`,
+	})
+	assert("internal/panel/resources/user/bulk.go", []string{
+		`db.ExecContext(r.Context(), "EXEC sp_archive_user $1", id)`,
+	})
+}
+
+func TestGenerateProcSQLiteIgnored(t *testing.T) {
+	dir := t.TempDir()
+	g := New(procConfig("sqlite"), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	assert := func(file string, wants []string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(data), want) {
+				t.Errorf("%s missing %q\n--- generated:\n%s", file, want, data)
+			}
+		}
+		return string(data)
+	}
+	assertNot := func(file string, notWants []string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, not := range notWants {
+			if strings.Contains(string(data), not) {
+				t.Errorf("%s should not contain %q\n--- generated:\n%s", file, not, data)
+			}
+		}
+	}
+
+	assert("internal/panel/resources/user/create.go", []string{
+		`db.ExecContext(r.Context(), query, vals...)`,
+	})
+	assertNot("internal/panel/resources/user/create.go", []string{
+		"CALL", "EXEC", "RETURNING id", `hooks "`,
+	})
+
+	assertNot("internal/panel/resources/user/delete.go", []string{
+		"CALL", "EXEC", `hooks "`,
+	})
+
+	assert("internal/panel/resources/user/actions.go", []string{
+		`case "archive":`,
+	})
+	assertNot("internal/panel/resources/user/actions.go", []string{
+		"CALL", "EXEC", "db.ExecContext", `hooks "`,
+	})
+
+	assert("internal/panel/resources/user/bulk.go", []string{
+		`case "archive":`,
+		`_ = id`,
+	})
+	assertNot("internal/panel/resources/user/bulk.go", []string{
+		"CALL", "EXEC", "db.ExecContext",
+	})
+}
+
+// TestGenerateProcActionWithFnHook ensures an action mixing a proc call with a
+// fn hook emits both the hook import/call and the proc invocation in one case.
+func TestGenerateProcActionWithFnHook(t *testing.T) {
+	cfg := procConfig("postgres")
+	cfg.Resources[0].Actions[0].Hooks = &types.Hooks{
+		Before: []types.Hook{{Name: "log_archive", Fn: "LogArchive"}},
+	}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	actions, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "actions.go"))
+	if err != nil {
+		t.Fatalf("read actions.go: %v", err)
+	}
+	actionsStr := string(actions)
+	for _, want := range []string{
+		`hooks "`,
+		`hooks.LogArchive(r.Context(), db, scope)`,
+		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", int64(id))`,
+	} {
+		if !strings.Contains(actionsStr, want) {
+			t.Errorf("actions.go missing %q\n--- generated:\n%s", want, actionsStr)
+		}
+	}
+}
+
+// TestGenerateProcSQLiteMixedHooks keeps fn/sql hooks and the RETURNING path
+// when a proc-only hook sits next to a real hook in the same block on sqlite:
+// only the proc call is skipped, everything else still emits.
+func TestGenerateProcSQLiteMixedHooks(t *testing.T) {
+	cfg := procConfig("sqlite")
+	cfg.Resources[0].Form.Create.Hooks.After = []types.Hook{
+		{Name: "archive_created", Proc: "sp_archive_user"},
+		{Name: "notify", SQL: "INSERT INTO notifications (target) VALUES ('created')"},
+	}
+
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	create, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "create.go"))
+	if err != nil {
+		t.Fatalf("read create.go: %v", err)
+	}
+	createStr := string(create)
+	for _, want := range []string{
+		`RETURNING id`,
+		`hooks "`,
+		`db.ExecContext(r.Context(), "INSERT INTO notifications (target) VALUES ('created')", scope.ID)`,
+	} {
+		if !strings.Contains(createStr, want) {
+			t.Errorf("create.go missing %q\n--- generated:\n%s", want, createStr)
+		}
+	}
+	for _, notWant := range []string{"CALL", "EXEC"} {
+		if strings.Contains(createStr, notWant) {
+			t.Errorf("create.go should not contain %q\n--- generated:\n%s", notWant, createStr)
+		}
+	}
+}
+
+// fkLabelConfig returns a postgres config whose list view has an FK label
+// column ({fk}_label) backed by a relation form field, mirroring what
+// `init --db` introspection emits for a table with foreign keys.
+func fkLabelConfig() *types.Config {
+	fields := []types.Field{
+		{Name: "pn", Type: "relation", OptionsQuery: "ListSkladZbozi", OptionsValue: "pn", OptionsLabel: "pn"},
+		{Name: "pn_nazev", Type: "string"},
+	}
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "postgres://user:pass@host:5432/db"},
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "SkladZbozi",
+				Label: "SkladZbozi",
+				Table: "sklad_zbozi",
+				List:  &types.ListConfig{Columns: []types.Column{{Name: "pn", Label: "pn"}}},
+			},
+			{
+				Name:  "SkladZasoby",
+				Label: "SkladZasoby",
+				Table: "sklad_zasoby",
+				List: &types.ListConfig{
+					Columns: []types.Column{
+						{Name: "id", Type: "integer", Sortable: true},
+						{Name: "pn_nazev", Type: "string", Searchable: true},
+						{Name: "pn_label", Label: "SkladZbozi", Type: "string"},
+					},
+				},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{Fields: fields},
+					Update: &types.FormAction{Fields: fields},
+				},
+			},
+		},
+	}
+}
+
+// TestGenerateListFKLabelJoin ensures the generated list handler emits the FK
+// LEFT JOIN for "{fk}_label" list columns (so the raw SQL can select the label
+// from the joined foreign table) and derives the pagination total from a single
+// windowed COUNT(*) OVER() query instead of a separate COUNT query.
+func TestGenerateListFKLabelJoin(t *testing.T) {
+	dir := t.TempDir()
+	g := New(fkLabelConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	list, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/skladzasoby", "list.go"))
+	if err != nil {
+		t.Fatalf("read list.go: %v", err)
+	}
+	listStr := string(list)
+	for _, want := range []string{
+		`SELECT t.id, t.pn_nazev, f_sklad_zbozi.pn AS pn_label, COUNT(*) OVER() AS _total FROM sklad_zasoby t LEFT JOIN sklad_zbozi f_sklad_zbozi ON f_sklad_zbozi.pn = t.pn`,
+		`searchableCols := []string{"t.pn_nazev"}`,
+		`dataQuery := "SELECT t.id, t.pn_nazev, f_sklad_zbozi.pn AS pn_label, COUNT(*) OVER() AS _total FROM sklad_zasoby t LEFT JOIN sklad_zbozi f_sklad_zbozi ON f_sklad_zbozi.pn = t.pn" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"`,
+		`case int64:
+            total = tv`,
+	} {
+		if !strings.Contains(listStr, want) {
+			t.Errorf("list.go missing %q\n--- generated:\n%s", want, listStr)
+		}
+	}
+	if strings.Contains(listStr, `countQuery :=`) {
+		t.Error("list.go must not emit a separate COUNT query (windowed COUNT(*) OVER() replaces it)")
+	}
+}
+
+// TestGeneratePostgresDriver ensures a postgres project opens the DB with the
+// pgx driver name and registers it (and pins it in go.mod) so the generated
+// app actually boots against a live postgres server.
+func TestGeneratePostgresDriver(t *testing.T) {
+	cfg := hookConfig()
+	cfg.Connections = map[string]types.Connection{
+		"default": {Driver: "postgres", DSN: "postgres://user:pass@host:5432/db"},
+	}
+
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	mainStr := string(main)
+	for _, want := range []string{
+		`_ "github.com/jackc/pgx/v5/stdlib"`,
+		`sql.Open("pgx", dsn)`,
+	} {
+		if !strings.Contains(mainStr, want) {
+			t.Errorf("main.go missing %q", want)
+		}
+	}
+	if strings.Contains(mainStr, `sql.Open("postgres"`) {
+		t.Error("main.go must not use the unregistered \"postgres\" driver name")
+	}
+
+	gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		t.Fatalf("read go.mod: %v", err)
+	}
+	if !strings.Contains(string(gomod), "github.com/jackc/pgx/v5 v5.10.0") {
+		t.Error("go.mod must pin github.com/jackc/pgx/v5 for the postgres driver")
+	}
+}
+
+// TestMainGeneratedFlags ensures the generated main.go registers short flag
+// aliases (--port/-p, --log/-l) and a --help/-h path that prints the command
+// line syntax and exits before touching the database.
+func TestMainGeneratedFlags(t *testing.T) {
+	cfg := hookConfig()
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	mainStr := string(main)
+	for _, want := range []string{
+		`flag.IntVar(port, "p", 0, "shorthand for --port")`,
+		`flag.StringVar(logLevel, "l", "full", "shorthand for --log")`,
+		`help := flag.Bool("help", false, "print command line syntax and exit")`,
+		`flag.BoolVar(help, "h", false, "shorthand for --help")`,
+		`flag.Usage = func() {`,
+		`fmt.Fprintf(os.Stdout, "Usage: %s [options]\n\nOptions:\n", os.Args[0])`,
+		`if *help {`,
+		`os.Exit(0)`,
+		`auth.Init()`,
+		`internal/panel/auth`,
+	} {
+		if !strings.Contains(mainStr, want) {
+			t.Errorf("main.go missing %q\n--- generated:\n%s", want, mainStr)
+		}
+	}
+}
+
+// phaseAConfig returns a config exercising the Phase A security surfaces:
+// a sortable list, a card view, a create form with a file upload field and a
+// custom action with a sql hook (so the httperr import is exercised in the
+// action handler too).
+func phaseAConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Label: "User",
+				List: &types.ListConfig{
+					Columns: []types.Column{{Name: "name", Label: "Name", Sortable: true}},
+				},
+				Card: &types.CardConfig{
+					Fields:      []types.Field{{Name: "name", Type: "text"}},
+					Columns:     3,
+					Rows:        2,
+					DefaultSort: "-name",
+				},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "text"},
+							{Name: "avatar", Type: "file"},
+						},
+					},
+					Delete: &types.FormAction{},
+				},
+				Actions: []types.Action{
+					{Name: "deactivate", Query: "UPDATE users SET status = 'inactive' WHERE id = $1"},
+				},
+			},
+		},
+	}
+}
+
+// TestGenerateSessionSecret checks the generated session store reads
+// SESSION_SECRET from the environment, requires it in production and falls back
+// to an ephemeral random secret otherwise.
+func TestGenerateSessionSecret(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	sess, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "session.go"))
+	if err != nil {
+		t.Fatalf("read session.go: %v", err)
+	}
+	sessStr := string(sess)
+	for _, want := range []string{
+		`os.Getenv("SESSION_SECRET")`,
+		`len(v) < 32`,
+		`os.Getenv("APP_ENV") == "production"`,
+		`log.Fatal("SESSION_SECRET must be set when APP_ENV=production")`,
+		`rand.Read(buf)`,
+		`Store = newStore([]byte(v))`,
+		`sessions.NewCookieStore(secret)`,
+		`SameSite: http.SameSiteLaxMode`,
+		`HttpOnly: true`,
+		`var Store *sessions.CookieStore`,
+	} {
+		if !strings.Contains(sessStr, want) {
+			t.Errorf("session.go missing %q", want)
+		}
+	}
+	if strings.Contains(sessStr, "go-fila-secret-key-change-in-production") {
+		t.Error("session.go must not hardcode the default secret")
+	}
+}
+
+// TestGenerateOrderWhitelist checks both the list and card handlers clamp the
+// order query parameter to asc/desc before interpolating it into ORDER BY.
+func TestGenerateOrderWhitelist(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	for _, f := range []string{"list.go", "card.go"} {
+		code, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", f))
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		str := string(code)
+		if !strings.Contains(str, `if order != "asc" && order != "desc" {`) {
+			t.Errorf("%s missing order whitelist guard", f)
+		}
+	}
+}
+
+// TestGenerateUploadValidation checks the emitted saveUploadedFile helper
+// whitelists extensions and content types instead of accepting arbitrary files.
+func TestGenerateUploadValidation(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	create, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "create.go"))
+	if err != nil {
+		t.Fatalf("read create.go: %v", err)
+	}
+	createStr := string(create)
+	for _, want := range []string{
+		`func saveUploadedFile(r *http.Request, fieldName string) string {`,
+		`strings.ToLower(filepath.Ext(header.Filename))`,
+		`safeUploadExt(ext)`,
+		`http.DetectContentType(head[:n])`,
+		`detected == "text/html"`,
+		`detected == "image/svg+xml"`,
+		`file.Seek(0, io.SeekStart)`,
+		`var safeUploadExts = map[string]bool{`,
+	} {
+		if !strings.Contains(createStr, want) {
+			t.Errorf("create.go missing %q", want)
+		}
+	}
+	for _, notWant := range []string{`".html": true`, `".svg": true`, `".php": true`} {
+		if strings.Contains(createStr, notWant) {
+			t.Errorf("create.go must not whitelist %q", notWant)
+		}
+	}
+}
+
+// TestGenerateSecureErrors checks every generated handler logs the real error
+// server-side and returns a generic status instead of leaking err.Error(), and
+// that the shared httperr package is emitted.
+func TestGenerateSecureErrors(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	httperrCode, err := os.ReadFile(filepath.Join(dir, "internal/panel/httperr", "httperr.go"))
+	if err != nil {
+		t.Fatalf("read httperr.go: %v", err)
+	}
+	for _, want := range []string{
+		`func Internal(w http.ResponseWriter, err error) {`,
+		`log.Printf("internal error: %v", err)`,
+		`http.Error(w, "Internal Server Error", http.StatusInternalServerError)`,
+		`func NotFound(w http.ResponseWriter, err error) {`,
+	} {
+		if !strings.Contains(string(httperrCode), want) {
+			t.Errorf("httperr.go missing %q", want)
+		}
+	}
+
+	handlerDir := filepath.Join(dir, "internal/panel/resources/user")
+	for _, f := range []string{"list.go", "card.go", "create.go", "delete.go", "actions.go"} {
+		code, err := os.ReadFile(filepath.Join(handlerDir, f))
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		str := string(code)
+		if !strings.Contains(str, `httperr "`) {
+			t.Errorf("%s missing httperr import", f)
+		}
+		if strings.Contains(str, `http.Error(w, err.Error()`) {
+			t.Errorf("%s must not leak err.Error() to the client", f)
+		}
+	}
+
+	pages, err := os.ReadFile(filepath.Join(dir, "internal/panel/pages", "Dashboard.go"))
+	if err == nil {
+		if !strings.Contains(string(pages), `httperr.Internal(w, err)`) {
+			t.Error("page handler must use httperr.Internal for render errors")
+		}
+	}
+}
+
+// TestGenerateSecurityHeaders checks the router registers the securityHeaders
+// middleware and serves uploads with Content-Disposition: attachment.
+func TestGenerateSecurityHeaders(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	router, err := os.ReadFile(filepath.Join(dir, "internal/panel", "router.go"))
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	routerStr := string(router)
+	for _, want := range []string{
+		`r.Use(securityHeaders)`,
+		`func securityHeaders(next http.Handler) http.Handler {`,
+		`X-Frame-Options`, `DENY`,
+		`X-Content-Type-Options`, `nosniff`,
+		`Referrer-Policy`, `same-origin`,
+		`Content-Security-Policy`,
+		`Content-Disposition`, `attachment`,
+	} {
+		if !strings.Contains(routerStr, want) {
+			t.Errorf("router.go missing %q", want)
+		}
+	}
+}
+
+// TestGenerateCSRFProtection checks the generated auth package emits the CSRF
+// token helper and middleware, hardens the session cookie, registers the
+// middleware first in the panel router, makes logout POST-only, and embeds
+// hidden _csrf inputs in every state-changing form.
+func TestGenerateCSRFProtection(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	sess, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "session.go"))
+	if err != nil {
+		t.Fatalf("read session.go: %v", err)
+	}
+	sessStr := string(sess)
+	for _, want := range []string{
+		`func CSRFToken(r *http.Request, w http.ResponseWriter) string {`,
+		`session.Values["csrf_token"]`,
+		`func csrfMatches(expected, actual string) bool {`,
+		`subtle.ConstantTimeCompare`,
+		`func CSRFMiddleware(next http.Handler) http.Handler {`,
+		`r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions`,
+		`X-CSRF-Token`,
+		`SameSite: http.SameSiteLaxMode`,
+		`HttpOnly: true`,
+		`Secure:`,
+	} {
+		if !strings.Contains(sessStr, want) {
+			t.Errorf("session.go missing %q", want)
+		}
+	}
+
+	router, err := os.ReadFile(filepath.Join(dir, "internal/panel", "router.go"))
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	routerStr := string(router)
+	if !strings.Contains(routerStr, `r.Use(auth.CSRFMiddleware)`) {
+		t.Error("router.go must register auth.CSRFMiddleware")
+	}
+	if strings.Contains(routerStr, `r.Get("/logout"`) {
+		t.Error("router.go must not expose logout as GET")
+	}
+	if !strings.Contains(routerStr, `r.Post("/logout", auth.LogoutHandler(db))`) {
+		t.Error("router.go must register logout as POST only")
+	}
+
+	handler, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "handler.go"))
+	if err != nil {
+		t.Fatalf("read auth handler.go: %v", err)
+	}
+	handlerStr := string(handler)
+	if !strings.Contains(handlerStr, `CSRFToken: CSRFToken(r, w)`) {
+		t.Error("auth handler.go must populate LoginPageData.CSRFToken")
+	}
+
+	for _, f := range []string{
+		filepath.Join(dir, "internal/views/resources/user", "form.templ"),
+		filepath.Join(dir, "internal/views/resources/user", "list.templ"),
+		filepath.Join(dir, "internal/panel/auth", "login.templ"),
+		filepath.Join(dir, "internal/views/layout", "base.templ"),
+	} {
+		code, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		if !strings.Contains(string(code), `_csrf`) {
+			t.Errorf("%s must embed a hidden _csrf input", filepath.Base(f))
+		}
+	}
+}
+
+// TestGenerateLoginRateLimit checks ratelimit.go is emitted and wired into the
+// login handler only when auth.login.rate_limit is configured with a positive
+// max_attempts.
+func TestGenerateLoginRateLimit(t *testing.T) {
+	cfg := phaseAConfig()
+	cfg.Auth.Login.RateLimit = &types.LoginRateLimit{MaxAttempts: 3, WindowSeconds: 60}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	rl, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "ratelimit.go"))
+	if err != nil {
+		t.Fatalf("read ratelimit.go: %v", err)
+	}
+	rlStr := string(rl)
+	for _, want := range []string{
+		`func clientIP(r *http.Request) string {`,
+		`net.SplitHostPort`,
+		`const loginMaxAttempts = 3`,
+		`const loginWindow = 60 * time.Second`,
+		`func loginLimited(r *http.Request) bool {`,
+		`func resetLoginLimit(r *http.Request) {`,
+	} {
+		if !strings.Contains(rlStr, want) {
+			t.Errorf("ratelimit.go missing %q", want)
+		}
+	}
+
+	handler, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "handler.go"))
+	if err != nil {
+		t.Fatalf("read auth handler.go: %v", err)
+	}
+	handlerStr := string(handler)
+	for _, want := range []string{
+		`loginLimited(r)`,
+		`resetLoginLimit(r)`,
+		`Too many login attempts. Please try again later.`,
+	} {
+		if !strings.Contains(handlerStr, want) {
+			t.Errorf("auth handler.go missing %q", want)
+		}
+	}
+
+	dir2 := t.TempDir()
+	g2 := New(phaseAConfig(), dir2)
+	if err := g2.Generate(); err != nil {
+		t.Fatalf("generate without rate limit: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir2, "internal/panel/auth", "ratelimit.go")); !os.IsNotExist(err) {
+		t.Error("ratelimit.go must not be emitted without a rate_limit config")
+	}
+}
+
+// TestGenerateCSVFormulaEscaping checks exported CSV headers and values pass
+// through csvSafe, which neutralizes spreadsheet formula injection.
+func TestGenerateCSVFormulaEscaping(t *testing.T) {
+	dir := t.TempDir()
+	g := New(phaseAConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	exp, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "export.go"))
+	if err != nil {
+		t.Fatalf("read export.go: %v", err)
+	}
+	expStr := string(exp)
+	for _, want := range []string{
+		`func csvSafe(s string) string {`,
+		`case '=', '+', '-', '@', '\t', '\r':`,
+		`out[i] = csvSafe(c)`,
+		`vals[i] = csvSafe(vals[i])`,
+	} {
+		if !strings.Contains(expStr, want) {
+			t.Errorf("export.go missing %q", want)
+		}
+	}
+}
+
+// TestGenerateActionRBAC checks an action policy emits ActionRBACMiddleware and
+// wraps the action and bulk routes, while policy-less resources keep plain POST
+// routes and no extra middleware.
+func TestGenerateActionRBAC(t *testing.T) {
+	cfg := phaseAConfig()
+	cfg.Resources[0].Actions = []types.Action{
+		{Name: "deactivate", Label: "Deactivate", Query: "UPDATE users SET status = 'inactive' WHERE id = $1", Policy: "admin"},
+		{Name: "complete_selected", Label: "Complete selected", Query: "UPDATE users SET status = 'done' WHERE id = $1", Bulk: true, Policy: "admin|manager"},
+	}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	mw, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "middleware.go"))
+	if err != nil {
+		t.Fatalf("read middleware.go: %v", err)
+	}
+	mwStr := string(mw)
+	for _, want := range []string{
+		`func ActionRBACMiddleware(resource string) func(http.Handler) http.Handler {`,
+		`action := r.PathValue("action")`,
+		`resource == "user" && action == "deactivate" && !checkRole("admin", userRole)`,
+		`resource == "user" && action == "complete_selected" && !checkRole("admin|manager", userRole)`,
+	} {
+		if !strings.Contains(mwStr, want) {
+			t.Errorf("middleware.go missing %q", want)
+		}
+	}
+
+	router, err := os.ReadFile(filepath.Join(dir, "internal/panel", "router.go"))
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	routerStr := string(router)
+	for _, want := range []string{
+		`r.With(auth.ActionRBACMiddleware("user")).Post("/user/{id}/action/{action}", user.Action(db))`,
+		`r.With(auth.ActionRBACMiddleware("user")).Post("/user/bulk/{action}", user.Bulk(db))`,
+	} {
+		if !strings.Contains(routerStr, want) {
+			t.Errorf("router.go missing %q", want)
+		}
+	}
+
+	dir2 := t.TempDir()
+	g2 := New(phaseAConfig(), dir2)
+	if err := g2.Generate(); err != nil {
+		t.Fatalf("generate without policies: %v", err)
+	}
+	assertGeneratedGoParses(t, dir2)
+	mw2, err := os.ReadFile(filepath.Join(dir2, "internal/panel/auth", "middleware.go"))
+	if err != nil {
+		t.Fatalf("read middleware.go: %v", err)
+	}
+	if strings.Contains(string(mw2), "ActionRBACMiddleware") {
+		t.Error("ActionRBACMiddleware must not be emitted without action policies")
 	}
 }

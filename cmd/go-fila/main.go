@@ -64,7 +64,11 @@ Flags:
   --db DSN       Introspect database (postgres://..., sqlserver://... or sqlite file path)
   --force        Overwrite existing files
   --verbose      Enable verbose logging
-  --demo         Scaffold a populated sqlite demo project (init only)`)
+  --skip-plugins Skip loading declared plugins (generate cannot use them)
+  --demo         Scaffold a populated sqlite demo project (init only)
+  --admin-password PASSWORD
+                 Set the initial admin password for --demo / --db scaffolding
+                 (a random one is generated and printed when omitted)`)
 }
 
 // parseGlobalFlags scans os.Args[2:] for the global flags shared by all
@@ -73,15 +77,19 @@ Flags:
 // Returns: configPath (YAML config file path, default "go-fila.yaml"),
 // outDir (output directory, default "./admin"),
 // force (overwrite existing files), verbose (enable verbose logging),
+// skipPlugins (skip loading declared plugins),
 // demo (scaffold the populated sqlite demo project instead of the plain
 // starter when initializing),
-// db (connection string for --db introspection mode).
-func parseGlobalFlags() (configPath, outDir, db string, force, verbose, demo bool) {
+// db (connection string for --db introspection mode),
+// adminPassword (initial admin password for --demo / --db scaffolding, or "").
+func parseGlobalFlags() (configPath, outDir, db, adminPassword string, force, verbose, skipPlugins, demo bool) {
 	configPath = "go-fila.yaml"
 	outDir = "./admin"
 	db = ""
+	adminPassword = ""
 	force = false
 	verbose = false
+	skipPlugins = false
 	demo = false
 
 	args := os.Args[2:]
@@ -102,10 +110,17 @@ func parseGlobalFlags() (configPath, outDir, db string, force, verbose, demo boo
 				db = args[i+1]
 				i++
 			}
+		case "--admin-password":
+			if i+1 < len(args) {
+				adminPassword = args[i+1]
+				i++
+			}
 		case "--force":
 			force = true
 		case "--verbose":
 			verbose = true
+		case "--skip-plugins":
+			skipPlugins = true
 		case "--demo":
 			demo = true
 		}
@@ -121,10 +136,10 @@ func parseGlobalFlags() (configPath, outDir, db string, force, verbose, demo boo
 // connects to an existing database, introspects its schema and generates
 // config and SQL files from the discovered tables (see cmdInitFromDB).
 func cmdInit() {
-	configPath, outDir, dbDSN, force, _, demo := parseGlobalFlags()
+	configPath, outDir, dbDSN, adminPassword, force, _, _, demo := parseGlobalFlags()
 
 	if dbDSN != "" {
-		if err := cmdInitFromDB(configPath, outDir, dbDSN, force); err != nil {
+		if err := cmdInitFromDB(configPath, outDir, dbDSN, adminPassword, force); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -132,7 +147,7 @@ func cmdInit() {
 	}
 
 	if demo {
-		if err := cmdInitDemo(configPath, outDir, force); err != nil {
+		if err := cmdInitDemo(configPath, outDir, adminPassword, force); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}
@@ -370,7 +385,7 @@ SELECT * FROM roles ORDER BY name;
 // is valid. With --verbose it also prints a short summary of the panel, the
 // number of resources, pages and navigation groups.
 func cmdValidate() {
-	configPath, _, _, _, verbose, _ := parseGlobalFlags()
+	configPath, _, _, _, verbose, _, _, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {
@@ -392,7 +407,7 @@ func cmdValidate() {
 // the Tailwind CSS build; failures there are reported as warnings instead of
 // being fatal, since the user can re-run them manually.
 func cmdGenerate() {
-	configPath, outDir, _, _, verbose, _ := parseGlobalFlags()
+	configPath, outDir, _, _, verbose, skipPlugins, _, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {
@@ -406,6 +421,8 @@ func cmdGenerate() {
 
 	gen := generator.New(cfg, outDir)
 	gen.ConfigDir = filepath.Dir(configPath)
+	gen.Verbose = verbose
+	gen.SkipPlugins = skipPlugins
 	if err := gen.Generate(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating: %v\n", err)
 		os.Exit(1)

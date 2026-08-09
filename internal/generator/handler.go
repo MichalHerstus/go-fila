@@ -76,6 +76,19 @@ func hasBulkActions(r types.Resource) bool {
 	return false
 }
 
+// hasActionPolicies reports whether any custom action on the resource declares
+// a policy, which wraps the action and bulk routes in auth.ActionRBACMiddleware.
+// Params: r (the resource definition).
+// Returns: true when at least one action carries a role policy.
+func hasActionPolicies(r types.Resource) bool {
+	for _, a := range r.Actions {
+		if a.Policy != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // colDefsStr renders the []viewmodels.ColumnDef literal for a list of
 // columns, filling in the label (defaults to the column name), field type,
 // sortable/searchable flags and the static options map (nil when empty).
@@ -176,6 +189,115 @@ func resourceTitle(r types.Resource) string {
 	return r.Name
 }
 
+// fkLabelJoin describes a LEFT JOIN a generated list/card/export handler must
+// emit so an FK label column ({fk}_label) can select the foreign table's label
+// column. It mirrors the JOIN the introspector writes into the SQLC list/detail
+// queries.
+type fkLabelJoin struct {
+	colName    string
+	selectPart string
+	fromPart   string
+}
+
+// labelJoins reconstructs the LEFT JOINs the SQLC queries use for FK label
+// columns: for every view column named "{fk}_label" with a matching relation
+// form field (options_query "List{Foreign}", options_value, options_label) it
+// produces the aliased SELECT fragment and the JOIN clause. Columns without a
+// matching relation field are skipped so the emitted SQL keeps the historical
+// (unjoined) behavior.
+// Params: r (the resource definition), colNames (the view's column/field names).
+// Returns: the join specs, possibly empty.
+func (g *Generator) labelJoins(r types.Resource, colNames []string) []fkLabelJoin {
+	var joins []fkLabelJoin
+	for _, c := range colNames {
+		if !strings.HasSuffix(c, "_label") {
+			continue
+		}
+		base := strings.TrimSuffix(c, "_label")
+		f := relationFormField(r, base)
+		if f == nil || f.OptionsQuery == "" {
+			continue
+		}
+		foreignName := strings.TrimPrefix(f.OptionsQuery, "List")
+		var foreign *types.Resource
+		for i := range g.Config.Resources {
+			if g.Config.Resources[i].Name == foreignName {
+				foreign = &g.Config.Resources[i]
+				break
+			}
+		}
+		if foreign == nil {
+			continue
+		}
+		ftable := tableName(*foreign)
+		joins = append(joins, fkLabelJoin{
+			colName:    c,
+			selectPart: fmt.Sprintf("f_%s.%s AS %s", ftable, f.OptionsLabel, c),
+			fromPart:   fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", ftable, ftable, ftable, f.OptionsValue, base),
+		})
+	}
+	return joins
+}
+
+// relationFormField returns the relation-typed form field with the given name,
+// searching the create then the update form action. nil when absent.
+// Params: r (the resource definition), name (the field name to find).
+// Returns: the matching field, or nil.
+func relationFormField(r types.Resource, name string) *types.Field {
+	var fields []types.Field
+	if r.Form != nil {
+		if r.Form.Create != nil {
+			fields = append(fields, r.Form.Create.Fields...)
+		}
+		if r.Form.Update != nil {
+			fields = append(fields, r.Form.Update.Fields...)
+		}
+	}
+	for i := range fields {
+		if fields[i].Name == name && fields[i].Type == "relation" {
+			return &fields[i]
+		}
+	}
+	return nil
+}
+
+// listSelectFrom renders the SELECT column list and FROM fragment for the raw
+// list/card/export queries. When the view has FK label columns backed by
+// relation form fields, real columns are qualified with the "t" alias, label
+// columns select the joined foreign table's column, and the FROM carries the
+// LEFT JOINs; colPrefix ("t.") and tableRef ("{table} t") are returned so the
+// WHERE/ORDER BY clauses stay unambiguous. Without joins the historical
+// unqualified fragments are returned so generated output stays unchanged.
+// Params: r (the resource definition), tName (the SQL table name), colNames
+// (the view's column/field names).
+// Returns: the SELECT list, the FROM fragment (alias + JOINs), the column
+// prefix, the table reference, and whether any JOINs were emitted.
+func (g *Generator) listSelectFrom(r types.Resource, tName string, colNames []string) (selectFrag, fromFrag, colPrefix, tableRef string, hasJoins bool) {
+	joins := g.labelJoins(r, colNames)
+	if len(joins) == 0 {
+		return strings.Join(colNames, ", "), tName, "", tName, false
+	}
+	labelCols := map[string]bool{}
+	for _, j := range joins {
+		labelCols[j.colName] = true
+	}
+	sel := make([]string, 0, len(colNames))
+	for _, c := range colNames {
+		if labelCols[c] {
+			continue
+		}
+		sel = append(sel, "t."+c)
+	}
+	for _, j := range joins {
+		sel = append(sel, j.selectPart)
+	}
+	fromParts := []string{tName + " t"}
+	for _, j := range joins {
+		fromParts = append(fromParts, j.fromPart)
+	}
+	return strings.Join(sel, ", "), strings.Join(fromParts, " "), "t.", tName + " t", true
+}
+
 // generateListHandler writes list.go for a resource: a List(db) handler that
 // reads page/search/sort/order query parameters, builds a dynamic WHERE/ORDER
 // BY/LIMIT query against the plural table name, counts the total rows for
@@ -199,7 +321,12 @@ func (g *Generator) generateListHandler(dir string, r types.Resource) error {
 		}
 	}
 
-	colsJoin := strings.Join(colNames, ", ")
+	selectFrag, fromFrag, colPrefix, _, _ := g.listSelectFrom(r, tName, colNames)
+
+	perPage := r.List.PerPage
+	if perPage < 1 {
+		perPage = 20
+	}
 
 	var sb strings.Builder
 
@@ -217,6 +344,7 @@ import (
     %q
     %q
     auth %q
+    httperr %q
     layoutviews %q
 )
 
@@ -226,7 +354,7 @@ func List(db *sql.DB) http.HandlerFunc {
         if page < 1 {
             page = 1
         }
-        perPage := 20
+        perPage := %d
         offset := (page - 1) * perPage
 
         search := r.URL.Query().Get("search")
@@ -248,9 +376,13 @@ func List(db *sql.DB) http.HandlerFunc {
 	}()+`
         }
 
+        if order != "asc" && order != "desc" {
+            order = "asc"
+        }
+
         validSorts := map[string]bool{`, pkgName,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout")))
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), perPage))
 
 	// Valid sort columns
 	for i, c := range sortableCols {
@@ -265,13 +397,7 @@ func List(db *sql.DB) http.HandlerFunc {
         }
 
 `)
-	searchableColsLiteral := ""
-	for i, sc := range searchCols {
-		if i > 0 {
-			searchableColsLiteral += ", "
-		}
-		searchableColsLiteral += fmt.Sprintf("%q", sc)
-	}
+	searchableColsLiteral := quoteList(searchCols, colPrefix)
 
 	// Build the args + WHERE/ORDER/LIMIT construction. Sqlite binds ? args
 	// positionally in SQL text order, so search args must come before the
@@ -296,44 +422,35 @@ func List(db *sql.DB) http.HandlerFunc {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
         }
 
-        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
         var total int64
-        if err := db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
-        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
+        totalSet := false
+        dataQuery := "SELECT %s, COUNT(*) OVER() AS _total FROM %s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         fullArgs = append(fullArgs, perPage, offset)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
 
-`, searchableColsLiteral, tName, colsJoin, tName)
+`, searchableColsLiteral, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
 	} else if g.isMSSQL() {
 		listCore = fmt.Sprintf(`        var args []interface{}
         args = append(args, perPage, offset)
         argIdx := 3
 
         var whereClauses []string
-        var countClauses []string
-        countIdx := 1
         if search != "" {
             searchableCols := []string{%s}
             for _, col := range searchableCols {
                 whereClauses = append(whereClauses, fmt.Sprintf("%%s LIKE $%%d", col, argIdx))
-                countClauses = append(countClauses, fmt.Sprintf("%%s LIKE $%%d", col, countIdx))
                 args = append(args, "%%"+search+"%%")
                 argIdx++
-                countIdx++
             }
         }
 
@@ -341,37 +458,28 @@ func List(db *sql.DB) http.HandlerFunc {
         if len(whereClauses) > 0 {
             whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
         }
-        countWhereSQL := ""
-        if len(countClauses) > 0 {
-            countWhereSQL = " WHERE " + strings.Join(countClauses, " OR ")
-        }
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
         }
         if orderSQL == "" {
             orderSQL = " ORDER BY (SELECT NULL)"
         }
 
-        countQuery := "SELECT COUNT(*) FROM %s" + countWhereSQL
         var total int64
-        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
-        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
+        totalSet := false
+        dataQuery := "SELECT %s, COUNT(*) OVER() AS _total FROM %s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
 
-`, searchableColsLiteral, tName, colsJoin, tName)
+`, searchableColsLiteral, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
 	} else {
 		listCore = fmt.Sprintf(`        var args []interface{}
         args = append(args, perPage, offset)
@@ -394,34 +502,32 @@ func List(db *sql.DB) http.HandlerFunc {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
         }
 
-        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
         var total int64
-        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
-        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
+        totalSet := false
+        dataQuery := "SELECT %s, COUNT(*) OVER() AS _total FROM %s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
 
-`, searchableColsLiteral, tName, colsJoin, tName)
+`, searchableColsLiteral, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
 	}
 	sb.WriteString(listCore)
 
 	sb.WriteString(`        var items []map[string]interface{}
         for rows.Next() {
-            ` + scanFields(colNames) + `
+            ` + scanFields(colNames, true) + `
             items = append(items, item)
+        }
+        if !totalSet {
+            total = int64(page * perPage)
         }
 
         totalPages := int(math.Ceil(float64(total) / float64(perPage)))
@@ -440,9 +546,10 @@ func List(db *sql.DB) http.HandlerFunc {
             },
             Resource:  ` + fmt.Sprintf("%q", r.Name) + `,
             PanelPath: ` + fmt.Sprintf("%q", g.Config.Panel.Path) + `,
+            CSRFToken: auth.CSRFToken(r, w),
         }
 
-        ` + fmt.Sprintf("layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
+        ` + fmt.Sprintf("layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
     }
 }
 `)
@@ -465,10 +572,12 @@ func validSortsMapStr(cols []string) string {
 
 // scanFields generates the Go source that scans a database row into a
 // map[string]interface{}: it declares one interface{} variable per column,
-// appends their addresses to a scan slice and populates the item map.
-// Params: cols (the column names to scan).
+// appends their addresses to a scan slice and populates the item map. When
+// withTotal is true the emitted code additionally scans the trailing
+// COUNT(*) OVER() AS _total column into the outer `total` variable.
+// Params: cols (the column names to scan), withTotal (also scan _total).
 // Returns: the multi-line Go source string to inline in the generated handler.
-func scanFields(cols []string) string {
+func scanFields(cols []string, withTotal bool) string {
 	var scans []string
 	scans = append(scans, `        item := make(map[string]interface{})`)
 	scans = append(scans, `        var scanArgs []interface{}`)
@@ -476,10 +585,23 @@ func scanFields(cols []string) string {
 		scans = append(scans, fmt.Sprintf(`        var val_%s interface{}`, c))
 		scans = append(scans, fmt.Sprintf(`        scanArgs = append(scanArgs, &val_%s)`, c))
 	}
+	if withTotal {
+		scans = append(scans, `        var totalVal interface{}`)
+		scans = append(scans, `        scanArgs = append(scanArgs, &totalVal)`)
+	}
 	scans = append(scans, `        if err := rows.Scan(scanArgs...); err != nil {`)
-	scans = append(scans, `            http.Error(w, err.Error(), http.StatusInternalServerError)`)
+	scans = append(scans, `            httperr.Internal(w, err)`)
 	scans = append(scans, `            return`)
 	scans = append(scans, `        }`)
+	if withTotal {
+		scans = append(scans, `        switch tv := totalVal.(type) {`)
+		scans = append(scans, `        case int64:`)
+		scans = append(scans, `            total = tv`)
+		scans = append(scans, `        case float64:`)
+		scans = append(scans, `            total = int64(tv)`)
+		scans = append(scans, `        }`)
+		scans = append(scans, `        totalSet = true`)
+	}
 	for _, c := range cols {
 		scans = append(scans, fmt.Sprintf(`        item[%q] = val_%s`, c, c))
 	}
@@ -487,13 +609,15 @@ func scanFields(cols []string) string {
 }
 
 // quoteList renders a comma-separated list of double-quoted Go string literals
-// for the given words, used to build slice/array literals in generated code.
-// Params: words (the strings to quote).
+// for the given words, each optionally prefixed (the prefix is used to qualify
+// searchable columns with the table alias when the list/card query has FK LEFT
+// JOINs).
+// Params: words (the strings to quote), prefix (optional column prefix).
 // Returns: a comma-separated list of quoted Go literals.
-func quoteList(words []string) string {
+func quoteList(words []string, prefix string) string {
 	q := make([]string, len(words))
 	for i, w := range words {
-		q[i] = fmt.Sprintf("%q", w)
+		q[i] = fmt.Sprintf("%q", prefix+w)
 	}
 	return strings.Join(q, ", ")
 }
@@ -520,8 +644,8 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 	for _, s := range card.Searchable {
 		searchCols = append(searchCols, s)
 	}
-	fieldsJoin := strings.Join(fieldNames, ", ")
-	searchable := quoteList(searchCols)
+	selectFrag, fromFrag, colPrefix, _, _ := g.listSelectFrom(r, tName, fieldNames)
+	searchable := quoteList(searchCols, colPrefix)
 
 	kanban := card.KanbanField != ""
 	perPage, rows, cols := card.Rows*card.Columns, card.Rows, card.Columns
@@ -560,43 +684,34 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
         }
 
-        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
         var total int64
-        if err := db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
-        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
+        totalSet := false
+        dataQuery := "SELECT %s, COUNT(*) OVER() AS _total FROM %s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         fullArgs = append(fullArgs, perPage, offset)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
-`, searchable, tName, fieldsJoin, tName)
+`, searchable, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
 	} else if g.isMSSQL() {
 		queryCore = fmt.Sprintf(`        var args []interface{}
         args = append(args, perPage, offset)
         argIdx := 3
 
         var whereClauses []string
-        var countClauses []string
-        countIdx := 1
         if search != "" {
             searchableCols := []string{%s}
             for _, col := range searchableCols {
                 whereClauses = append(whereClauses, fmt.Sprintf("%%s LIKE $%%d", col, argIdx))
-                countClauses = append(countClauses, fmt.Sprintf("%%s LIKE $%%d", col, countIdx))
                 args = append(args, "%%"+search+"%%")
                 argIdx++
-                countIdx++
             }
         }
 
@@ -604,36 +719,27 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
         if len(whereClauses) > 0 {
             whereSQL = " WHERE " + strings.Join(whereClauses, " OR ")
         }
-        countWhereSQL := ""
-        if len(countClauses) > 0 {
-            countWhereSQL = " WHERE " + strings.Join(countClauses, " OR ")
-        }
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
         }
         if orderSQL == "" {
             orderSQL = " ORDER BY (SELECT NULL)"
         }
 
-        countQuery := "SELECT COUNT(*) FROM %s" + countWhereSQL
         var total int64
-        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
-        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
+        totalSet := false
+        dataQuery := "SELECT %s, COUNT(*) OVER() AS _total FROM %s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
-`, searchable, tName, fieldsJoin, tName)
+`, searchable, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
 	} else {
 		queryCore = fmt.Sprintf(`        var args []interface{}
         args = append(args, perPage, offset)
@@ -656,26 +762,21 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s %%s", sort, order)
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
         }
 
-        countQuery := "SELECT COUNT(*) FROM %s" + whereSQL
         var total int64
-        if err := db.QueryRowContext(r.Context(), countQuery, args[2:]...).Scan(&total); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
-            return
-        }
-
-        dataQuery := "SELECT %s FROM %s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
+        totalSet := false
+        dataQuery := "SELECT %s, COUNT(*) OVER() AS _total FROM %s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
         var fullArgs []interface{}
         fullArgs = append(fullArgs, args...)
         rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
-`, searchable, tName, fieldsJoin, tName)
+`, searchable, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
 	}
 
 	kanbanCode := ""
@@ -715,13 +816,16 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
         for _, k := range bucketOrder {
             kanbanColumns = append(kanbanColumns, *bucket[k])
         }
-`, strings.Join(optLabelMap, ", "), quoteList(optKeys), card.KanbanField)
+`, strings.Join(optLabelMap, ", "), quoteList(optKeys, ""), card.KanbanField)
 		kanbanColumnsExpr = "kanbanColumns"
 	}
 
 	itemsAssignment := `        for rows.Next() {
-            ` + scanFields(fieldNames) + `
+            ` + scanFields(fieldNames, true) + `
             items = append(items, item)
+        }
+        if !totalSet {
+            total = int64(page * perPage)
         }
 `
 
@@ -738,6 +842,7 @@ import (
     %q
     %q
     auth %q
+    httperr %q
     layoutviews %q
 )
 
@@ -758,6 +863,9 @@ func Cards(db *sql.DB) http.HandlerFunc {
         }
 
 %s
+        if order != "asc" && order != "desc" {
+            order = "asc"
+        }
 %s
         var items []map[string]interface{}
 %s
@@ -785,12 +893,12 @@ func Cards(db *sql.DB) http.HandlerFunc {
             PanelPath:     %q,
         }
 
-        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sCards(vd)).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sCards(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		perPage,
 		sortStmt,
 		queryCore,
@@ -827,6 +935,7 @@ import (
     %q
     %q
     auth %q
+    httperr %q
     layoutviews %q
 )
 
@@ -841,7 +950,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
 
         item, err := data.New(db).%s(r.Context(), %s(id))
         if err != nil {
-            http.Error(w, err.Error(), http.StatusNotFound)
+            httperr.NotFound(w, err)
             return
         }
 
@@ -855,14 +964,15 @@ func Detail(db *sql.DB) http.HandlerFunc {
             },
             Resource:  %q,
             PanelPath: %q,
+            CSRFToken: auth.CSRFToken(r, w),
         }
 
-        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sDetail(vd)).Render(r.Context(), w)
+        layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sDetail(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		queryName,
 		g.idGoTypeForResource(r),
 		detailFieldMap(r.Detail.Fields),
@@ -942,28 +1052,28 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	tName := tableName(r)
 
 	hooksImport := ""
-	if r.Form.Delete.Hooks != nil {
+	if g.hookBlockEmits(r.Form.Delete.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
 
 	middle := ""
-	if r.Form.Delete.Hooks != nil {
+	if g.hookBlockEmits(r.Form.Delete.Hooks) {
 		middle += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,
             Action: "delete",
             ID:     int64(id),
         }
 `, tName)
-		middle += hookCallsStr(r.Form.Delete.Hooks.Before, "scope", "        ") + "\n"
+		middle += g.hookCallsStr(r.Form.Delete.Hooks.Before, "scope", "        ") + "\n"
 	}
 	middle += fmt.Sprintf(`        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE id = $1", int64(id))
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
 `, tName)
-	if r.Form.Delete.Hooks != nil {
-		middle += hookCallsStr(r.Form.Delete.Hooks.After, "scope", "        ") + "\n"
+	if g.hookBlockEmits(r.Form.Delete.Hooks) {
+		middle += g.hookCallsStr(r.Form.Delete.Hooks.After, "scope", "        ") + "\n"
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -972,6 +1082,7 @@ import (
     "database/sql"
     "net/http"
     "strconv"
+    httperr %q
 %s)
 
 func Delete(db *sql.DB) http.HandlerFunc {
@@ -987,7 +1098,7 @@ func Delete(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, hooksImport, middle, listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), hooksImport, middle, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
@@ -1005,7 +1116,7 @@ func (g *Generator) generateCSVHandler(dir string, r types.Resource) error {
 	for _, c := range r.List.Columns {
 		colNames = append(colNames, c.Name)
 	}
-	colsJoin := strings.Join(colNames, ", ")
+	selectFrag, fromFrag, _, _, _ := g.listSelectFrom(r, tName, colNames)
 
 	code := fmt.Sprintf(`package %s
 
@@ -1013,6 +1124,7 @@ import (
     "database/sql"
     "encoding/csv"
     "net/http"
+    httperr %q
 )
 
 func ExportCSV(db *sql.DB) http.HandlerFunc {
@@ -1020,7 +1132,7 @@ func ExportCSV(db *sql.DB) http.HandlerFunc {
         query := "SELECT %s FROM %s ORDER BY 1"
         rows, err := db.QueryContext(r.Context(), query)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         defer rows.Close()
@@ -1031,7 +1143,11 @@ func ExportCSV(db *sql.DB) http.HandlerFunc {
         defer wr.Flush()
 
         cols, _ := rows.Columns()
-        wr.Write(cols)
+        out := make([]string, len(cols))
+        for i, c := range cols {
+            out[i] = csvSafe(c)
+        }
+        wr.Write(out)
 
         vals := make([]string, len(cols))
         ptrs := make([]interface{}, len(cols))
@@ -1040,13 +1156,45 @@ func ExportCSV(db *sql.DB) http.HandlerFunc {
         }
         for rows.Next() {
             rows.Scan(ptrs...)
+            for i := range vals {
+                vals[i] = csvSafe(vals[i])
+            }
             wr.Write(vals)
         }
     }
 }
-`, pkgName, colsJoin, tName, tName)
+
+// csvSafe neutralizes spreadsheet formula injection by prefixing a single
+// quote when a value begins with a formula trigger character (=, +, -, @, tab
+// or carriage return), which Excel/Sheets would otherwise evaluate.
+func csvSafe(s string) string {
+    if len(s) > 0 {
+        switch s[0] {
+        case '=', '+', '-', '@', '\t', '\r':
+            return "'" + s
+        }
+    }
+    return s
+}
+`, pkgName, g.moduleImport("internal/panel/httperr"), selectFrag, fromFrag, tName)
 
 	return os.WriteFile(filepath.Join(dir, "export.go"), []byte(code), 0644)
+}
+
+// actionExecSQL returns the SQL text an action executes at request time: the
+// raw Query when set, otherwise the driver-appropriate stored procedure call
+// when Proc is set (and the driver is not sqlite). Empty when the action has
+// neither (a sqlite proc-only action, or an action that only runs hooks).
+// Params: a (the action definition).
+// Returns: the SQL to execute, or "".
+func (g *Generator) actionExecSQL(a types.Action) string {
+	if a.Query != "" {
+		return a.Query
+	}
+	if a.Proc != "" && !g.isSQLite() {
+		return g.procSQL(a.Proc)
+	}
+	return ""
 }
 
 // generateActionHandler writes actions.go: an Action(db) handler that parses
@@ -1063,37 +1211,38 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	hasHooks := false
 	var dispatch []string
 	for _, a := range r.Actions {
-		if a.Hooks == nil {
-			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
-        {
-            _, err := db.ExecContext(r.Context(), %q, int64(id))
-            if err != nil {
-                http.Error(w, err.Error(), http.StatusInternalServerError)
-                return
-            }
-        }
-`, a.Name, a.Query))
-			continue
+		useHooks := g.hookBlockEmits(a.Hooks)
+		if useHooks {
+			hasHooks = true
 		}
-		hasHooks = true
-		before := hookCallsStr(a.Hooks.Before, "scope", "            ")
-		after := hookCallsStr(a.Hooks.After, "scope", "            ")
-		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
-        {
-            scope := hooks.Scope{
+		var body []string
+		if useHooks {
+			body = append(body, fmt.Sprintf(`            scope := hooks.Scope{
                 Table:  %q,
                 Action: %q,
                 ID:     int64(id),
-            }
-%s
-            _, err := db.ExecContext(r.Context(), %q, int64(id))
+            }`, tName, a.Name))
+			if before := g.hookCallsStr(a.Hooks.Before, "scope", "            "); before != "" {
+				body = append(body, before)
+			}
+		}
+		if exec := g.actionExecSQL(a); exec != "" {
+			body = append(body, fmt.Sprintf(`            _, err := db.ExecContext(r.Context(), %q, int64(id))
             if err != nil {
-                http.Error(w, err.Error(), http.StatusInternalServerError)
+                httperr.Internal(w, err)
                 return
-            }
+            }`, exec))
+		}
+		if useHooks {
+			if after := g.hookCallsStr(a.Hooks.After, "scope", "            "); after != "" {
+				body = append(body, after)
+			}
+		}
+		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+        {
 %s
         }
-`, a.Name, tName, a.Name, before, a.Query, after))
+`, a.Name, strings.Join(body, "\n")))
 	}
 
 	hooksImport := ""
@@ -1107,6 +1256,7 @@ import (
     "database/sql"
     "net/http"
     "strconv"
+    httperr %q
 %s)
 
 func Action(db *sql.DB) http.HandlerFunc {
@@ -1128,7 +1278,7 @@ func Action(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, hooksImport, strings.Join(dispatch, "\n"), listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), hooksImport, strings.Join(dispatch, "\n"), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
@@ -1148,15 +1298,23 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 		if !a.Bulk {
 			continue
 		}
-		dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+		if exec := g.actionExecSQL(a); exec != "" {
+			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
         for _, id := range ids {
             _, err := db.ExecContext(r.Context(), %q, id)
             if err != nil {
-                http.Error(w, err.Error(), http.StatusInternalServerError)
+                httperr.Internal(w, err)
                 return
             }
         }
-`, a.Name, a.Query))
+`, a.Name, exec))
+		} else {
+			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+        for _, id := range ids {
+            _ = id
+        }
+`, a.Name))
+		}
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1165,6 +1323,7 @@ import (
     "database/sql"
     "net/http"
     "strconv"
+    httperr %q
 )
 
 func Bulk(db *sql.DB) http.HandlerFunc {
@@ -1192,7 +1351,7 @@ func Bulk(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, strings.Join(dispatch, "\n"), listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), strings.Join(dispatch, "\n"), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "bulk.go"), []byte(code), 0644)
 }
@@ -1248,7 +1407,7 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	}
 
 	hooksImport := ""
-	if create.Hooks != nil {
+	if g.hookBlockEmits(create.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
 
@@ -1268,7 +1427,21 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
     }
     defer file.Close()
 
-    ext := filepath.Ext(header.Filename)
+    ext := strings.ToLower(filepath.Ext(header.Filename))
+    if !safeUploadExt(ext) {
+        return ""
+    }
+
+    head := make([]byte, 512)
+    n, _ := io.ReadFull(file, head)
+    detected := http.DetectContentType(head[:n])
+    if n > 0 && (detected == "text/html" || detected == "image/svg+xml") {
+        return ""
+    }
+    if _, err := file.Seek(0, io.SeekStart); err != nil {
+        return ""
+    }
+
     dir := "static/uploads/" + fieldName
     os.MkdirAll(dir, 0755)
     outPath := dir + "/" + fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
@@ -1279,6 +1452,16 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
     defer out.Close()
     io.Copy(out, file)
     return "/" + outPath
+}
+
+var safeUploadExts = map[string]bool{
+    ".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+    ".pdf": true, ".txt": true, ".csv": true, ".zip": true,
+    ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+}
+
+func safeUploadExt(ext string) bool {
+    return safeUploadExts[ext]
 }
 `
 	}
@@ -1298,7 +1481,7 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
         }
         query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
 `, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
-	if create.Hooks != nil {
+	if g.hookBlockEmits(create.Hooks) {
 		postCode += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,
             Action: "create",
@@ -1306,19 +1489,19 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
 %s        },
         }
 `, tName, scopeValuesStr(colNames))
-		postCode += hookCallsStr(create.Hooks.Before, "scope", "        ") + "\n"
+		postCode += g.hookCallsStr(create.Hooks.Before, "scope", "        ") + "\n"
 		postCode += fmt.Sprintf(`        var newID int64
         if err := db.QueryRowContext(r.Context(), query+%q, vals...).Scan(&newID); err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
         scope.ID = newID
 `, g.returningClause(r))
-		postCode += hookCallsStr(create.Hooks.After, "scope", "        ") + "\n"
+		postCode += g.hookCallsStr(create.Hooks.After, "scope", "        ") + "\n"
 	} else {
 		postCode += `        _, err := db.ExecContext(r.Context(), query, vals...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
 `
@@ -1335,6 +1518,7 @@ import (
     %q
     %q
     auth %q
+    httperr %q
     layoutviews %q
 )
 
@@ -1352,8 +1536,9 @@ func Create(db *sql.DB) http.HandlerFunc {
                 Resource:  %q,
                 PanelPath: %q,
                 IsCreate:  true,
+                CSRFToken: auth.CSRFToken(r, w),
             }
-            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sForm(vd)).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -1372,7 +1557,7 @@ func Create(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		hooksImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
 		fmt.Sprintf("%s/%s/new", g.Config.Panel.Path, pkgName),
@@ -1511,7 +1696,7 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	}
 
 	hooksImport := ""
-	if update.Hooks != nil {
+	if g.hookBlockEmits(update.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
 
@@ -1531,7 +1716,21 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
     }
     defer file.Close()
 
-    ext := filepath.Ext(header.Filename)
+    ext := strings.ToLower(filepath.Ext(header.Filename))
+    if !safeUploadExt(ext) {
+        return ""
+    }
+
+    head := make([]byte, 512)
+    n, _ := io.ReadFull(file, head)
+    detected := http.DetectContentType(head[:n])
+    if n > 0 && (detected == "text/html" || detected == "image/svg+xml") {
+        return ""
+    }
+    if _, err := file.Seek(0, io.SeekStart); err != nil {
+        return ""
+    }
+
     dir := "static/uploads/" + fieldName
     os.MkdirAll(dir, 0755)
     outPath := dir + "/" + fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
@@ -1542,6 +1741,16 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
     defer out.Close()
     io.Copy(out, file)
     return "/" + outPath
+}
+
+var safeUploadExts = map[string]bool{
+    ".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
+    ".pdf": true, ".txt": true, ".csv": true, ".zip": true,
+    ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+}
+
+func safeUploadExt(ext string) bool {
+    return safeUploadExts[ext]
 }
 `
 	}
@@ -1567,7 +1776,7 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
         vals = append(vals, int64(id))
         query := fmt.Sprintf("UPDATE %%s SET %%s WHERE id = $%%d", %q, strings.Join(setClauses, ", "), len(cols)+1)
 `, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
-	if update.Hooks != nil {
+	if g.hookBlockEmits(update.Hooks) {
 		postCode += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,
             Action: "update",
@@ -1576,16 +1785,16 @@ func saveUploadedFile(r *http.Request, fieldName string) string {
 %s        },
         }
 `, tName, scopeValuesStr(colNames))
-		postCode += hookCallsStr(update.Hooks.Before, "scope", "        ") + "\n"
+		postCode += g.hookCallsStr(update.Hooks.Before, "scope", "        ") + "\n"
 	}
 	postCode += `        _, err = db.ExecContext(r.Context(), query, vals...)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
             return
         }
 `
-	if update.Hooks != nil {
-		postCode += hookCallsStr(update.Hooks.After, "scope", "        ") + "\n"
+	if g.hookBlockEmits(update.Hooks) {
+		postCode += g.hookCallsStr(update.Hooks.After, "scope", "        ") + "\n"
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1601,6 +1810,7 @@ import (
     %q
     %q
     auth %q
+    httperr %q
     layoutviews %q
 )
 
@@ -1616,7 +1826,7 @@ func Update(db *sql.DB) http.HandlerFunc {
         if r.Method == http.MethodGet {
             item, err := data.New(db).%s(r.Context(), %s(id))
             if err != nil {
-                http.Error(w, err.Error(), http.StatusNotFound)
+                httperr.NotFound(w, err)
                 return
             }
 
@@ -1634,8 +1844,9 @@ func Update(db *sql.DB) http.HandlerFunc {
                 Resource:  %q,
                 PanelPath: %q,
                 IsCreate:  false,
+                CSRFToken: auth.CSRFToken(r, w),
             }
-            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), views.%sForm(vd)).Render(r.Context(), w)
+            layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
 
@@ -1652,7 +1863,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		hooksImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		populateQuery,
 		g.idGoTypeForResource(r),
 		strings.Join(populateFields, "\n"),

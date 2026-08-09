@@ -16,39 +16,69 @@ import (
 )
 
 // generateHooks writes internal/hooks/hooks.go into the output directory when
-// at least one fn hook is declared anywhere in the config. The file defines
-// the Scope struct shared by all hook calls plus one stub per unique fn hook
-// name. Nothing is written when only sql hooks (or no hooks) are declared.
+// any hook is declared anywhere in the config (fn or sql). The file defines
+// the Scope struct shared by all hook calls (handlers reference hooks.Scope
+// for every hook block, sql-only included) plus one stub per unique fn hook
+// name; sql-only hooks produce the Scope struct with no stubs. Nothing is
+// written when no hooks are declared.
 // Returns: an error on write failure.
 func (g *Generator) generateHooks() error {
-	fns := g.collectFnHooks()
-	if len(fns) == 0 {
+	if !g.hasAnyHooks() {
 		return nil
 	}
 
+	fns := g.collectFnHooks()
 	var stubs strings.Builder
 	for _, fn := range fns {
 		stubs.WriteString(fmt.Sprintf("\n// %s - one stub per declared fn hook; user implements.\n", fn))
 		stubs.WriteString(fmt.Sprintf("func %s(ctx context.Context, db *sql.DB, s Scope) error { return nil }\n", fn))
 	}
 
-	code := fmt.Sprintf(`package hooks
-
+	// The context/database/sql imports are only needed when fn-hook stubs are
+	// emitted; a sql-only hooks.go must stay import-free to compile.
+	imports := ""
+	if len(fns) > 0 {
+		imports = `
 import (
     "context"
     "database/sql"
 )
+`
+	}
 
+	code := fmt.Sprintf(`package hooks
+%s
 type Scope struct {
     ID     int64
     Table  string
     Action string // create|update|delete|<actionName>
     Values map[string]interface{}
 }
-%s`, stubs.String())
+%s`, imports, stubs.String())
 
 	dir := filepath.Join(g.OutDir, "internal/hooks")
 	return os.WriteFile(filepath.Join(dir, "hooks.go"), []byte(code), 0644)
+}
+
+// hasAnyHooks reports whether any hook block (before or after, fn or sql) is
+// declared on any form action or custom action anywhere in the config.
+// Returns: true when at least one Hooks block is non-nil.
+func (g *Generator) hasAnyHooks() bool {
+	for _, r := range g.Config.Resources {
+		if r.Form != nil {
+			for _, fa := range []*types.FormAction{r.Form.Create, r.Form.Update, r.Form.Delete} {
+				if fa != nil && fa.Hooks != nil {
+					return true
+				}
+			}
+		}
+		for _, a := range r.Actions {
+			if a.Hooks != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // collectFnHooks walks every resource in config order, gathering the unique,
@@ -101,27 +131,77 @@ func (g *Generator) collectFnHooks() []string {
 
 // hookCallsStr renders the Go source that runs a before/after hook list against
 // a Scope variable. fn hooks call the generated stub in the hooks package; sql
-// hooks are inlined as db.ExecContext binding the current scope id ($1). A hook
-// error aborts the request with a 500 response.
+// hooks are inlined as db.ExecContext binding the current scope id ($1); proc
+// hooks call the stored procedure driver-appropriately (CALL on postgres, EXEC
+// on mssql) and are skipped entirely on sqlite. A hook error aborts the request
+// with a 500 response.
 // Params: hooks (the before or after list), scopeVar (name of the Scope var),
 // indent (the leading whitespace for each emitted line).
-// Returns: the Go source lines (empty when the list is empty).
-func hookCallsStr(hooks []types.Hook, scopeVar, indent string) string {
+// Returns: the Go source lines (empty when the list is empty or all hooks are
+// proc hooks on sqlite).
+func (g *Generator) hookCallsStr(hooks []types.Hook, scopeVar, indent string) string {
 	var lines []string
 	for _, h := range hooks {
-		if h.Fn != "" {
+		switch {
+		case h.Fn != "":
 			lines = append(lines, fmt.Sprintf(`%sif err := hooks.%s(r.Context(), db, %s); err != nil {
-%s    http.Error(w, err.Error(), http.StatusInternalServerError)
+%s    httperr.Internal(w, err)
 %s    return
 %s}`, indent, h.Fn, scopeVar, indent, indent, indent))
-		} else if h.SQL != "" {
+		case h.SQL != "":
 			lines = append(lines, fmt.Sprintf(`%sif _, err := db.ExecContext(r.Context(), %q, %s.ID); err != nil {
-%s    http.Error(w, err.Error(), http.StatusInternalServerError)
+%s    httperr.Internal(w, err)
 %s    return
 %s}`, indent, h.SQL, scopeVar, indent, indent, indent))
+		case h.Proc != "" && !g.isSQLite():
+			lines = append(lines, fmt.Sprintf(`%sif _, err := db.ExecContext(r.Context(), %q, %s.ID); err != nil {
+%s    httperr.Internal(w, err)
+%s    return
+%s}`, indent, g.procSQL(h.Proc), scopeVar, indent, indent, indent))
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// hookBlockEmits reports whether a Hooks block emits any code for the
+// configured driver. fn and sql hooks always emit; proc hooks emit only when
+// the driver is postgres or mssql (sqlite has no stored procedures). This is
+// the driver-aware replacement for the "Hooks != nil" checks: a proc-only block
+// on sqlite must not force the hooks import, the Scope literal or the
+// RETURNING id capture, or the generated handler fails to compile with an
+// unused import.
+// Params: h (the hooks block; nil is valid).
+// Returns: true when at least one hook produces a generated call.
+func (g *Generator) hookBlockEmits(h *types.Hooks) bool {
+	if h == nil {
+		return false
+	}
+	for _, list := range [][]types.Hook{h.Before, h.After} {
+		for _, hook := range list {
+			if hook.Fn != "" || hook.SQL != "" {
+				return true
+			}
+			if hook.Proc != "" && !g.isSQLite() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// procSQL renders the driver-specific stored procedure invocation used to run
+// a proc hook or action, binding the record id as the single argument.
+// Postgres emits the SQL-standard "CALL name($1)"; mssql emits "EXEC name $1"
+// (the go-mssqldb loose placeholder mode rewrites $1 to a bound @p1 passed
+// positionally to the proc's first parameter). SQLite has no stored procedures
+// and returns "" — callers skip the emission entirely.
+// Params: name (the stored procedure name, optionally schema-qualified).
+// Returns: the SQL call text, or "" on sqlite.
+func (g *Generator) procSQL(name string) string {
+	if g.isMSSQL() {
+		return "EXEC " + name + " $1"
+	}
+	return "CALL " + name + "($1)"
 }
 
 // scopeValuesStr renders the Values map literal for a create/update Scope,

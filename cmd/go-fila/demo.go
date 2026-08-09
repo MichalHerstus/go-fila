@@ -32,7 +32,7 @@ import (
 // Params: configPath (path of the go-fila.yaml file to write), outDir (output
 // directory where sql/ and data/ live), force (overwrite existing files).
 // Returns: an error describing the first failure, or nil.
-func cmdInitDemo(configPath, outDir string, force bool) error {
+func cmdInitDemo(configPath, outDir, adminPassword string, force bool) error {
 	if !force {
 		if _, err := os.Stat(configPath); err == nil {
 			return fmt.Errorf("%s already exists. Use --force to overwrite.", configPath)
@@ -65,7 +65,11 @@ func cmdInitDemo(configPath, outDir string, force bool) error {
 	}
 
 	dbPath := filepath.Join(outDir, "data", "admin.db")
-	if err := seedDemoDB(dbPath); err != nil {
+	adminPass := adminPassword
+	if adminPass == "" {
+		adminPass = randomPassword()
+	}
+	if err := seedDemoDB(dbPath, adminPass); err != nil {
 		return fmt.Errorf("seeding demo database: %w", err)
 	}
 
@@ -80,7 +84,7 @@ func cmdInitDemo(configPath, outDir string, force bool) error {
 	fmt.Println("Demo login:")
 	fmt.Println("  URL:      http://localhost:8080/admin/login")
 	fmt.Println("  Email:    admin@demo.test")
-	fmt.Println("  Password: admin")
+	fmt.Printf("  Password: %s\n", adminPass)
 	return nil
 }
 
@@ -422,6 +426,8 @@ resources:
             options:
               active: Active
               inactive: Inactive
+      delete:
+        query: DeleteCustomer
     policies:
       view_any: "admin|manager"
       view: "admin|manager"
@@ -1230,11 +1236,12 @@ var demoCountries = []string{
 
 // seedDemoDB creates the sqlite database at dbPath, applies demoSchema and
 // fills it with deterministic demo data: roles, bcrypt-hashed users (including
-// the admin@demo.test / admin account), customers, products, orders and
-// order lines. Returns an error on the first failure.
-// Params: dbPath (filesystem path of the sqlite database file).
+// the admin@demo.test account with the given adminPassword), customers,
+// products, orders and order lines. Returns an error on the first failure.
+// Params: dbPath (filesystem path of the sqlite database file), adminPassword
+// (plaintext password for the admin account).
 // Returns: an error if the database cannot be created or seeded, or nil.
-func seedDemoDB(dbPath string) error {
+func seedDemoDB(dbPath, adminPassword string) error {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return err
 	}
@@ -1276,7 +1283,7 @@ func seedDemoDB(dbPath string) error {
 	roleID := map[string]int{"admin": 1, "manager": 2, "staff": 3}
 
 	users := []struct{ name, email, role, password string }{
-		{"Admin User", "admin@demo.test", "admin", "admin"},
+		{"Admin User", "admin@demo.test", "admin", adminPassword},
 		{"Manager User", "manager@demo.test", "manager", "password"},
 	}
 	for i := 1; i <= 8; i++ {

@@ -7,6 +7,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"os"
@@ -508,29 +509,6 @@ func toSingularPascal(tableName string) string {
 	return toPascalCase(singularize(tableName))
 }
 
-// pluralize converts a singular resource name to a plural table-like name.
-func pluralize(name string) string {
-	lower := strings.ToLower(name)
-	switch {
-	case strings.HasSuffix(lower, "y") && !containsAny(lower, "a", "e", "i", "o", "u"):
-		return name[:len(name)-1] + "ies"
-	case strings.HasSuffix(lower, "s") || strings.HasSuffix(lower, "x") || strings.HasSuffix(lower, "z") || strings.HasSuffix(lower, "ch") || strings.HasSuffix(lower, "sh"):
-		return name + "es"
-	default:
-		return name + "s"
-	}
-}
-
-// containsAny reports whether s contains any of the given substrings.
-func containsAny(s string, substrs ...string) bool {
-	for _, sub := range substrs {
-		if strings.Contains(s, sub) {
-			return true
-		}
-	}
-	return false
-}
-
 // findLabelColumn picks the "best" column to display as a human-readable label
 // for a table. It prefers columns named "name", "title", or "label", then
 // falls back to the first non-PK text column, then the PK.
@@ -722,19 +700,20 @@ func ensureAuthTables(db *sql.DB, driver string, tables []TableInfo) error {
 }
 
 // insertAdminUser inserts a default admin user into the users table if it is
-// empty. Credentials are fixed: admin@admin.test / admin.
-func insertAdminUser(db *sql.DB, driver string) error {
+// empty. Credentials: admin@admin.test / password (an empty password makes the
+// caller generate and print a random one). Returns whether a user was inserted.
+func insertAdminUser(db *sql.DB, driver, password string) (bool, error) {
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
-		return fmt.Errorf("counting users: %w", err)
+		return false, fmt.Errorf("counting users: %w", err)
 	}
 	if count > 0 {
-		return nil
+		return false, nil
 	}
 
-	hash, err := bcryptHash("admin")
+	hash, err := bcryptHash(password)
 	if err != nil {
-		return fmt.Errorf("hashing admin password: %w", err)
+		return false, fmt.Errorf("hashing admin password: %w", err)
 	}
 
 	var adminRoleID int
@@ -744,7 +723,7 @@ func insertAdminUser(db *sql.DB, driver string) error {
 		err = db.QueryRow(`SELECT id FROM roles WHERE name = 'admin'`).Scan(&adminRoleID)
 	}
 	if err != nil {
-		return fmt.Errorf("finding admin role: %w", err)
+		return false, fmt.Errorf("finding admin role: %w", err)
 	}
 
 	if driver == "postgres" {
@@ -759,9 +738,9 @@ func insertAdminUser(db *sql.DB, driver string) error {
 			"Admin User", "admin@admin.test", hash, adminRoleID, "admin", "active")
 	}
 	if err != nil {
-		return fmt.Errorf("inserting admin user: %w", err)
+		return false, fmt.Errorf("inserting admin user: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // bcryptHash produces a bcrypt hash of the given plaintext password.
@@ -771,6 +750,22 @@ func bcryptHash(password string) (string, error) {
 		return "", err
 	}
 	return string(hash), nil
+}
+
+// randomPassword returns a cryptographically random 14-character password built
+// from an unambiguous alphabet (no 0/O, 1/l/I). It is used as the one-time
+// admin password for --demo and --db scaffolding when --admin-password is not
+// given, and is printed to the user instead of being embedded anywhere.
+func randomPassword() string {
+	const chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	buf := make([]byte, 14)
+	if _, err := rand.Read(buf); err != nil {
+		return "changeme"
+	}
+	for i, c := range buf {
+		buf[i] = chars[int(c)%len(chars)]
+	}
+	return string(buf)
 }
 
 // generateYAML builds a go-fila.yaml config string from the introspected
@@ -986,14 +981,13 @@ func writeFieldYAML(b *strings.Builder, c ColumnInfo, ti TableInfo, allTables []
 			if isForm {
 				b.WriteString(fmt.Sprintf("%s- name: %s\n", indent, c.Name))
 				b.WriteString(indent + "  type: relation\n")
-				foreignResource := toSingularPascal(fk.ForeignTable)
-				b.WriteString(fmt.Sprintf("%s  options_query: List%s\n", indent, pluralize(foreignResource)))
+				b.WriteString(fmt.Sprintf("%s  options_query: List%s\n", indent, toPascalCase(fk.ForeignTable)))
 				b.WriteString(fmt.Sprintf("%s  options_value: %s\n", indent, fk.ForeignColumn))
 				labelCol := findLabelColumnByTable(allTables, fk.ForeignTable)
 				b.WriteString(fmt.Sprintf("%s  options_label: %s\n", indent, labelCol))
 			} else {
 				b.WriteString(fmt.Sprintf("%s- name: %s\n", indent, c.Name))
-				b.WriteString(indent + "  type: integer\n")
+				b.WriteString(fmt.Sprintf("%s  type: %s\n", indent, mapDBTypeToFieldType(c.DBType)))
 			}
 			return
 		}
@@ -1209,9 +1203,8 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 			if foreignTable == nil {
 				continue
 			}
-			foreignPK := findPKColumn(*foreignTable)
 			b.WriteString(fmt.Sprintf("\nLEFT JOIN %s f_%s ON f_%s.%s = t.%s",
-				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, foreignPK, fk.Column))
+				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, fk.ForeignColumn, fk.Column))
 		}
 		if driver != "mssql" {
 			b.WriteString(fmt.Sprintf("\nORDER BY t.%s DESC", pk))
@@ -1245,9 +1238,8 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 			if foreignTable == nil {
 				continue
 			}
-			foreignPK := findPKColumn(*foreignTable)
 			b.WriteString(fmt.Sprintf("\nLEFT JOIN %s f_%s ON f_%s.%s = t.%s",
-				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, foreignPK, fk.Column))
+				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, fk.ForeignColumn, fk.Column))
 		}
 		b.WriteString(fmt.Sprintf("\nWHERE t.%s = %s;\n\n", pk, placeholder(1, driver)))
 
@@ -1324,6 +1316,13 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 			if foreignTI == nil {
 				continue
 			}
+			// The table already has its own List query when it is a user-visible
+			// resource; generating a second query with the same name would make
+			// sqlc fail with a duplicate query name. Its List query is usable
+			// directly as the options source.
+			if _, exists := queries[foreignTI.Name+".sql"]; exists {
+				continue
+			}
 			foreignPluralName := toPascalCase(foreignTI.Name)
 			labelCol := findLabelColumn(*foreignTI)
 
@@ -1361,7 +1360,7 @@ func foreignPKColumn(ti TableInfo) string {
 // connects to the database, introspects the schema, creates auth tables if
 // missing, inserts an admin user when the users table is empty, then generates
 // go-fila.yaml and SQL files.
-func cmdInitFromDB(configPath, outDir, dsn string, force bool) error {
+func cmdInitFromDB(configPath, outDir, dsn, adminPassword string, force bool) error {
 	if !force {
 		if _, err := os.Stat(configPath); err == nil {
 			return fmt.Errorf("%s already exists. Use --force to overwrite.", configPath)
@@ -1399,12 +1398,20 @@ func cmdInitFromDB(configPath, outDir, dsn string, force bool) error {
 		return fmt.Errorf("ensuring auth tables: %w", err)
 	}
 
-	if err := insertAdminUser(db, driver); err != nil {
+	adminPass := adminPassword
+	if adminPass == "" {
+		adminPass = randomPassword()
+	}
+	inserted, err := insertAdminUser(db, driver, adminPass)
+	if err != nil {
 		return fmt.Errorf("inserting admin user: %w", err)
 	}
 
 	if !hasRoles || !hasUsers {
 		fmt.Println("Created auth tables (users, roles) and seeded admin user.")
+		if inserted {
+			fmt.Printf("Admin login: admin@admin.test / %s\n", adminPass)
+		}
 	}
 
 	// Re-introspect after creating auth tables so the full schema is available

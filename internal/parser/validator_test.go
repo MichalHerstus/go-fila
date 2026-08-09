@@ -65,8 +65,8 @@ func TestParseHookRequiresFnOrSQL(t *testing.T) {
 	bad := strings.Replace(hooksYAML, "fn: ValidateUserDomain", "fn: ''", 1)
 	if _, err := Parse([]byte(bad)); err == nil {
 		t.Fatal("expected error when a hook has neither fn nor sql")
-	} else if !strings.Contains(err.Error(), "exactly one of fn or sql") {
-		t.Fatalf("expected fn/sql error, got: %v", err)
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql or proc") {
+		t.Fatalf("expected fn/sql/proc error, got: %v", err)
 	}
 }
 
@@ -77,8 +77,60 @@ func TestParseHookRejectsBothFnAndSQL(t *testing.T) {
               fn: Notify`, 1)
 	if _, err := Parse([]byte(bad)); err == nil {
 		t.Fatal("expected error when a hook has both fn and sql")
-	} else if !strings.Contains(err.Error(), "exactly one of fn or sql") {
-		t.Fatalf("expected fn/sql error, got: %v", err)
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql or proc") {
+		t.Fatalf("expected fn/sql/proc error, got: %v", err)
+	}
+}
+
+func TestParseProcHookValid(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"`,
+		`proc: sp_archive_user`, 1)
+	cfg, err := Parse([]byte(bad))
+	if err != nil {
+		t.Fatalf("expected proc hook to parse, got: %v", err)
+	}
+	after := cfg.Resources[0].Form.Create.Hooks.After
+	if len(after) != 1 || after[0].Proc != "sp_archive_user" || after[0].SQL != "" {
+		t.Fatalf("unexpected proc hook: %+v", after)
+	}
+}
+
+func TestParseHookRejectsFnAndProc(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"`,
+		`proc: sp_archive_user
+              fn: Notify`, 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when a hook has both fn and proc")
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql or proc") {
+		t.Fatalf("expected fn/sql/proc error, got: %v", err)
+	}
+}
+
+func TestParseActionRejectsQueryAndProc(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"`,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"
+        proc: sp_deactivate`, 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when an action has both query and proc")
+	} else if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual-exclusion error, got: %v", err)
+	}
+}
+
+func TestParseActionProcValid(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"`,
+		`proc: sp_deactivate`, 1)
+	cfg, err := Parse([]byte(bad))
+	if err != nil {
+		t.Fatalf("expected proc action to parse, got: %v", err)
+	}
+	a := cfg.Resources[0].Actions[0]
+	if a.Proc != "sp_deactivate" || a.Query != "" {
+		t.Fatalf("unexpected proc action: %+v", a)
 	}
 }
 
@@ -88,5 +140,62 @@ func TestParseHookRequiresName(t *testing.T) {
 		t.Fatal("expected error when a hook has no name")
 	} else if !strings.Contains(err.Error(), "name is required") {
 		t.Fatalf("expected name error, got: %v", err)
+	}
+}
+
+const pluginsYAML = `
+version: "1"
+panel:
+  name: Admin
+  path: /admin
+resources:
+  - name: User
+plugins:
+  - name: audit
+    source: ./plugins/audit
+    config:
+      retention_days: 90
+`
+
+func TestParsePluginsValid(t *testing.T) {
+	cfg, err := Parse([]byte(pluginsYAML))
+	if err != nil {
+		t.Fatalf("expected valid config with plugins, got error: %v", err)
+	}
+	if len(cfg.Plugins) != 1 {
+		t.Fatalf("expected 1 plugin, got %d", len(cfg.Plugins))
+	}
+	if cfg.Plugins[0].Name != "audit" || cfg.Plugins[0].Source != "./plugins/audit" {
+		t.Fatalf("unexpected plugin: %+v", cfg.Plugins[0])
+	}
+	if cfg.Plugins[0].Config["retention_days"] != 90 {
+		t.Fatalf("unexpected plugin config: %+v", cfg.Plugins[0].Config)
+	}
+}
+
+func TestParsePluginRequiresName(t *testing.T) {
+	bad := strings.Replace(pluginsYAML, "name: audit", "name: ''", 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when a plugin has no name")
+	} else if !strings.Contains(err.Error(), "plugins[0].name is required") {
+		t.Fatalf("expected plugin name error, got: %v", err)
+	}
+}
+
+func TestParsePluginRequiresSource(t *testing.T) {
+	bad := strings.Replace(pluginsYAML, "source: ./plugins/audit", "source: ''", 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when a plugin has no source")
+	} else if !strings.Contains(err.Error(), "plugins[0].source is required") {
+		t.Fatalf("expected plugin source error, got: %v", err)
+	}
+}
+
+func TestParsePluginRejectsDuplicateNames(t *testing.T) {
+	bad := pluginsYAML + "\n  - name: audit\n    source: ./other\n"
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error for duplicate plugin names")
+	} else if !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("expected duplicate-name error, got: %v", err)
 	}
 }

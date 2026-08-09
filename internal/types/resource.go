@@ -22,16 +22,15 @@ type Resource struct {
 	Policies *Policy       `yaml:"policies"`
 }
 
-// ListConfig defines the resource list view: SQLC queries for rows and the
-// count, the displayed columns and the default sort (a leading "-" means
-// descending).
-// ListConfig defines the resource list view: SQLC queries for rows and the
-// count, the displayed columns and the default sort (a leading "-" means
-// descending).
+// ListConfig defines the resource list view: the displayed columns, the rows
+// per page and the default sort (a leading "-" means descending). The list
+// handler builds its own raw paginated query with a windowed COUNT(*) OVER()
+// for the total, so the SQLC Query/CountQuery names are informational only.
 type ListConfig struct {
 	Query       string   `yaml:"query"`
 	CountQuery  string   `yaml:"count_query"`
 	Columns     []Column `yaml:"columns"`
+	PerPage     int      `yaml:"per_page"`
 	DefaultSort string   `yaml:"default_sort"`
 }
 
@@ -108,7 +107,11 @@ type Validation struct {
 }
 
 // Action is a custom row action: name/label/icon/color, optional confirmation
-// and bulk support, and the SQL to execute.
+// and bulk support, and either the SQL to execute or a stored procedure to
+// call (proc; ignored on sqlite). Query and Proc are mutually exclusive.
+// Policy, when set, restricts the action (and its bulk variant) to the listed
+// roles (a "|" separates roles), enforced by the generated
+// auth.ActionRBACMiddleware on the action/bulk routes.
 type Action struct {
 	Name                 string `yaml:"name"`
 	Label                string `yaml:"label"`
@@ -117,6 +120,8 @@ type Action struct {
 	RequiresConfirmation bool   `yaml:"requires_confirmation"`
 	Bulk                 bool   `yaml:"bulk"`
 	Query                string `yaml:"query"`
+	Proc                 string `yaml:"proc"`
+	Policy               string `yaml:"policy"`
 	Hooks                *Hooks `yaml:"hooks"`
 }
 

@@ -44,8 +44,11 @@ func (e *Editor) hookListPage(hooks **types.Hooks, before bool) tview.Primitive 
 		},
 		sub: func(i int) string {
 			hs := *get()
-			if hs[i].Fn != "" {
+			switch {
+			case hs[i].Fn != "":
 				return "fn: " + hs[i].Fn
+			case hs[i].Proc != "":
+				return "proc: " + hs[i].Proc
 			}
 			return "sql: " + hs[i].SQL
 		},
@@ -67,26 +70,49 @@ func (e *Editor) hookListPage(hooks **types.Hooks, before bool) tview.Primitive 
 	return e.recordList("hooks/"+title, spec)
 }
 
-// hookPage edits a single hook (name + exactly one of fn/sql).
+// hookKindOptions drives the three-way hook type picker (fn/sql/proc).
+var hookKindOptions = []Option{
+	{Label: "Go function", Value: "function"},
+	{Label: "SQL", Value: "sql"},
+	{Label: "Stored procedure", Value: "proc"},
+}
+
+// hookPage edits a single hook (name + exactly one of fn/sql/proc).
 func (e *Editor) hookPage(get func() *[]types.Hook, idx int) tview.Primitive {
 	hs := *get()
 	h := &hs[idx]
+	kind := "sql"
+	switch {
+	case h.Fn != "":
+		kind = "function"
+	case h.Proc != "":
+		kind = "proc"
+	}
 	return e.formShell("Hook: "+h.Name, func(f *tview.Form) {
 		e.str(f, "Name", h.Name, func(v string) { h.Name = v })
-		e.yesno(f, "Use Go function", h.Fn != "", func(v bool) {
-			if v {
-				h.SQL = ""
+		e.pick(f, "Kind", hookKindOptions, kind, func(v string) {
+			switch v {
+			case "function":
+				h.SQL, h.Proc = "", ""
 				if h.Fn == "" {
 					h.Fn = "MyHook"
 				}
-			} else {
-				h.Fn = ""
+			case "sql":
+				h.Fn, h.Proc = "", ""
+			case "proc":
+				h.Fn, h.SQL = "", ""
+				if h.Proc == "" {
+					h.Proc = "my_proc"
+				}
 			}
 			e.markModified()
 		})
-		if h.Fn != "" {
+		switch {
+		case h.Fn != "":
 			e.str(f, "Function", h.Fn, func(v string) { h.Fn = v })
-		} else {
+		case h.Proc != "":
+			e.str(f, "Proc", h.Proc, func(v string) { h.Proc = v })
+		default:
 			e.long(f, "SQL", h.SQL, func(v string) { h.SQL = v })
 		}
 	})

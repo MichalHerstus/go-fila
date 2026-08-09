@@ -81,6 +81,7 @@ func (e *Editor) listPage(idx int) tview.Primitive {
 	return e.formShell("List: "+r.Name, func(f *tview.Form) {
 		e.str(f, "Query", l.Query, func(v string) { l.Query = v })
 		e.str(f, "Count query", l.CountQuery, func(v string) { l.CountQuery = v })
+		e.num(f, "Per page", l.PerPage, func(v int) { l.PerPage = v })
 		e.str(f, "Default sort", l.DefaultSort, func(v string) { l.DefaultSort = v })
 		f.AddButton("Columns", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/columns", e.columnsPage(idx))

@@ -10,7 +10,7 @@ import (
 )
 
 func cmdEdit() {
-	configPath, _, _, _, _, _ := parseGlobalFlags()
+	configPath, _, _, _, _, _, _, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {

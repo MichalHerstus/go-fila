@@ -103,6 +103,7 @@ type ListData struct {
 	Columns    []ColumnDef
 	Resource   string
 	PanelPath  string
+	CSRFToken  string
 }
 
 type DetailData struct {
@@ -110,6 +111,7 @@ type DetailData struct {
 	Fields    []ColumnDef
 	Resource  string
 	PanelPath string
+	CSRFToken string
 }
 
 type CardColumnData struct {
@@ -145,6 +147,7 @@ type FormData struct {
 	Resource  string
 	PanelPath string
 	IsCreate  bool
+	CSRFToken string
 }
 
 type PageData struct {

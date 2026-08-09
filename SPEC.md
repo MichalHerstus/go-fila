@@ -139,8 +139,9 @@ resources:
 
     # ── LIST VIEW ──────────────────────────────────
     list:
-      query: ListUsers           # SQLC :many function name
-      count_query: CountUsers    # SQLC :one for pagination
+      query: ListUsers           # SQLC :many function name (informational; the handler builds its own raw paginated query)
+      count_query: CountUsers    # SQLC :one for pagination (informational; total comes from a windowed COUNT(*) OVER())
+      per_page: 20               # rows per page (default 20)
       columns:                   # UI rendering — matches SQLC struct field names
         - name: id
           type: integer
@@ -260,6 +261,10 @@ resources:
         requires_confirmation: true
         bulk: true
         query: ActivateUser     # SQLC :exec function
+      - name: archive
+        label: "Archive"
+        proc: sp_archive_user   # stored procedure (CALL/EXEC); ignored on sqlite
+        bulk: true
 
     # ── POLICIES ────────────────────────────────────
     policies:
@@ -272,7 +277,7 @@ resources:
 
 ### Hooks (v0.5+)
 
-`before`/`after` lifecycle hooks attach to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is either a user-implemented Go function (`fn`) or an inline SQL statement (`sql`):
+`before`/`after` lifecycle hooks attach to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is either a user-implemented Go function (`fn`), an inline SQL statement (`sql`) or a stored procedure call (`proc`; postgres/mssql only — ignored on sqlite):
 
 ```yaml
     form:
@@ -284,6 +289,8 @@ resources:
           after:
             - name: notify
               sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"
+            - name: archive_after_create
+              proc: sp_archive_user       # CALL sp_archive_user($1) / EXEC sp_archive_user $1
     actions:
       - name: deactivate
         query: ActivateUser
@@ -293,6 +300,8 @@ resources:
 ```
 
 `internal/hooks/hooks.go` defines `Scope{ID int64, Table, Action string, Values map[string]interface{}}` and one compile-ready stub per declared `fn` hook; the user implements the stubs. `sql` hooks are inlined as `db.ExecContext(..., <sql>, scope.ID)`. Create handlers capture the new row id via a driver-aware `QueryRowContext(...).Scan(&newID)` using `RETURNING <id>` (postgres/sqlite) or `OUTPUT INSERTED.<id>` (mssql) so after-create hooks see it. A hook error aborts the request with HTTP 500.
+
+**Stored procedures (`proc`):** `proc` on a hook or custom action names a stored procedure to call, binding the current record id as its single argument. Postgres emits `CALL <name>($1)`; mssql emits `EXEC <name> $1` (go-mssqldb loose `$N`→`@p1` mapping passes the bound parameter positionally to the proc's first parameter). Schema-qualified names (`myschema.sp_foo`) are passed through verbatim. **SQLite has no stored procedures: proc references are ignored at generation time** — a proc hook is skipped, and a proc-only custom action becomes a no-op that still redirects back to the list (hooks in the same block still run). No output parameters or return values are captured (plain `db.ExecContext`).
 
 **Field types (UI rendering only, no DB mapping):**
 
@@ -519,9 +528,27 @@ Flags:
   --out, -o      Output directory (default: ./admin)
   --db DSN       Introspect database (postgres://... or sqlite file path)
   --force        Overwrite existing files
-  --demo         With init: seed sqlite demo DB; login admin@demo.test / admin
+  --demo         With init: seed sqlite demo DB; login admin@demo.test (password generated)
+  --admin-password PASSWORD
+                 Set the initial admin password for --demo / --db scaffolding
+                 (a random one-time password is generated and printed when omitted)
   --verbose      Enable verbose logging
 ```
+
+### Generated Dashboard Runtime Flags
+
+The generated dashboard binary accepts the following flags (each long form has a
+short alias; stdlib `flag` also accepts a single dash: `-port`):
+
+| Flag | Short | Default | Values | Description |
+|---|---|---|---|---|
+| `--port` | `-p` | `:8080` (or `ADDR` env var) | any int | Listen port; overrides the `ADDR` env var. 0 means "use `ADDR` / `:8080`" |
+| `--log` | `-l` | `full` | `full`, `err` | Request log level. `full` logs every request via chi's `middleware.Logger`; `err` logs only requests that produced an error response (status >= 400) via a generated `errorOnlyLogger` middleware |
+| `--help` | `-h` | — | — | Print command line syntax + flag meanings and exit 0 (before any DB or session setup) |
+
+`logLevel` is passed to `panel.NewRouter(db, logLevel)`, which selects `middleware.Logger` or `errorOnlyLogger`. The `errorOnlyLogger` wraps the response with `middleware.NewWrapResponseWriter` and emits `log.Printf("%s %s -> %d", r.Method, r.RequestURI, ww.Status())` only when `Status() >= 400`. The generated `Makefile` `run` target passes `--port $(PORT)` and `--log $(LOG)` (`PORT ?= 8080`, `LOG ?= full`).
+
+Example: `./admin --port 9090 --log err` or `./admin -p 9090 -l err`
 
 ### Database Introspection (`--db`)
 
@@ -529,7 +556,7 @@ Flags:
 
 1. **Driver detection:** `postgres://`/`postgresql://` DSN → postgres driver (via `pgx/v5`); everything else → sqlite (via `modernc.org/sqlite`)
 2. **Schema introspection:** discovers tables, columns (types, nullability, defaults), primary keys, and foreign keys
-3. **Auth table management:** if `users`/`roles` tables are missing, creates them with driver-appropriate DDL and seeds default roles + admin user (`admin@admin.test` / `admin`, bcrypt-hashed). If they already exist with data, they are left untouched.
+3. **Auth table management:** if `users`/`roles` tables are missing, creates them with driver-appropriate DDL and seeds default roles + admin user. The admin password is set from `--admin-password` or a random one-time password (generated + printed to the console, not stored) when omitted. If the tables already exist with data, they are left untouched.
 4. **YAML generation:** one `Resource` per discovered table (excluding `users`/`roles`) with list/detail/form sections
 5. **SQL generation:** SQLC-annotated queries per table — List (with LEFT JOINs for FK labels), Count, Get, Create, Update, Delete — plus options queries for FK relation fields
 6. **Type mapping:** database column types are mapped to go-fila field types (e.g. `varchar` → `string`, `int` → `integer`, `timestamp` → `datetime`)
@@ -552,25 +579,133 @@ Flags:
 
 ## Plugin System (v0.5+)
 
-Plugins extend go-fila by registering resources, pages, widgets, and navigation:
+Plugins extend go-fila at **generation time** by contributing resources, pages, navigation groups, SQL files, and hook attachments. A plugin is a separate Go module that implements the `github.com/go-fila/go-fila/pkg/plugin.Plugin` interface. When plugins are declared in `go-fila.yaml`, go-fila runs each plugin in a throwaway module (a "shim"), collects a JSON manifest of its contributions, and merges it into the config before code generation. The generated app keeps the core design decision of **zero runtime dependency on go-fila**.
+
+### YAML Configuration
 
 ```yaml
 plugins:
-  - name: audit
-    source: github.com/go-fila/plugin-audit
-    config:
+  - name: audit                    # REQUIRED — unique plugin identifier
+    source: ./plugins/audit        # REQUIRED — local dir (./, /, ~) or Go module path
+    config:                        # OPTIONAL — arbitrary map passed to Configure()
+      table: audit_log
       retention_days: 90
+  - name: other
+    source: github.com/user/plugin
+    config:
+      key: value
 ```
 
-Plugin Go interface:
+- `source` as a **local directory** (starts with `.`, `/`, or `~`) is resolved to an absolute path; its `go.mod` `module` directive is read to get the module path. The shim adds a `replace <mod> => <abs>` directive so the plugin compiles against the exact local sources.
+- `source` as a **module import path** (e.g., `github.com/user/plugin`) is fetched from the Go module proxy during `go mod tidy` in the shim.
+- The `config` map is JSON-encoded and passed to the plugin's `Configure(cfg map[string]any)` method if it implements `Configurer` (detected via type assertion). go-fila **injects the database driver** under the reserved `"driver"` key (`"postgres"`, `"sqlite"`, or `"mssql"`) so plugins can emit driver-appropriate SQL (placeholders, DDL).
+- **Plugin load failure is fatal** — an explicitly declared plugin that fails to load is a config error. Use `--skip-plugins` to disable all plugins (escape hatch for CI or broken plugins).
+
+### Plugin Go Interface (Authoring API)
+
+A plugin module must export a `func New() Plugin` at its root package. The package name must equal the last element of the module path (e.g., module `github.com/user/myplugin` → package `myplugin`).
 
 ```go
 type Plugin interface {
-    ID() string
-    Register(p *Panel) error
-    Boot(p *Panel) error
+    ID() string           // stable plugin identifier
+    Register(p *Panel) error  // add contributions to the panel builder
+    Boot(p *Panel) error      // post-registration initialization
+}
+
+type Configurer interface {     // optional; detected via type assertion
+    Configure(cfg map[string]any) error  // receives YAML config + injected "driver"
 }
 ```
+
+### Panel Builder (`pkg/plugin.Panel`)
+
+```go
+func NewPanel() *Panel
+
+func (p *Panel) AddResource(r Resource) error
+    // Returns error on duplicate resource name within this plugin.
+
+func (p *Panel) AddPage(pg Page) error
+    // Path defaults to "/" + Name when empty. Returns error on missing/duplicate name.
+
+func (p *Panel) AddNavigationGroup(g NavigationGroup)
+
+func (p *Panel) AddSQLFile(name, content string)
+    // name must be "queries/<file>.sql" or "migrations/<file>.sql".
+    // go-fila writes it only if the destination file does not already exist.
+
+func (p *Panel) AddHookToResource(resource, action, when string, h Hook) error
+    // resource: existing resource name in merged config (e.g., "Customer")
+    // action: "create" | "update" | "delete" | <custom action name>
+    // when: "before" | "after"
+    // h: Hook (Name, Fn, SQL, Proc). Only SQL/proc hooks are supported in M4; fn hooks rejected.
+
+func (p *Panel) Manifest() Manifest  // JSON-serializable snapshot of all contributions
+```
+
+### Manifest & Merge
+
+The `Manifest` struct contains:
+```go
+Resources       []Resource       // appended to config.Resources
+Pages           []Page           // appended to config.Pages
+Navigation      []NavigationGroup // appended to config.Navigation
+HookAttachments []HookAttachment // resolved against merged resources
+SQLFiles        map[string]string // written to outDir/sql/ (no overwrite)
+```
+
+**HookAttachment** semantics:
+- The loader resolves the target resource by name in the **merged** config (YAML resources + previously loaded plugins' resources).
+- The hook is appended to the target action's `Before` or `After` list (creating the `Hooks` block if missing).
+- Only `SQL`/`proc` hooks are accepted from plugins in M4; `Fn` hooks cause a fatal merge error ("requires M5 — use sql").
+- The hook's SQL/proc binds the current record id as `$1` (parity with existing hook emission): `0` for before-create, new row id after-create, parsed path id otherwise. `proc` hooks are ignored on sqlite.
+
+**SQL file handling**: Files are written into `outDir/sql/<name>` only when they do not already exist (preserves user edits).
+
+### Example: Audit Plugin
+
+The `examples/plugins/audit/` directory contains a complete, driver-aware plugin:
+
+```go
+package audit
+
+import plugin "github.com/go-fila/go-fila/pkg/plugin"
+
+func New() plugin.Plugin { return &auditPlugin{} }
+
+func (p *auditPlugin) Register(pb *plugin.Panel) error {
+    // Add AuditLog resource with list/detail
+    // Add AuditOverview page with stat widgets
+    // Add "Audit" navigation group
+    // Add migrations/audit_schema.sql + queries/audit.sql (driver-aware)
+    // Attach after-delete hook to Customer resource
+}
+```
+
+At generation time it contributes:
+- `AuditLog` resource (list/detail with badge column for action)
+- `AuditOverview` page (2 stat widgets: total entries, deletes logged)
+- "Audit" navigation group (sidebar, links to AuditLog + AuditOverview)
+- `migrations/audit_schema.sql` (DDL with driver-appropriate id column)
+- `queries/audit.sql` (ListAuditLogs, CountAuditLogs, GetAuditLog with driver placeholders)
+- Hook attachment: `Customer.delete.after` → `INSERT INTO audit_log ...`
+
+To use it in your project:
+```yaml
+plugins:
+  - name: audit
+    source: ./plugins/audit      # or github.com/go-fila/plugin-audit when published
+    config:
+      table: audit_log
+      retention_days: 90
+```
+
+### Implementation Notes (for go-fila maintainers)
+
+- **Loader** (`internal/generator/plugin.go`): `loadPlugins()` runs after `copySQLFiles()` (so plugin SQL lands before sqlc) and before resource/page generation. It writes a shim module, runs `go mod tidy && go run .`, reads `manifest.json`, and merges it. Local go-fila checkout is found by walking up from `os.Executable()` / cwd for a `go.mod` declaring `module github.com/go-fila/go-fila` and `replace`d into the shim.
+- **Shim** (`writeShim`): Generates `go.mod` + `main.go` that imports the plugin, builds a `Panel`, calls `Configure/Register/Boot`, and writes `manifest.json`.
+- **Merge** (`mergeManifest`): Appends resources/pages/navigation; resolves hook attachments; writes SQL files (no overwrite); rejects fn hooks; validates duplicates.
+- **Generated hooks.go fix** (M4 prerequisite): `generateHooks()` now writes `internal/hooks/hooks.go` whenever **any** hook block exists (fn or sql), not just when fn hooks exist. This ensures the `hooks.Scope` type is available for sql-only hooks (including plugin-contributed ones). Only fn hooks emit stubs; sql-only configs get a minimal file with just `Scope` and no `context`/`database/sql` imports.
 
 ---
 

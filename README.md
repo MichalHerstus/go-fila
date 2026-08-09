@@ -37,7 +37,10 @@ cd admin
 make build                    # builds the dashboard binary + assets
 
 # Run the dashboard server
-make run
+make run                    # make run PORT=9090 LOG=err for custom port / error-only logs
+
+# Or run the binary directly:
+./admin --port 8080         # --log full (default) | err — err logs only error responses
 
 # Individual steps: make deps / css / sqlc / templ / tidy / clean
 # Deploy: make package (tar.gz of binary + static + sql + data), extract on
@@ -57,12 +60,24 @@ make package
 scp admin-20260804.tar.gz user@target:/
 # on the target machine
 tar xzf admin-20260804.tar.gz && cd admin-20260804
-./admin --port 8080
+./admin -h                              # print command line syntax + flag meanings and exit
+./admin --port 8080 --log full          # --log full (default) | err — err logs only error responses
+                                        # short forms: -p 8080 -l err
 ```
 
 Run the binary from the extracted directory — the sqlite DSN (`file:./data/admin.db`) is relative to the working directory. For postgres/MSSQL deployments, configure the database on the server and pass the DSN via the `DATABASE_URL` env var (or keep the one baked in at generation time).
 
 The `init` command fails if files already exist unless `--force` is passed.
+
+## Security
+
+The generated dashboard ships with security defaults. Keep them in mind when deploying:
+
+- **Session secret** — set `SESSION_SECRET` (≥ 32 chars). Without it, an ephemeral random secret is used (sessions don't survive restarts, with a warning). When `APP_ENV=production` is set, a missing secret is a fatal startup error.
+- **File uploads** — uploaded files are validated by extension and content-type (HTML/SVG rejected) and always served with `Content-Disposition: attachment`.
+- **Security headers** — every response carries CSP, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy`, and `Permissions-Policy`.
+- **Error responses** — internal errors log server-side and return generic 500/404 text; SQL/table names never leak to clients.
+- **Admin password** — `init --demo` / `init --db` use `--admin-password`; when omitted a random one-time password is generated and printed.
 
 ## CLI
 
@@ -80,6 +95,9 @@ Flags:
   --out, -o      Output directory (default: ./admin)
   --db DSN       Introspect database (postgres://..., sqlserver://... or sqlite file path)
   --force        Overwrite existing files
+  --admin-password PASSWORD
+                 Initial admin password for --demo / --db scaffolding (random
+                 one-time password generated + printed when omitted)
   --verbose      Verbose logging
 ```
 
@@ -99,7 +117,7 @@ go-fila/
 │   ├── parser/                 # YAML parsing + validation
 │   │   ├── schema.go
 │   │   └── validator.go
-│   └── generator/              # Code generation pipeline (11 files)
+│   └── generator/              # Code generation pipeline (13 files)
 │       ├── generator.go        # Orchestrator
 │       ├── handler.go          # Per-resource handlers (list, detail, create,
 │       │                       #   update, delete, action, CSV export)
@@ -137,6 +155,7 @@ output/
 │   ├── panel/
 │   │   ├── router.go                # All chi routes
 │   │   ├── auth/                    # Login handler, session, middleware, RBAC
+│   │   ├── httperr/                 # Safe error helpers (generic 500/404 responses)
 │   │   ├── resources/
 │   │   │   └── {resource}/
 │   │   │       ├── list.go          # List handler (raw SQL + dynamic filters)
@@ -576,6 +595,81 @@ Handlers use a consistent SQL approach:
 - **Delete**: Raw SQL DELETE via `db.ExecContext`
 - **Actions**: Raw SQL per action name (switch dispatch)
 - **CSV Export**: Raw SQL SELECT + `encoding/csv`
+
+## Plugins
+
+Plugins extend go-fila at generation time by contributing resources, pages, navigation, SQL files, and hook attachments. A plugin is a separate Go module that implements the `github.com/go-fila/go-fila/pkg/plugin.Plugin` interface. When you declare plugins in `go-fila.yaml`, go-fila runs each plugin in a throwaway module, collects its manifest, and merges it into the config before generating the admin panel. The generated app has **zero runtime dependency** on go-fila or its plugins.
+
+### Using plugins
+
+Add a `plugins` list to your `go-fila.yaml`:
+
+```yaml
+plugins:
+  - name: audit
+    source: ./plugins/audit      # local directory (must have go.mod)
+    config:
+      table: audit_log
+      retention_days: 90
+  - name: other-plugin
+    source: github.com/user/plugin  # module path (fetched from proxy)
+    config:
+      key: value
+```
+
+- `source` can be a local directory (starts with `.`, `/`, or `~`) or a Go module import path.
+- Local directories use a `replace` directive in the shim so they compile against the exact local sources.
+- The `config` map is passed to the plugin's `Configure` method (optional). go-fila injects the database driver under the reserved `"driver"` key (`"postgres"`, `"sqlite"`, or `"mssql"`) so plugins can emit driver-appropriate SQL.
+
+### Plugin authoring API
+
+A plugin module must export a `func New() plugin.Plugin` at its root package (package name must match the last element of the module path). The `Plugin` interface:
+
+```go
+type Plugin interface {
+    ID() string
+    Register(p *Panel) error
+    Boot(p *Panel) error
+}
+```
+
+The `Panel` builder provides methods to contribute to the generated panel:
+
+```go
+p.AddResource(Resource) error          // resources
+p.AddPage(Page) error                  // pages (path defaults to "/"+Name)
+p.AddNavigationGroup(NavigationGroup)  // sidebar groups
+p.AddSQLFile(name, content string)     // "queries/..." or "migrations/..."
+p.AddHookToResource(resource, action, when string, Hook) error  // before/after hooks
+p.Manifest() Manifest                  // returns the accumulated contributions
+```
+
+The `Hook` type has `Name`, `Fn` (for Go function hooks), and `SQL` (for inline SQL hooks). Plugin `Fn` hooks are currently rejected at merge time (they require multi-panel support, M5); use `SQL` hooks instead.
+
+### Example: audit plugin
+
+The `examples/plugins/audit/` directory contains a complete plugin that:
+- Adds an `AuditLog` resource with list/detail views
+- Adds an `AuditOverview` page with stat widgets
+- Adds an "Audit" navigation group
+- Contributes `migrations/audit_schema.sql` + `queries/audit.sql`
+- Attaches an `after-delete` SQL hook to the `Customer` resource
+
+To use it, add to `go-fila.yaml`:
+```yaml
+plugins:
+  - name: audit
+    source: ./plugins/audit   # or github.com/go-fila/plugin-audit if published
+    config:
+      table: audit_log
+      retention_days: 90
+```
+
+Run `go-fila generate` and the audit contributions will be merged into your panel.
+
+### Escape hatch
+
+Pass `--skip-plugins` to `go-fila generate` to skip all plugin loading (useful for CI or when a plugin is temporarily broken).
 
 ## Tech stack
 

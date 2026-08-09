@@ -85,8 +85,8 @@ Driver comes from the first `connections:.*.driver` value (default `"postgres"`)
 | Concern | postgres | sqlite | mssql |
 |---|---|---|---|
 | sqlc.yaml `engine` | `postgresql` | `sqlite` | `postgresql` (postgres-dialect schema.sql is the sqlc input) |
-| `sql.Open` driver | `postgres` + blank-import sqlc pkg | `sqlite3` + `github.com/mattn/go-sqlite3` | `mssql` + `_ "github.com/microsoft/go-mssqldb"` |
-| go.mod | — | adds `github.com/mattn/go-sqlite3 v1.14.24` | adds `github.com/microsoft/go-mssqldb v1.10.0` |
+| `sql.Open` driver | `pgx` + `_ "github.com/jackc/pgx/v5/stdlib"` | `sqlite3` + `github.com/mattn/go-sqlite3` | `mssql` + `_ "github.com/microsoft/go-mssqldb"` |
+| go.mod | adds `github.com/jackc/pgx/v5 v5.10.0` | adds `github.com/mattn/go-sqlite3 v1.14.24` | adds `github.com/microsoft/go-mssqldb v1.10.0` |
 | LIKE operator | `ILIKE` | `LIKE` | `LIKE` (case-insensitive default collation) |
 | bind placeholders | `$N` | `?` (positional, SQL-text order) | `$N` (go-mssqldb loose mode maps `$N`→`@pN`) |
 | sqlc id type | `int32` | `int64` | `int32` (unless `id_type` overrides; bigint → `int64`) |
@@ -99,14 +99,14 @@ Helpers in `generator.go`: `driver()`, `isSQLite()`, `isMSSQL()`, `placeholder(n
 - **`init --db` DSN**: prefix `sqlserver://` or `mssql://` → driver `mssql`. Introspection uses INFORMATION_SCHEMA + `sys.foreign_keys`, and `sys.columns.is_identity` for tables with no declared PRIMARY KEY (common on MSSQL line-of-business schemas — identity `ID` columns act as the key; they are marked `IsPrimaryKey` so routes key on them and INSERT/UPDATE omit them).
 - **sqlc must see postgres-dialect schema.sql**: `generateSchemaSQL()` now emits full DDL for ALL introspected tables (postgres dialect for postgres/mssql, sqlite dialect for sqlite). This is what lets sqlc infer types on mssql projects (and fixed pre-existing type inference for user tables on postgres). Never executed against the DB.
 - **`RETURNING` is emitted for mssql Create/Update** (driver != "sqlite") — the sqlc engine is `postgresql`, so this is required; the generated handlers use raw SQL at runtime anyway.
-- **MSSQL list/card COUNT query uses its own `$1..$N` numbering**: go-mssqldb validates arg count against the HIGHEST `$N` in the SQL, so the data-query clauses (`$3..`) cannot be reused for the count query — the emitted code builds a separate `countClauses` numbered from 1 and passes `args[2:]`.
+- **Postgres/MSSQL list/card pagination count comes from a windowed `COUNT(*) OVER()`**: the list/card data query emits `SELECT {cols}, COUNT(*) OVER() AS _total FROM {table} …` and scans `_total` into `total` per row — a single round trip, no separate COUNT query, so the old `countClauses`/$N-renumbering hack is gone. When the page is empty (rows beyond the last, or a search matching nothing) `totalSet` stays false and the handler falls back to `total = page*perPage` so `totalPages` renders as the current page instead of 0. mssql still needs the `ORDER BY (SELECT NULL)` fallback (see next bullet) and go-mssqldb still validates arg count against the HIGHEST `$N`, which is fine because there is only one query now.
 - **ORDER BY is omitted from generated list/options queries for mssql**: a derived table (the `options_query` wrapper) cannot have ORDER BY without TOP/OFFSET/FOR XML, and `TOP` cannot combine with `OFFSET` — so mssql list queries get `ORDER BY (SELECT NULL)` as a fallback only when no sort is set.
 - **MSSQL column names are PascalCase** (`CeleJmeno`, `ZamestnanecID`). sqlc lowercases the whole identifier and only splits on `_`, so go-fila's `snakeToPascal` lowercases input first: `CeleJmeno`→`Celejmeno`, `ZamestnanecID`→`Zamestnanecid`, `role_id`→`RoleID` (still). Row maps are keyed by the raw selected column name, so introspection emits `id_column: ID` when the key column isn't literally `id`.
 - **`table:` / `id_type:` / `id_column:` overrides** are emitted by introspection when the convention doesn't match the real schema (e.g. resource `Zamestnanec` → `table: Zamestnanec`; bigint PK → `id_type: int64`; `ID` column → `id_column: ID`). The generator's `tableName()`/`idColumn()`/`idGoTypeForResource()` fall back to the old conventions when the fields are absent.
 - Sanity check in generated main.go for mssql is `SELECT TOP 1 1 FROM {table}` (`TOP 1` replaces `LIMIT 1`).
 
 ### Generated main.go: DB sanity check runs BEFORE binding the port
-`generateMain()` (`main.go`) emits `sql.Open` → `db.Ping()` → **sanity query against `{auth.table}`** (mssql: `SELECT TOP 1 1 FROM …`; others: `SELECT 1 FROM … LIMIT 1`; `sql.ErrNoRows` treated as OK) → only then `net.Listen` + `srv.Serve`. Rationale: mattn/go-sqlite3 silently **creates an empty DB file** when the file is missing, so `db.Ping()` succeeds against a "not found" database and the dashboard would otherwise bind the port and run broken (`no such table`) while holding it — a restart then hits `address already in use`. The sanity query makes a missing/uninitialized DB a fatal startup error **before** the port is bound. The listen port is resolved as `--port` flag → `ADDR` env → `:8080` (`flag.Int("port", 0, ...)`; stdlib `flag` accepts both `--port 9090` and `-port 9090`); the emitted `Makefile` `run` target passes `--port $(PORT)` (`PORT ?= 8080`). Generated server also does graceful shutdown on SIGINT/SIGTERM (`signal.NotifyContext` → `srv.Shutdown`) and logs a `is another dashboard instance already running?` hint on bind failure. Keep the bind AFTER the DB checks — ordering is what prevents a broken DB from occupying the port.
+`generateMain()` (`main.go`) emits `sql.Open` → `db.Ping()` → **sanity query against `{auth.table}`** (mssql: `SELECT TOP 1 1 FROM …`; others: `SELECT 1 FROM … LIMIT 1`; `sql.ErrNoRows` treated as OK) → only then `net.Listen` + `srv.Serve`. Rationale: mattn/go-sqlite3 silently **creates an empty DB file** when the file is missing, so `db.Ping()` succeeds against a "not found" database and the dashboard would otherwise bind the port and run broken (`no such table`) while holding it — a restart then hits `address already in use`. The sanity query makes a missing/uninitialized DB a fatal startup error **before** the port is bound. The listen port is resolved as `--port` flag (`-p` alias) → `ADDR` env → `:8080` (`flag.Int("port", 0, ...)` + `flag.IntVar(port, "p", 0, ...)`; stdlib `flag` accepts both `--port 9090` and `-port 9090`); the emitted `Makefile` `run` target passes `--port $(PORT)` (`PORT ?= 8080`). Request logging is controlled by `--log` (`-l` alias), values `full` (default, chi's `middleware.Logger`, logs every request) or `err` (only requests that produced an error response, status >= 400) — the flag value is threaded through `NewRouter(db, logLevel)` and selects `middleware.Logger` vs the generated `errorOnlyLogger` (a `middleware.NewWrapResponseWriter` wrapper that `log.Printf`s only when `Status() >= 400`); the `Makefile` `run` target passes `--log $(LOG)` (`LOG ?= full`). `--help`/`-h` prints the command line syntax + flag meanings via `flag.Usage` (custom `flag.PrintDefaults` wrapper) and exits 0 BEFORE any DB or session work. **The generated `auth/session.go` must NOT use a package `init()`** — its `Init()` is called explicitly by `main()` right after the help check (before `sql.Open`), so `-h/--help` runs clean without the `SESSION_SECRET` warning/fail-fast, while production fail-fast still happens before the port binds (`GetSession` also lazily calls `Init()` if `Store` is nil). Generated server also does graceful shutdown on SIGINT/SIGTERM (`signal.NotifyContext` → `srv.Shutdown`) and logs a `is another dashboard instance already running?` hint on bind failure. Keep the bind AFTER the DB checks — ordering is what prevents a broken DB from occupying the port.
 
 ### sqlite list handler arg order (critical)
 mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **search args first, then `LIMIT ? OFFSET ?`**, and uses `LIKE`. The postgres branch appends `perPage, offset` first with `ILIKE $N` + `LIMIT $1 OFFSET $2`. Mixing these up silently returns wrong rows on sqlite.
@@ -143,13 +143,16 @@ All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 | Update GET | SQLC populate query |
 | Update POST | Raw SQL UPDATE via `db.ExecContext` |
 | Delete | Raw SQL DELETE via `db.ExecContext` |
-| Action | Raw SQL per action name (switch dispatch) |
+| Action | Raw SQL per action name, or stored-proc call when `proc:` is set (switch dispatch) |
 | Bulk | Raw SQL per bulk action name, looped once per selected id (switch dispatch) |
 | CSV Export | Raw SQL SELECT + `encoding/csv` |
 
 Create/update avoid SQLC params because `r.FormValue` returns `string` but SQLC generates typed structs (`int32` for `INTEGER`). Raw SQL `ExecContext` accepts `interface{}`.
 
 Detail/update SQLC calls must cast the id to `idGoType()` — sqlite ids are `int64`, postgres `int32`. A literal `int32(id)` breaks the sqlite build.
+
+### FK label columns need LEFT JOINs in the raw list/card/export SQL
+Introspection adds a `{fk}_label` list column per foreign key (and a LEFT JOIN in the SQLC queries), but the generated **list/card/export handlers build their own raw SQL** — a bare `SELECT …, {fk}_label FROM {table}` fails with `column "{fk}_label}" does not exist`. `listSelectFrom()` in `handler.go` reconstructs the JOINs at generation time: for each view column ending in `_label` it looks up a matching relation form field (`options_query: List{Foreign}`, `options_value`, `options_label`) and emits `LEFT JOIN {ftable} f_{ftable} ON f_{ftable}.{value} = t.{fk}` with `f_{ftable}.{label} AS {fk}_label` in the select. When joins exist, real columns are qualified with the `t.` alias (search/ORDER BY too) and the single windowed `COUNT(*) OVER() AS _total` runs inside the joined data query (the count reflects the joined row set). A `_label` column with no matching relation field falls back to the unjoined behavior.
 
 ## Card view (`card` section)
 
@@ -213,11 +216,12 @@ M2 wiring: Tailwind runs `darkMode: 'class'`; `theme.extend.colors.brand.{primar
 
 ### Hooks (`hooks.go`, `RETURNING id`)
 Hooks attach to `FormAction` (create/update/delete) and `Action`. `internal/generator/hooks.go` emits the shared `internal/hooks/hooks.go` (Scope struct + one stub per unique fn hook, deduped across the whole config) and the `hookCallsStr`/`scopeValuesStr`/`returningClause` snippet builders. Gotchas:
-- **Any hook block forces the `hooks` import in the generated handler** — the `hooks.Scope{...}` literal lives in the hooks package, so a sql-only hook still needs `import hooks "…/internal/hooks"`. Condition on `Hooks != nil`, NOT on `HasFn()`.
-- **create id capture**: only when `create.Hooks != nil` does the create POST switch from `db.ExecContext(query, vals...)` to `db.QueryRowContext(r.Context(), query+" RETURNING <id>", vals...).Scan(&newID)` (postgres/sqlite) or `" OUTPUT INSERTED.<id>"` (mssql, no RETURNING in T-SQL) — `idColumn(r)` drives the column. `scope.ID = newID` runs before after-hooks. The hookless path stays byte-identical (`ExecContext`, no RETURNING).
+- **Any hook block forces the `hooks` import in the generated handler** — the `hooks.Scope{...}` literal lives in the hooks package, so a sql-only hook still needs `import hooks "…/internal/hooks"`. Condition on `Hooks != nil`, NOT on `HasFn()`. **Exception: proc-only hooks on sqlite.** Since sqlite cannot call stored procedures, use `g.hookBlockEmits(h)` (true for any fn/sql hook, or any proc hook when the driver isn't sqlite) as the gate for the import/Scope/`RETURNING` — a proc-only block on sqlite must produce no `hooks` import and no `RETURNING` or the generated handler fails with an unused import.
+- **create id capture**: only when `g.hookBlockEmits(create.Hooks)` does the create POST switch from `db.ExecContext(query, vals...)` to `db.QueryRowContext(r.Context(), query+" RETURNING <id>", vals...).Scan(&newID)` (postgres/sqlite) or `" OUTPUT INSERTED.<id>"` (mssql, no RETURNING in T-SQL) — `idColumn(r)` drives the column. `scope.ID = newID` runs before after-hooks. The hookless path stays byte-identical (`ExecContext`, no RETURNING).
 - `sql` hooks are emitted as `db.ExecContext(r.Context(), "<sql>", scope.ID)` — always pass the SQL as a Sprintf **arg** (`%q`), never concatenate it into a template (a `%` inside hook SQL would corrupt the emitted source). `scope.ID` is 0 for before-create, the new row id after-create, the parsed path id otherwise; `$1` works on sqlite (named-param syntax + positional binding) and mssql (loose `$N`).
+- **Stored procedures (`proc:`)** — a third hook kind and an alternative to `query:` on actions (mutually exclusive, enforced by the parser). `procSQL(name)` emits `CALL <name>($1)` on postgres and `EXEC <name> $1` on mssql (go-mssqldb rewrites `$1`→bound `@p1`, passed positionally to the proc's first param); the record id binds as `$1`, same as sql hooks/actions. `procSQL` returns `""` on sqlite and callers skip the emission: `hookCallsStr` drops proc hooks, `actionExecSQL` returns `""` so the action case becomes an empty `{}` block (still redirects) and the bulk loop gets `_ = id` as its body. A proc-only `Hooks` block on sqlite must NOT emit the import/Scope/RETURNING (see `hookBlockEmits` above).
 - Hooks run inside the action case's mandatory `{ }` block scope (actions.go); the hook lines use `if err := …` so the later `_, err :=` in the block still compiles. A hook error aborts the request with HTTP 500.
-- `bulk.go` does NOT run hooks — bulk reuses the action SQL without the before/after lifecycle.
+- `bulk.go` does NOT run hooks — bulk reuses the action SQL/proc without the before/after lifecycle.
 
 ### Select options render from `data.Fields`, not static HTML
 Form select options are rendered at runtime by looping `data.Fields` for the matching field and ranging its `Options`. The generated handler wires `options_query` into `ColumnDef.Options` (`formFieldDefsWithOpts`); the templ compares with `viewmodels.OptionValue(data.Item[f.Name])` because sqlc populates `sql.NullInt64`/`sql.NullString` (a bare `fmt.Sprintf("%v")` on `{1 true}` won't match key `"1"`).
@@ -272,6 +276,73 @@ When any form field has type `file` or `image`:
 - Middleware: `AuthMiddleware` reads `session.Values["user_id"]`, stores `user_id` + `role` in context.
 - RBAC middleware generated **conditionally**: `r.With(auth.RBACMiddleware(resource, action)).Get/Post(...)` when resource has `policies:` in YAML. Action routes **never** use RBAC (plain `r.Post`).
 
+## Security hardening (Phase A of SPEC_future_enhancement.md)
+
+The generated app ships security defaults. Keep them intact when editing the emitters:
+
+- **Session secret**: generated `session.go` uses an `init()` that reads
+  `SESSION_SECRET` (must be ≥ 32 chars, else `log.Fatal`), requires it when
+  `APP_ENV=production`, otherwise falls back to an ephemeral `crypto/rand`
+  secret with a warning (sessions invalidated on restart). Never re-emit the old
+  hardcoded `go-fila-secret-key-change-in-production` default.
+- **`order` whitelist**: list + card handlers clamp `order` to `asc`/`desc`
+  (inserted AFTER the `default_sort` block so a `-`-prefixed default survives).
+  The `sort` column is whitelisted separately against `validSorts`.
+- **Upload validation**: the emitted `saveUploadedFile` (create.go/update.go,
+  only when a `file`/`image` field exists) lowercases the extension, allows only
+  the `safeUploadExts` allow-list (images/pdf/txt/csv/zip/office), rejects
+  `text/html`/`image/svg+xml` via `http.DetectContentType` magic bytes (with
+  `file.Seek(0, io.SeekStart)` before copying), and `static/uploads` requires
+  `strings` already in the file's imports (create.go/update.go import it
+  unconditionally). `/uploads/*` is served by a wrapper handler that forces
+  `Content-Disposition: attachment` — don't revert to a bare `http.FileServer`.
+- **Safe errors**: `internal/panel/httperr` (generated by `httperr.go`, wired in
+  `generator.go` after `generateAuth`) provides `Internal(w, err)` / `NotFound(w, err)`
+  that log server-side and return generic status text. Every resource handler and
+  page handler imports `httperr` and MUST NOT emit `http.Error(w, err.Error(), ...)`.
+- **Admin password**: `init --demo` / `init --db` accept `--admin-password`
+  (threaded through `parseGlobalFlags`); when omitted, `randomPassword()`
+  (introspect.go) generates a 14-char one-time password that is printed, not
+  stored. `insertAdminUser` now returns `(bool, error)` (inserted or not).
+- **Security headers**: `securityHeaders` middleware (router.go) is registered on
+  every generated router and sets CSP (inline scripts/styles allowed for theme
+  toggle + picker), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: same-origin`, `Permissions-Policy`. Don't remove it from
+  `r.Use(...)`.
+
+### Phase B (CSRF, session, rate limiting, CSV, action RBAC)
+
+- **CSRF middleware is registered FIRST inside the panel `r.Route` block**
+  (`r.Use(auth.CSRFMiddleware)`), BEFORE the login routes. It skips
+  GET/HEAD/OPTIONS and `/static/`/`/uploads/` prefixes; every other POST (incl.
+  login, logout, create/update/delete/action/bulk) requires a matching token via
+  hidden `_csrf` input or `X-CSRF-Token` header. The token lives in the session
+  (`session.Values["csrf_token"]`, minted lazily by `CSRFToken(r, w)`); the
+  generated `views` pass it via `data.CSRFToken` / `auth.CSRFToken(r, w)`. Don't
+  drop the `auth.CSRFToken(r, w)` 5th arg from any `layoutviews.Base(...)` call
+  — the signature is
+  `Base(title, panelPath, theme, userName, csrfToken, children)`.
+- **Login rate limiting is conditional**: `ratelimit.go` is emitted ONLY when
+  `auth.login.rate_limit` is set with `max_attempts > 0` (`rateLimited` flag in
+  auth.go). The `loginLimited(r)`/`resetLoginLimit(r)` helpers and the
+  re-render-on-limit branch in `handler.go` are all gated on it — a config
+  without the block must not reference the helpers.
+- **Session rotation**: on successful login the old session is expired
+  (`MaxAge = -1` + `Save`) then a FRESH session is minted with
+  `Store.New(r, "go-fila-session")` — do NOT re-`GetSession` after expiring,
+  gorilla reloads the old request cookie. `resetLoginLimit(r)` runs on success.
+- **Logout is POST-only** (`r.Post("/logout", ...)`); the topbar renders a
+  `<form method="POST">` with hidden `_csrf`. The logout form action is
+  `templ.SafeURL(fmt.Sprintf("%s/logout", panelPath))` — the `%%s` in the
+  generator source must stay doubled or the `panelPath` arg count breaks.
+- **CSV formula injection**: `export.go` headers AND values pass through
+  `csvSafe`, which prefixes `'` on leading `=`, `+`, `-`, `@`, tab or CR.
+- **Action/bulk RBAC**: `Action.Policy` ("role1|role2") emits
+  `ActionRBACMiddleware` in middleware.go and wraps the action + bulk routes
+  with `r.With(auth.ActionRBACMiddleware("<res>"))` — gated on
+  `hasActionPolicies(res)` (a `policies:` block alone is NOT enough; the action
+  itself must set `policy:`).
+
 ## Pages & widgets
 
 Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Chart.js), `table`, `list`, `html`. Each queries DB via raw SQL at request time. Chart data serialized to JSON in `data-chart-labels` / `data-chart-values` attributes.
@@ -289,13 +360,13 @@ Chart.js is **vendored at build time** — no CDN, runtime is offline. The gener
 | `cmd/go-fila/editor/` | tview TUI editor: 3-pane shell, section editors, sync + preview (14 files, see `edit` above) |
 | `internal/types/` | YAML-tagged Go structs for config schema (5 files: config.go, panel.go, resource.go, field.go, hook.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (12 files, see above) |
+| `internal/generator/` | Code generation pipeline (13 files, see above) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/go-fila/main.go`'s `cmdInit` |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
 | `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |
 
 ## Generated app dependencies
 
-`github.com/a-h/templ`, `github.com/go-chi/chi/v5`, `github.com/gorilla/sessions`, `golang.org/x/crypto`. Plus `github.com/mattn/go-sqlite3 v1.14.24` when the driver is sqlite (blank-imported in main.go).
+`github.com/a-h/templ`, `github.com/go-chi/chi/v5`, `github.com/gorilla/sessions`, `golang.org/x/crypto`. Plus `github.com/jackc/pgx/v5` (postgres, blank-imported in main.go), `github.com/mattn/go-sqlite3 v1.14.24` (sqlite, blank-imported in main.go), and `github.com/microsoft/go-mssqldb v1.10.0` (mssql, blank-imported in main.go) — the `pgx` stdlib driver registers the `"pgx"` database/sql name, so generated main.go calls `sql.Open("pgx", dsn)` for postgres.
 
 The generated `go.mod` also declares `tool github.com/a-h/templ/cmd/templ` so `go tool templ generate` works without a manual templ install, and `generateMakefile()` emits a `Makefile` whose `build` target runs all steps (npm deps, Tailwind, sqlc, tidy, templ, `go build -o <binary> .`).

@@ -50,14 +50,19 @@ func (g *Generator) generateRouter() error {
 	}
 	r.Use(middleware.Recoverer)
 	r.Use(auth.SessionMiddleware)
+	r.Use(securityHeaders)
 
 	fileServer := http.FileServer(http.Dir("static"))
 	r.Handle("/static/*", http.StripPrefix("/static/", fileServer))
-	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.FileServer(http.Dir("static/uploads"))))
+	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Disposition", "attachment")
+		http.FileServer(http.Dir("static/uploads")).ServeHTTP(w, r)
+	})))
 
 	panelPath := "` + g.Config.Panel.Path + `"
 
 	r.Route(panelPath, func(r chi.Router) {
+		r.Use(auth.CSRFMiddleware)
 		r.Get("/login", auth.LoginHandler(db))
 		r.Post("/login", auth.LoginHandler(db))
 
@@ -94,10 +99,14 @@ func (g *Generator) generateRouter() error {
 			code += fmt.Sprintf("\t\t%sPost(\"/%s/{id}/delete\", %s.Delete(db))\n", rbacPrefix("delete"), name, name)
 		}
 		if len(res.Actions) > 0 {
-			code += fmt.Sprintf("\t\tr.Post(\"/%s/{id}/action/{action}\", %s.Action(db))\n", name, name)
-		}
-		if hasBulkActions(res) {
-			code += fmt.Sprintf("\t\tr.Post(\"/%s/bulk/{action}\", %s.Bulk(db))\n", name, name)
+			actionPrefix := "r."
+			if hasActionPolicies(res) {
+				actionPrefix = fmt.Sprintf("r.With(auth.ActionRBACMiddleware(%q)).", name)
+			}
+			code += fmt.Sprintf("\t\t%sPost(\"/%s/{id}/action/{action}\", %s.Action(db))\n", actionPrefix, name, name)
+			if hasBulkActions(res) {
+				code += fmt.Sprintf("\t\t%sPost(\"/%s/bulk/{action}\", %s.Bulk(db))\n", actionPrefix, name, name)
+			}
 		}
 		if res.List != nil {
 			code += fmt.Sprintf("\t\t%sGet(\"/%s/export/csv\", %s.ExportCSV(db))\n", rbacPrefix("view_any"), name, name)
@@ -119,8 +128,7 @@ func (g *Generator) generateRouter() error {
 		}
 	}
 
-	code += fmt.Sprintf("\t\tr.Get(\"/logout\", auth.LogoutHandler(db))\n")
-	code += "\t\tr.Post(\"/logout\", auth.LogoutHandler(db))\n"
+	code += fmt.Sprintf("\t\tr.Post(\"/logout\", auth.LogoutHandler(db))\n")
 
 	code += `		})
 	})
@@ -136,6 +144,23 @@ func errorOnlyLogger(next http.Handler) http.Handler {
 		if ww.Status() >= http.StatusBadRequest {
 			log.Printf("%s %s -> %d", r.Method, r.RequestURI, ww.Status())
 		}
+	})
+}
+
+// securityHeaders sets a baseline set of HTTP security headers on every
+// response: frame protection, MIME sniffing protection, referrer policy,
+// permissions policy and a restrictive Content-Security-Policy. Inline scripts
+// and styles are allowed (the generated views use them for theme toggling and
+// the record picker); all other assets must come from the app origin.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'")
+		next.ServeHTTP(w, r)
 	})
 }
 `
@@ -337,6 +362,7 @@ import (
 
     %q
     auth %q
+    httperr %q
     layoutviews %q
     pageviews %q
 )
@@ -354,13 +380,13 @@ func %s(db *sql.DB) http.HandlerFunc {
             Widgets:   widgets,
         }
 
-        err := layoutviews.Base(pd.Name, pd.PanelPath, viewmodels.DefaultTheme(), auth.UserName(r), pageviews.%s(pd)).Render(r.Context(), w)
+        err := layoutviews.Base(pd.Name, pd.PanelPath, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), pageviews.%s(pd)).Render(r.Context(), w)
         if err != nil {
-            http.Error(w, err.Error(), http.StatusInternalServerError)
+            httperr.Internal(w, err)
         }
     }
 }
-`, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/panel/auth"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
+`, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
 		handlerName, strings.Join(widgetInit, "\n"), name, panelID, panelPath, viewName)
 
 	return os.WriteFile(filepath.Join(dir, name+".go"), []byte(code), 0644)

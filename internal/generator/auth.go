@@ -40,12 +40,22 @@ func (g *Generator) generateAuth() error {
 		redirectURL = panelPath + "/dashboard"
 	}
 
-	// RBAC middleware generation
+	// RBAC middleware generation. The middleware set is emitted when any
+	// resource declares policies OR any custom action declares a policy (the
+	// action/bulk routes get wrapped in ActionRBACMiddleware).
 	var rbacMiddleware string
+	var actionRBACMiddleware string
 	var hasRBAC bool
 	for _, r := range g.Config.Resources {
 		if r.Policies != nil && r.Policies.ViewAny != "" {
 			hasRBAC = true
+		}
+		for _, a := range r.Actions {
+			if a.Policy != "" {
+				hasRBAC = true
+			}
+		}
+		if hasRBAC {
 			break
 		}
 	}
@@ -123,6 +133,86 @@ func RBACMiddleware(resource string, action string) func(http.Handler) http.Hand
 `
 	}
 
+	// ActionRBACMiddleware: enforced on action/bulk routes when any custom
+	// action declares a policy. It mirrors the resource RBAC checks but keys on
+	// the :action path value, so per-action roles apply to both the single-row
+	// action route and the bulk route.
+	var actionChecks []string
+	for _, res := range g.Config.Resources {
+		resLower := strings.ToLower(res.Name)
+		for _, a := range res.Actions {
+			if a.Policy == "" {
+				continue
+			}
+			actionChecks = append(actionChecks, fmt.Sprintf(`
+            if resource == %q && action == %q && !checkRole(%q, userRole) {
+                http.Error(w, "Forbidden", http.StatusForbidden)
+                return
+            }`, resLower, a.Name, a.Policy))
+		}
+	}
+	if len(actionChecks) > 0 {
+		actionRBACMiddleware = fmt.Sprintf(`
+func ActionRBACMiddleware(resource string) func(http.Handler) http.Handler {
+    return func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            userRole, ok := r.Context().Value(UserRoleKey).(string)
+            if !ok {
+                http.Error(w, "Forbidden", http.StatusForbidden)
+                return
+            }
+            action := r.PathValue("action")%s
+            next.ServeHTTP(w, r)
+        })
+    }
+}
+`, strings.Join(actionChecks, ""))
+	}
+
+	rateLimited := g.Config.Auth.Login.RateLimit != nil && g.Config.Auth.Login.RateLimit.MaxAttempts > 0
+
+	loginPrelude := ""
+	loginReset := ""
+	if rateLimited {
+		loginPrelude = fmt.Sprintf(`        if loginLimited(r) {
+            vd := LoginPageData{
+                Error:     "Too many login attempts. Please try again later.",
+                PanelPath: %q,
+                PanelName: %q,
+                CSRFToken: CSRFToken(r, w),
+            }
+            LoginPage(vd).Render(r.Context(), w)
+            return
+        }
+
+`, panelPath, panelName)
+		loginReset = `        resetLoginLimit(r)
+`
+	}
+
+	// Session rotation on successful login: the old session cookie is expired
+	// and a brand-new session (fresh ID, empty values) is created, so a stolen
+	// pre-login session ID cannot be fixed into an authenticated one.
+	successSession := `        if old, err := GetSession(r); err == nil {
+            old.Options.MaxAge = -1
+            _ = old.Save(r, w)
+        }
+
+        session, err := Store.New(r, "go-fila-session")
+        if err != nil {
+            http.Error(w, "Session error", http.StatusInternalServerError)
+            return
+        }
+
+        session.Values["user_id"] = userID
+        session.Values["role"] = userRole
+        session.Values["name"] = displayName
+        if err := session.Save(r, w); err != nil {
+            http.Error(w, "Session save error", http.StatusInternalServerError)
+            return
+        }
+`
+
 	handlerCode := fmt.Sprintf(`package auth
 
 import (
@@ -137,16 +227,19 @@ func LoginHandler(db *sql.DB) http.HandlerFunc {
             vd := LoginPageData{
                 PanelPath: %q,
                 PanelName: %q,
+                CSRFToken: CSRFToken(r, w),
             }
             LoginPage(vd).Render(r.Context(), w)
             return
         }
 
+%s
         if err := r.ParseForm(); err != nil {
             vd := LoginPageData{
                 Error:     "Invalid form submission",
                 PanelPath: %q,
                 PanelName: %q,
+                CSRFToken: CSRFToken(r, w),
             }
             LoginPage(vd).Render(r.Context(), w)
             return
@@ -160,6 +253,7 @@ func LoginHandler(db *sql.DB) http.HandlerFunc {
                 Error:     "Email and password are required",
                 PanelPath: %q,
                 PanelName: %q,
+                CSRFToken: CSRFToken(r, w),
             }
             LoginPage(vd).Render(r.Context(), w)
             return
@@ -182,6 +276,7 @@ func LoginHandler(db *sql.DB) http.HandlerFunc {
                 Error:     "Invalid email or password",
                 PanelPath: %q,
                 PanelName: %q,
+                CSRFToken: CSRFToken(r, w),
             }
             LoginPage(vd).Render(r.Context(), w)
             return
@@ -193,25 +288,13 @@ func LoginHandler(db *sql.DB) http.HandlerFunc {
                 Error:     "Invalid email or password",
                 PanelPath: %q,
                 PanelName: %q,
+                CSRFToken: CSRFToken(r, w),
             }
             LoginPage(vd).Render(r.Context(), w)
             return
         }
 
-        session, err := GetSession(r)
-        if err != nil {
-            http.Error(w, "Session error", http.StatusInternalServerError)
-            return
-        }
-
-        session.Values["user_id"] = userID
-        session.Values["role"] = userRole
-        session.Values["name"] = displayName
-        if err := session.Save(r, w); err != nil {
-            http.Error(w, "Session save error", http.StatusInternalServerError)
-            return
-        }
-
+%s%s
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
@@ -235,15 +318,18 @@ type LoginPageData struct {
     Error     string
     PanelPath string
     PanelName string
+    CSRFToken string
 }
 `,
 		panelPath, panelName,
+		loginPrelude,
 		panelPath, panelName,
 		emailField, passwordField,
 		panelPath, panelName,
 		authTable, emailField,
 		panelPath, panelName,
 		panelPath, panelName,
+		loginReset, successSession,
 		redirectURL, panelPath)
 
 	if err := os.WriteFile(filepath.Join(dir, "handler.go"), []byte(handlerCode), 0644); err != nil {
@@ -253,20 +339,179 @@ type LoginPageData struct {
 	sessionCode := `package auth
 
 import (
+    "crypto/rand"
+    "crypto/subtle"
+    "encoding/base64"
+    "log"
     "net/http"
+    "os"
+    "strings"
 
     "github.com/gorilla/sessions"
 )
 
-var Store = sessions.NewCookieStore([]byte("go-fila-secret-key-change-in-production"))
+var Store *sessions.CookieStore
+
+func newStore(secret []byte) *sessions.CookieStore {
+    s := sessions.NewCookieStore(secret)
+    s.Options = &sessions.Options{
+        Path:     "/",
+        MaxAge:   0,
+        HttpOnly: true,
+        Secure:   os.Getenv("APP_ENV") == "production",
+        SameSite: http.SameSiteLaxMode,
+    }
+    return s
+}
+
+func Init() {
+    if Store != nil {
+        return
+    }
+    if v := os.Getenv("SESSION_SECRET"); v != "" {
+        if len(v) < 32 {
+            log.Fatal("SESSION_SECRET must be at least 32 characters")
+        }
+        Store = newStore([]byte(v))
+        return
+    }
+    if os.Getenv("APP_ENV") == "production" {
+        log.Fatal("SESSION_SECRET must be set when APP_ENV=production")
+    }
+    buf := make([]byte, 32)
+    if _, err := rand.Read(buf); err != nil {
+        log.Fatal(err)
+    }
+    Store = newStore(buf)
+    log.Println("warning: SESSION_SECRET not set; using an ephemeral random secret (sessions invalidated on restart)")
+}
 
 func GetSession(r *http.Request) (*sessions.Session, error) {
+    if Store == nil {
+        Init()
+    }
     return Store.Get(r, "go-fila-session")
+}
+
+// CSRFToken returns the session-bound CSRF token, generating and persisting a
+// new one on first access. The token must be embedded in every state-changing
+// form (hidden _csrf input) or header (X-CSRF-Token) of the rendered page.
+func CSRFToken(r *http.Request, w http.ResponseWriter) string {
+    session, err := GetSession(r)
+    if err != nil {
+        return ""
+    }
+    if tok, ok := session.Values["csrf_token"].(string); ok && tok != "" {
+        return tok
+    }
+    buf := make([]byte, 32)
+    if _, err := rand.Read(buf); err != nil {
+        return ""
+    }
+    tok := base64.RawURLEncoding.EncodeToString(buf)
+    session.Values["csrf_token"] = tok
+    _ = session.Save(r, w)
+    return tok
+}
+
+func csrfMatches(expected, actual string) bool {
+    if expected == "" || actual == "" {
+        return false
+    }
+    return subtle.ConstantTimeCompare([]byte(expected), []byte(actual)) == 1
+}
+
+func CSRFMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+            next.ServeHTTP(w, r)
+            return
+        }
+        if strings.HasPrefix(r.URL.Path, "/static/") || strings.HasPrefix(r.URL.Path, "/uploads/") {
+            next.ServeHTTP(w, r)
+            return
+        }
+        session, err := GetSession(r)
+        if err != nil {
+            http.Error(w, "Forbidden", http.StatusForbidden)
+            return
+        }
+        expected, _ := session.Values["csrf_token"].(string)
+        if !csrfMatches(expected, r.FormValue("_csrf")) && !csrfMatches(expected, r.Header.Get("X-CSRF-Token")) {
+            http.Error(w, "Forbidden", http.StatusForbidden)
+            return
+        }
+        next.ServeHTTP(w, r)
+    })
 }
 `
 
 	if err := os.WriteFile(filepath.Join(dir, "session.go"), []byte(sessionCode), 0644); err != nil {
 		return err
+	}
+
+	// Login rate limiting: emitted only when auth.login.rate_limit is set.
+	// The limiter is a sliding-window per-IP counter with a global mutex; a
+	// successful login resets the caller's bucket via resetLoginLimit.
+	if rl := g.Config.Auth.Login.RateLimit; rl != nil && rl.MaxAttempts > 0 {
+		rateLimitCode := fmt.Sprintf(`package auth
+
+import (
+    "net"
+    "net/http"
+    "sync"
+    "time"
+)
+
+type loginAttempt struct {
+    count int
+    first time.Time
+}
+
+var loginAttempts = struct {
+    sync.Mutex
+    byIP map[string]*loginAttempt
+}{byIP: make(map[string]*loginAttempt)}
+
+const loginMaxAttempts = %d
+const loginWindow = %d * time.Second
+
+func clientIP(r *http.Request) string {
+    host, _, err := net.SplitHostPort(r.RemoteAddr)
+    if err != nil {
+        return r.RemoteAddr
+    }
+    return host
+}
+
+func loginLimited(r *http.Request) bool {
+    ip := clientIP(r)
+    loginAttempts.Lock()
+    defer loginAttempts.Unlock()
+    now := time.Now()
+    a := loginAttempts.byIP[ip]
+    if a == nil {
+        a = &loginAttempt{first: now}
+        loginAttempts.byIP[ip] = a
+    }
+    if now.Sub(a.first) >= loginWindow {
+        a.first = now
+        a.count = 0
+    }
+    a.count++
+    return a.count > loginMaxAttempts
+}
+
+func resetLoginLimit(r *http.Request) {
+    ip := clientIP(r)
+    loginAttempts.Lock()
+    defer loginAttempts.Unlock()
+    delete(loginAttempts.byIP, ip)
+}
+`, rl.MaxAttempts, rl.WindowSeconds)
+		if err := os.WriteFile(filepath.Join(dir, "ratelimit.go"), []byte(rateLimitCode), 0644); err != nil {
+			return err
+		}
 	}
 
 	middlewareCode := fmt.Sprintf(`package auth
@@ -321,7 +566,7 @@ func UserName(r *http.Request) string {
     }
     return ""
 }
-%s`, panelPath, panelPath, rbacMiddleware)
+%s`, panelPath, panelPath, rbacMiddleware+actionRBACMiddleware)
 
 	if err := os.WriteFile(filepath.Join(dir, "middleware.go"), []byte(middlewareCode), 0644); err != nil {
 		return err
@@ -392,6 +637,7 @@ templ LoginPage(data LoginPageData) {
                 }
 
                 <form action="%s/login" method="POST" class="space-y-4">
+                    <input type="hidden" name="_csrf" value={ data.CSRFToken } />
                     <div>
                         <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Email</label>
                         <input type="email" id="email" name="email" value={ data.Email } required

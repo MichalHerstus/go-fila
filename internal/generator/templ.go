@@ -244,6 +244,7 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 `, panelPath, resLower, idCol, a.Name, confirm, icon, label)
 		} else {
 			extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, item[%q], %q)) } method="POST" class="inline"%s>
+                    <input type="hidden" name="_csrf" value={ data.CSRFToken } />
                     <button type="submit" class="text-brand-primary hover:text-brand-primary/80 text-sm mr-2 inline-flex items-center">%s%s</button>
                 </form>
 `, panelPath, resLower, idCol, a.Name, confirm, icon, label)
@@ -255,6 +256,7 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 `, panelPath, resLower, idCol)
 		} else {
 			extraActions += fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, item[%q])) } method="POST" class="inline" onsubmit="return confirm('Delete?')">
+                    <input type="hidden" name="_csrf" value={ data.CSRFToken } />
                     <button type="submit" class="text-red-600 hover:text-red-900 text-sm">Delete</button>
                 </form>
 `, panelPath, resLower, idCol)
@@ -347,6 +349,7 @@ templ %s(data *viewmodels.ListData) {
 
         <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
             <form method="POST">
+                <input type="hidden" name="_csrf" value={ data.CSRFToken } />
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-50 dark:bg-gray-900">
                         <tr>
@@ -412,12 +415,14 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 			confirm = ` onsubmit="return confirm('` + jsSingleQuote(label) + `?')"`
 		}
 		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/action/%%s", %q, %q, data.Item[%q], %q)) } method="POST" class="inline"%s>
+                    <input type="hidden" name="_csrf" value={ data.CSRFToken } />
                     <button type="submit" class="%s px-4 py-2 rounded-lg text-sm hover:opacity-90">%s%s</button>
                 </form>
 `, panelPath, resLower, idCol, a.Name, confirm, actionColor(a.Color), icon, label))
 	}
 	if r.Form != nil && r.Form.Delete != nil {
 		actionBtns.WriteString(fmt.Sprintf(`                <form action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/delete", %q, %q, data.Item[%q])) } method="POST" class="inline" onsubmit="return confirm('Delete this %s?')">
+                    <input type="hidden" name="_csrf" value={ data.CSRFToken } />
                     <button type="submit" class="bg-red-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-red-700">Delete</button>
                 </form>
 `, panelPath, resLower, idCol, resName))
@@ -645,6 +650,7 @@ templ %s(data *viewmodels.FormData) {
 
         <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-6">
             <form action={ templ.SafeURL(data.Action) } method="POST"%s class="space-y-6">
+                <input type="hidden" name="_csrf" value={ data.CSRFToken } />
 %s                <div class="flex justify-end pt-4">
                     <button type="submit" class="bg-brand-primary text-white px-6 py-2 rounded-lg text-sm hover:opacity-90">
                         if data.IsCreate {
@@ -1044,6 +1050,10 @@ templ iconSVG(name string) {
         <svg class="w-6 h-6 text-brand-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
         </svg>
+    case "clock":
+        <svg class="w-6 h-6 text-brand-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
     case "cog":
         <svg class="w-6 h-6 text-brand-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -1205,7 +1215,7 @@ func darkClass(theme viewmodels.ThemeConfig) string {
     return ""
 }
 
-templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userName string, children templ.Component) {
+templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userName string, csrfToken string, children templ.Component) {
     <!DOCTYPE html>
     <html lang="en" class={ darkClass(theme) }>
     <head>
@@ -1225,7 +1235,7 @@ templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userNam
         <div class="flex h-screen">
             @Sidebar(panelPath, theme)
             <div class="flex-1 flex flex-col min-w-0">
-                @Topbar(panelPath, theme, userName)
+                @Topbar(panelPath, theme, userName, csrfToken)
                 <main class="flex-1 overflow-y-auto p-6">
                     <div class={ fmt.Sprintf("max-w-%%s mx-auto", theme.MaxContentWidth) }>
                         @children
@@ -1307,6 +1317,8 @@ templ iconNav(name string) {
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
     case "home":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+    case "clock":
+        <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
     case "mail":
         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
     default:
@@ -1324,7 +1336,7 @@ templ Sidebar(panelPath string, theme viewmodels.ThemeConfig) {
     </aside>
 }
 
-templ Topbar(panelPath string, theme viewmodels.ThemeConfig, userName string) {
+templ Topbar(panelPath string, theme viewmodels.ThemeConfig, userName string, csrfToken string) {
     <header class="bg-white dark:bg-gray-800 shadow-sm px-6 py-3 flex items-center justify-between %s">
         <div class="flex items-center gap-4">
             if theme.SidebarCollapsible {
@@ -1344,11 +1356,14 @@ templ Topbar(panelPath string, theme viewmodels.ThemeConfig, userName string) {
             if userName != "" {
             <span class="text-sm text-gray-700 dark:text-gray-300">{ userName }</span>
             }
-            <a href="%s/logout" class="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">Logout</a>
+            <form action={ templ.SafeURL(fmt.Sprintf("%%s/logout", panelPath)) } method="POST" class="inline">
+                <input type="hidden" name="_csrf" value={ csrfToken } />
+                <button type="submit" class="text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">Logout</button>
+            </form>
         </div>
     </header>
 }
-`, styleFonts, darkDefault, panelName, sidebarNav.String(), stickyClass, panelPath)
+`, styleFonts, darkDefault, panelName, sidebarNav.String(), stickyClass)
 
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 

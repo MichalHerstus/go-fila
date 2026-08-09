@@ -1,6 +1,6 @@
 # go-fila — Phase v0.5+ Specification & Implementation Plan
 
-**Status:** Milestones 1, 2 & 3 implemented (see `session-ses_04c7.md`); M4+ planned.
+**Status:** Milestones 1, 2 & 3 implemented (see `session-ses_04c7.md`); M4 (plugins) planned with finalized design in §6; M5+ planned.
 **Audience:** contributors implementing phase v0.5+
 **Source:** `SPEC.md` Phased Development table row `v0.5+` — *"Plugins, custom actions, hooks, file uploads, CSV export, dark mode, multi-panel"*
 
@@ -162,7 +162,12 @@ Stubs compile out of the box; the user fills them in. The generated handlers imp
 
 ## 6. Milestone 4 — Plugins (generator-time)
 
-### 6.1 Authoring API (new `pkg/plugin/`)
+**Model:** generator-time subprocess. go-fila runs each plugin in a throwaway module, collects a JSON *manifest* of contributions, and merges it into the config before code generation. The generated app keeps its zero runtime dependency on go-fila. Plugin load failure is **fatal** (an explicitly declared plugin that fails to load is a config error), unlike the non-fatal sqlc/tailwind steps.
+
+### 6.1 Prerequisite fix — hooks.go for SQL-only hooks
+`generateHooks()` currently writes `internal/hooks/hooks.go` **only when fn hooks exist**, but handlers emit `hooks.Scope{...}` + `import hooks` for *any* hook block (sql-only included). A config with only SQL hooks — and plugin-added SQL hooks — would generate an app that does not compile. **Fix:** `generateHooks` writes `hooks.go` whenever any hook is declared (fn or sql); stubs are emitted only for fn hook names.
+
+### 6.2 Authoring API (new `pkg/plugin/`)
 Faithful to the SPEC interface, resolved at generate time:
 ```go
 package plugin
@@ -181,16 +186,33 @@ type Configurer interface {
 type Panel struct{ /* internal builders */ }
 
 func NewPanel() *Panel
-func (p *Panel) AddResource(r types.Resource) error   // errors on name collision
-func (p *Panel) AddPage(pg types.Page) error
-func (p *Panel) AddNavigationGroup(g types.NavigationGroup)
-func (p *Panel) AddHook(h types.Hook)
-func (p *Panel) AddSQLFile(name, content string)      // written into the out sql/ tree before sqlc
-func (p *Panel) Manifest() Manifest                   // JSON-serializable snapshot
-```
-`Manifest` reuses `types.Resource`/`Page`/`NavigationGroup`/`Hook`. The structs only carry `yaml:` tags, so JSON round-trips via Go field names — the loader decodes back into the same types. Plugin authors import `github.com/go-fila/go-fila/pkg/plugin`.
+func (p *Panel) AddResource(r Resource) error            // errors on name collision
+func (p *Panel) AddPage(pg Page) error                   // Path defaults to "/"+Name
+func (p *Panel) AddNavigationGroup(g NavigationGroup)
+func (p *Panel) AddSQLFile(name, content string)         // "queries/…" | "migrations/…"
+func (p *Panel) AddHookToResource(resource, action, when string, h Hook) error
+func (p *Panel) Manifest() Manifest                      // JSON-serializable snapshot
 
-### 6.2 YAML (`types/plugin.go`, `types/config.go`, `parser/validator.go`)
+type Manifest struct {
+    Resources       []Resource
+    Pages           []Page
+    Navigation      []NavigationGroup
+    HookAttachments []HookAttachment
+    SQLFiles        map[string]string
+}
+
+type HookAttachment struct {
+    Resource string // existing resource name (e.g. "Customer")
+    Action   string // "create" | "update" | "delete" | <custom action name>
+    When     string // "before" | "after"
+    Hook     Hook   // SQL/proc hooks fully supported; fn hooks deferred to M5
+}
+```
+`pkg/plugin` re-exports `internal/types` under public aliases (`type Resource = types.Resource`, plus `Page`, `Widget`, `NavigationGroup`, `NavigationItem`, `Column`, `Field`, `Hook`, `Hooks`, `ListConfig`, `DetailConfig`, `FormConfig`, `FormAction`, `CardConfig`, `Action`, `Policy`, `ChartConfig`, `Validation`, `HookAttachment`) — plugins are a separate module and cannot import `internal/*`. Structs carry only `yaml:` tags, so JSON round-trips via Go field names; the loader decodes back into the same types. Plugin authors import `github.com/go-fila/go-fila/pkg/plugin`.
+
+**`AddHookToResource` semantics:** appends the hook to the target resource's `Before`/`After` list at merge time (same data the existing generator already emits hooks from). The SQL/proc string binds the current record id as `$1` (parity with the existing `hookCallsStr`, which passes `scope.ID`): `0` for before-create, the new row id after-create, the parsed path id otherwise. Only `$1` (the id) is bound for SQL/proc hooks; `Scope.Values` is available to fn hooks only (M5). **fn hooks from plugins are rejected at merge time in M4** with a fatal error ("requires M5 — use sql"). `proc` hooks are emitted as `CALL/EXEC` and ignored on sqlite.
+
+### 6.3 YAML (`types/plugin.go`, `types/config.go`, `parser/validator.go`)
 ```go
 type PluginConfig struct {
     Name   string         `yaml:"name"`
@@ -202,21 +224,31 @@ Plugins []PluginConfig `yaml:"plugins"`
 ```
 Validate `name`/`source` non-empty; reject duplicate plugin names.
 
-### 6.3 Loader (new `internal/generator/plugin.go`)
-Insert `g.loadPlugins()` in `Generate()` **after** `copySQLFiles()` (plugin SQL must land in the out dir before sqlc runs) and **before** resource/page generation. Per plugin:
-1. Resolve `source`: local directory (starts with `.`/`/`) or module import path.
-2. Write a shim into `os.TempDir()`:
-   - temp `go.mod` requiring `github.com/go-fila/go-fila` and the plugin module; local dirs get a `replace <mod> => <abs>`.
-   - `shim.go`: `p := pluginapi.NewPanel()`, type-assert `Configurer` and call `Configure` with the YAML `config`, then `Register(p)`, `Boot(p)`, and `json.NewEncoder(os.Stdout).Encode(p.Manifest())`.
-3. `go mod tidy` + `go run shim.go` (network needed for module-path sources). **Plugin load failure is a fatal error** — an explicitly declared plugin that fails to load is a config error, unlike the non-fatal sqlc/tailwind steps.
-4. Decode the manifest → append to `cfg.Resources`, `cfg.Pages`, `cfg.Navigation`, `cfg.Hooks`; write `SQLFiles` into `OutDir/sql/{queries,migrations}`; print a summary under `--verbose`.
-5. Add a `--skip-plugins` CLI flag as an escape hatch.
+### 6.4 Loader (new `internal/generator/plugin.go`)
+`Generator` gains `SkipPlugins bool`; insert `g.loadPlugins()` in `Generate()` **after** `copySQLFiles()` (plugin SQL must land in the out dir before sqlc runs) and **before** resource/page generation. Per plugin:
+1. Resolve `source`: local directory (starts with `.`/`/`, read its `go.mod` `module` line) or module import path.
+2. Write a shim into a temp dir (`go-fila-plugin-shim/`):
+   - `go.mod` requiring `github.com/go-fila/go-fila` (resolved via local checkout when found by walking up from `os.Executable()` for a `go.mod` declaring `module github.com/go-fila/go-fila`, else from the proxy) and the plugin module; local dirs get a `replace <mod> => <abs>`.
+   - `main.go`: `p := pluginapi.NewPanel()`; if `New()` returns a `Configurer`, call `Configure` with the YAML `config` embedded as JSON; then `Register(p)`, `Boot(p)`, `json.NewEncoder(os.Stdout).Encode(p.Manifest())`. Any error → non-zero exit.
+3. `go mod tidy` + `go run .` (network needed for module-path sources).
+4. Decode the manifest → append to `cfg.Resources`, `cfg.Pages`, `cfg.Navigation`; resolve each `HookAttachment` against the merged resource set (missing resource/action → fatal; append to the target `Before`/`After` list in plugin order); write `SQLFiles` into `OutDir/sql/<name>` (never overwrite existing files); print a summary under `--verbose`.
+5. Add a `--skip-plugins` CLI flag as an escape hatch (`parseGlobalFlags` + `cmdGenerate` → `gen.SkipPlugins`).
+6. Convention: a plugin module exposes `func New() plugin.Plugin` at its root package; the package name must equal the last element of the module path.
 
-### 6.4 Deliverable
-- Example plugin under `examples/plugins/audit/` that contributes a resource, a dashboard widget, a nav group, and an SQL file.
+### 6.5 Deliverable
+- Example plugin under `examples/plugins/audit/` (`go.mod` module `github.com/go-fila/plugin-audit` + `audit.go`): `New()` → `Configure(table, retention_days)` → `Register` adds an `AuditLog` resource, an `AuditOverview` page with two stat widgets, an "Audit" nav group, `AddSQLFile("migrations/audit_schema.sql")` + `AddSQLFile("queries/audit.sql")`, and an `AddHookToResource("Customer", "delete", "after", …)` demonstrating SQL-hook attachment.
 - README + SPEC documentation.
 
-**Exit criteria:** a sample `audit` plugin loads, contributes an `audit_log` resource + stat widget + nav group; a `go-fila generate` with no plugins produces output byte-identical to the end of M3 (regression).
+### 6.6 Tests
+- Unit: manifest JSON decode → config merge (resource/page/nav append, hook-attachment resolution, missing-resource error, sql-file write + no-overwrite).
+- Loader integration (skip if no `go`): build a tiny plugin module in `t.TempDir()`, run `loadPlugins()`, assert merged config; assert `--skip-plugins` no-ops.
+- Regression: no plugins → output unchanged (existing generator tests keep passing).
+- New: SQL-only hooks now emit a compiling `internal/hooks/hooks.go` (prerequisite fix).
+
+**Exit criteria:** a sample `audit` plugin loads, contributes an `audit_log` resource + stat widget + nav group, and a Customer delete inserts an `audit_log` row via the plugin's SQL hook; `go-fila generate` with no plugins produces output byte-identical to the end of M3 (regression).
+
+### 6.7 M5 (future — designed, not built)
+Plugin **fn hooks**: `Panel.AddHookSource(name, content)` writes a `package hooks` Go file into `OutDir/internal/hooks/` (compiles inside the generated app, so it may reference `hooks.Scope`); the loader tracks plugin-provided fn names and `generateHooks` skips stub generation for them; fn `HookAttachment`s are merged instead of rejected. A bug in plugin hook source surfaces as a generated-app build error, not a go-fila error (same as hand-written user hooks).
 
 ---
 

@@ -16,6 +16,7 @@ type Config struct {
 	Navigation  []NavigationGroup     `yaml:"navigation"`
 	Resources   []Resource            `yaml:"resources"`
 	Pages       []Page                `yaml:"pages"`
+	Plugins     []PluginConfig        `yaml:"plugins"`
 }
 
 // Panel describes the admin panel shell: its id, URL path, display name,
@@ -109,11 +110,21 @@ type AuthConfig struct {
 	RememberMe    bool        `yaml:"remember_me"`
 }
 
-// LoginConfig declares the login field names (e.g. [email, password]) and the
-// redirect target after a successful login.
+// LoginConfig declares the login field names (e.g. [email, password]), the
+// redirect target after a successful login, and optional per-IP rate limiting.
 type LoginConfig struct {
-	Fields   []string `yaml:"fields"`
-	Redirect string   `yaml:"redirect"`
+	Fields    []string        `yaml:"fields"`
+	Redirect  string          `yaml:"redirect"`
+	RateLimit *LoginRateLimit `yaml:"rate_limit"`
+}
+
+// LoginRateLimit throttles login attempts per client IP. When the block is
+// present the generated auth package rejects attempts beyond MaxAttempts in a
+// WindowSeconds sliding window with a 429-able login error page; successful
+// logins reset the counter. Absent => no throttling (legacy behavior).
+type LoginRateLimit struct {
+	MaxAttempts   int `yaml:"max_attempts"`
+	WindowSeconds int `yaml:"window_seconds"`
 }
 
 // NavigationGroup is a labelled group of sidebar links, sorted by its Sort

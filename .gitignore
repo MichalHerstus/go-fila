@@ -5,3 +5,4 @@ admin/
 *.log
 session-*.md
 mssql.txt
+pgs.txt

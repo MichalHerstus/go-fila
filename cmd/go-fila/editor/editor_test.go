@@ -119,8 +119,34 @@ func TestResourcePages(t *testing.T) {
 	}
 }
 
-// TestSyncReport verifies the sync analysis flags a missing query and that
-// generating queries writes files.
+// TestProcPages exercises the hook/action editors with proc-configured items,
+// ensuring the three-way kind picker and the Proc field render without panic.
+func TestProcPages(t *testing.T) {
+	cfg := testConfig()
+	cfg.Resources[0].Form.Create.Hooks = &types.Hooks{
+		After: []types.Hook{{Name: "archive_created", Proc: "sp_archive_user"}},
+	}
+	cfg.Resources[0].Actions[0].Proc = "sp_archive_user"
+	cfg.Resources[0].Actions[0].Query = ""
+	e := New(cfg, "testdata/go-fila.yaml")
+
+	hs := cfg.Resources[0].Form.Create.Hooks
+	get := func() *[]types.Hook { return &hs.After }
+	if p := e.hookListPage(&cfg.Resources[0].Form.Create.Hooks, false); p == nil {
+		t.Error("hookListPage: nil primitive")
+	}
+	if p := e.hookPage(get, 0); p == nil {
+		t.Error("hookPage: nil primitive")
+	}
+	if p := e.actionsPage(0); p == nil {
+		t.Error("actionsPage: nil primitive")
+	}
+	if p := e.actionPage(0, 0); p == nil {
+		t.Error("actionPage: nil primitive")
+	}
+}
+
+
 func TestSyncReport(t *testing.T) {
 	dir := t.TempDir()
 	migrations := filepath.Join(dir, "sql", "migrations")

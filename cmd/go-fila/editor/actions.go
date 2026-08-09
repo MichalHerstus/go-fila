@@ -49,6 +49,7 @@ func (e *Editor) actionPage(idx, aidx int) tview.Primitive {
 		e.yesno(f, "Requires confirmation", a.RequiresConfirmation, func(v bool) { a.RequiresConfirmation = v })
 		e.yesno(f, "Bulk action", a.Bulk, func(v bool) { a.Bulk = v })
 		e.long(f, "Query", a.Query, func(v string) { a.Query = v })
+		e.str(f, "Proc", a.Proc, func(v string) { a.Proc = v })
 		f.AddButton("Hooks", func() {
 			if a.Hooks == nil {
 				a.Hooks = &types.Hooks{}
