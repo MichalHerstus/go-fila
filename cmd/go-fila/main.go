@@ -7,6 +7,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,10 +19,15 @@ import (
 // version is the current go-fila release version.
 const version = "0.5.1"
 
+//go:embed AGENTS_for_generated_dashboard.md
+var agentsForGeneratedDashboard string
+
 // main is the CLI entry point. It requires at least one argument and
 // dispatches to cmdInit, cmdGenerate or cmdValidate, or prints the version.
 // Missing or unknown arguments print the usage text and exit with code 1.
 func main() {
+	ensureAgentGuide()
+
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
@@ -42,6 +48,23 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+}
+
+// ensureAgentGuide writes the embedded AGENTS.md guide into the current
+// working directory when an AGENTS.md file does not already exist there. It
+// runs on every invocation so a freshly cloned project (or a directory without
+// the guide) always gets the agent instructions. Failures are reported to
+// stderr but do not abort the CLI.
+func ensureAgentGuide() {
+	target := filepath.Join(".", "AGENTS.md")
+	if _, err := os.Stat(target); err == nil {
+		return
+	}
+	if err := os.WriteFile(target, []byte(agentsForGeneratedDashboard), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not write %s: %v\n", target, err)
+		return
+	}
+	fmt.Printf("Created %s (agent guide for generated dashboards)\n", target)
 }
 
 // printUsage prints the CLI help text to stdout, listing the available
