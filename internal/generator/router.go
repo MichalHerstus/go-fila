@@ -115,13 +115,13 @@ func (g *Generator) generateRouter() error {
 
 	for _, p := range g.Config.Pages {
 		capID := strings.ToUpper(g.Config.Panel.ID[:1]) + g.Config.Panel.ID[1:]
-		handlerName := fmt.Sprintf("pages.%s%s(db)", capID, p.Name)
+		handlerName := fmt.Sprintf("pages.%s%s(db)", capID, pageIdent(p.Name))
 		if p.Default {
 			code += fmt.Sprintf("\t\tr.Get(\"/\", %s)\n", handlerName)
 		}
 		path := p.Path
 		if path == "" {
-			path = "/" + p.Name
+			path = "/" + pageIdent(p.Name)
 		}
 		if path != "/" {
 			code += fmt.Sprintf("\t\tr.Get(\"%s\", %s)\n", path, handlerName)
@@ -169,6 +169,31 @@ func securityHeaders(next http.Handler) http.Handler {
 	return os.WriteFile(filepath.Join(dir, "router.go"), []byte(code), 0644)
 }
 
+// pageIdent converts a page name into a safe identifier used for the generated
+// Go/templ function names and file names. The raw name is preserved for display
+// (page heading, nav label); the identifier replaces each run of
+// whitespace/punctuation with a single underscore (e.g. "Order Management"
+// -> "Order_Management"). Names containing spaces are never emitted verbatim.
+func pageIdent(name string) string {
+	var b strings.Builder
+	underscore := false
+	for _, r := range name {
+		if r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			if underscore && b.Len() > 0 {
+				b.WriteRune('_')
+			}
+			underscore = false
+			b.WriteRune(r)
+		} else {
+			underscore = true
+		}
+	}
+	if b.Len() == 0 {
+		return name
+	}
+	return b.String()
+}
+
 // generatePage writes one page handler per configured Page. The handler
 // initializes an empty widget list, runs the DB queries declared by each
 // widget (stat, chart, table, stats_grid), packs them into a viewmodels.PageData
@@ -177,7 +202,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // Returns: an error on write failure.
 func (g *Generator) generatePage(p types.Page) error {
 	dir := filepath.Join(g.OutDir, "internal/panel/pages")
-	name := p.Name
+	name := pageIdent(p.Name)
 	panelID := g.Config.Panel.ID
 	panelPath := g.Config.Panel.Path
 	capitalID := strings.ToUpper(panelID[:1]) + panelID[1:]
@@ -387,7 +412,7 @@ func %s(db *sql.DB) http.HandlerFunc {
     }
 }
 `, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
-		handlerName, strings.Join(widgetInit, "\n"), name, panelID, panelPath, viewName)
+		handlerName, strings.Join(widgetInit, "\n"), p.Name, panelID, panelPath, viewName)
 
 	return os.WriteFile(filepath.Join(dir, name+".go"), []byte(code), 0644)
 }

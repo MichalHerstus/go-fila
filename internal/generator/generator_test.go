@@ -992,3 +992,163 @@ func TestGenerateActionRBAC(t *testing.T) {
 		t.Error("ActionRBACMiddleware must not be emitted without action policies")
 	}
 }
+
+// formUnionConfig returns a resource whose create and update forms have
+// differing field sets: update adds status + created_at (datetime) that are
+// absent from create. This exercises BUG-4 (update-only fields were dropped
+// from the shared edit form).
+func formUnionConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{
+				Name:  "Customer",
+				Label: "Customer",
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "string"},
+							{Name: "email", Type: "email"},
+						},
+					},
+					Update: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "string"},
+							{Name: "email", Type: "email"},
+							{Name: "status", Type: "string"},
+							{Name: "created_at", Type: "datetime"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// visitOnlyConfig returns a resource where the create form has a field marked
+// visible:[create] only, and update has a boolean field marked visible:[update].
+func visitOnlyConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Label: "User",
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "string"},
+							{Name: "password", Type: "password", Visible: []string{"create"}},
+						},
+					},
+					Update: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "string"},
+							{Name: "active", Type: "boolean", Visible: []string{"update"}},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestGenerateFormUnionFields(t *testing.T) {
+	dir := t.TempDir()
+	g := New(formUnionConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	form, err := os.ReadFile(filepath.Join(dir, "internal/views/resources/customer", "form.templ"))
+	if err != nil {
+		t.Fatalf("read form.templ: %v", err)
+	}
+	formStr := string(form)
+	for _, want := range []string{
+		`if !data.IsCreate {`,
+		`name="status"`,
+		`name="created_at"`,
+		`viewmodels.TimeInputValue(data.Item, "created_at")`,
+		`viewmodels.ItemValue(data.Item, "status")`,
+	} {
+		if !strings.Contains(formStr, want) {
+			t.Errorf("form.templ missing %q", want)
+		}
+	}
+	if strings.Contains(formStr, `fmt.Sprintf("%v"`) {
+		t.Error("form.templ must not render values with raw fmt.Sprintf")
+	}
+}
+
+func TestGenerateFormVisibleGuards(t *testing.T) {
+	dir := t.TempDir()
+	g := New(visitOnlyConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	form, err := os.ReadFile(filepath.Join(dir, "internal/views/resources/user", "form.templ"))
+	if err != nil {
+		t.Fatalf("read form.templ: %v", err)
+	}
+	formStr := string(form)
+	for _, want := range []string{
+		`name="password"`,
+		`if data.IsCreate {`,
+		`name="active"`,
+		`if !data.IsCreate {`,
+		`viewmodels.BoolValue(data.Item["active"])`,
+	} {
+		if !strings.Contains(formStr, want) {
+			t.Errorf("form.templ missing %q", want)
+		}
+	}
+}
+
+func TestGenerateBooleanFormValue(t *testing.T) {
+	dir := t.TempDir()
+	g := New(visitOnlyConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	upd, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "update.go"))
+	if err != nil {
+		t.Fatalf("read update.go: %v", err)
+	}
+	if want := `r.FormValue("active") == "true"`; !strings.Contains(string(upd), want) {
+		t.Errorf("update.go missing boolean value expr %q", want)
+	}
+}
+
+func TestGenerateViewmodelsStringify(t *testing.T) {
+	dir := t.TempDir()
+	g := New(formUnionConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	models, err := os.ReadFile(filepath.Join(dir, "internal/viewmodels", "models.go"))
+	if err != nil {
+		t.Fatalf("read models.go: %v", err)
+	}
+	modelsStr := string(models)
+	for _, want := range []string{
+		`func Stringify(v interface{}) string {`,
+		`case sql.NullBool:`,
+		`case sql.NullTime:`,
+		`func TimeInputValue(item map[string]interface{}, name string) string {`,
+		`func DateInputValue(item map[string]interface{}, name string) string {`,
+		"\"time\"",
+	} {
+		if !strings.Contains(modelsStr, want) {
+			t.Errorf("models.go missing %q", want)
+		}
+	}
+}

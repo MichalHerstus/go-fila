@@ -41,7 +41,7 @@ make                    # builds the dashboard binary + assets
 
 **Auth table DDL:** Postgres uses `SERIAL`/`TIMESTAMPTZ`; SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`/`datetime('now')`.
 
-Flags: `init --db <dsn> --config <yaml> --out <dir> --force`.
+Flags: `init --db <dsn> --config <yaml> --out <dir> --force` (short variants `-d`, `-c`, `-o`, `-f`).
 
 ### `edit` — Interactive YAML config editor
 
@@ -76,7 +76,7 @@ go mod tidy && go build -o admin .
 
 `sqlc generate` and `npx tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
 
-Flags: `generate --config <yaml> --out <dir> --force --verbose`. `--out` basename becomes the module name.
+Flags: `generate --config <yaml> --out <dir> --force --verbose` (short variants `-c`, `-o`, `-f`, `-v`). `--out` basename becomes the module name.
 
 ## Driver support (postgres default, sqlite opt-in, mssql opt-in)
 
@@ -147,7 +147,7 @@ All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 | Bulk | Raw SQL per bulk action name, looped once per selected id (switch dispatch) |
 | CSV Export | Raw SQL SELECT + `encoding/csv` |
 
-Create/update avoid SQLC params because `r.FormValue` returns `string` but SQLC generates typed structs (`int32` for `INTEGER`). Raw SQL `ExecContext` accepts `interface{}`.
+Create/update avoid SQLC params because `r.FormValue` returns `string` but SQLC generates typed structs (`int32` for `INTEGER`). Raw SQL `ExecContext` accepts `interface{}`. **Boolean fields are emitted as `r.FormValue(name) == "true"`** (a Go `bool`), not a raw `r.FormValue(name)` string — otherwise an unchecked checkbox posts `""` and Postgres fails with `invalid input syntax for type boolean: ""` (BUG-3). mssql/pgx/mattn accept a `bool` value directly.
 
 Detail/update SQLC calls must cast the id to `idGoType()` — sqlite ids are `int64`, postgres `int32`. A literal `int32(id)` breaks the sqlite build.
 
@@ -225,6 +225,15 @@ Hooks attach to `FormAction` (create/update/delete) and `Action`. `internal/gene
 
 ### Select options render from `data.Fields`, not static HTML
 Form select options are rendered at runtime by looping `data.Fields` for the matching field and ranging its `Options`. The generated handler wires `options_query` into `ColumnDef.Options` (`formFieldDefsWithOpts`); the templ compares with `viewmodels.OptionValue(data.Item[f.Name])` because sqlc populates `sql.NullInt64`/`sql.NullString` (a bare `fmt.Sprintf("%v")` on `{1 true}` won't match key `"1"`).
+
+### Value rendering is centralized in `viewmodels.Stringify`
+Every value-to-text render in the generated app routes through `viewmodels.Stringify(v)` (in `viewmodels/models.go`), which unwraps `nil`, plain scalars, `time.Time` and every `sql.Null*` type (`NullString`, `NullInt32`, `NullInt64`, `NullFloat64`, `NullBool`, `NullTime`) — returning `""` for `nil`/invalid NULL instead of Go struct text. This fixes two failure classes seen on mssql/postgres (nullable columns) and on every create form:
+- *BUG-1*: create forms no longer render empty values as `value="<nil>"` (was `fmt.Sprintf("%v", nil)`).
+- *BUG-2*: nullable columns no longer leak `{1 true}` / `{Spojovací materiál true}` in list rows, detail views, or edit-form inputs.
+`OptionValue` and `ItemValue` are thin wrappers over `Stringify`; the boolean checkbox checked-state uses `viewmodels.BoolValue` (true only for the true state, so unset/NULL renders unchecked rather than `<nil>`); the datetime/date renderers and form inputs use `viewmodels.TimeValue` + `TimeInputValue`/`DateInputValue`, which unwrap `sql.NullTime` and format in the browser's local `2006-01-02T15:04` / `2006-01-02` layout. The field renderers in `renderers.templ` (`renderBadge`, `renderBoolean`, `renderEmail`, …, `renderFloat`) take `interface{}` and call `Stringify`; a NULL boolean renders an empty cell. `renderers.templ` is emitted per resource view dir AND into `internal/views/components`, and must be run through `prefixImports` (it now references `viewmodels`).
+
+### Shared create/update form renders the union of both field sets
+`generateFormTempl` builds the form from the **union** of `r.Form.Create.Fields` + `r.Form.Update.Fields` (deduped by name, create order first then update-only fields appended). Each field is emitted with `if data.IsCreate { … }` (create-only) or `if !data.IsCreate { … }` (update-only) guards honoring the field's `visible:` list, so update-only fields (e.g. `status`, `created_at`) are no longer dropped from the edit form. This fixes BUG-4: before, the shared template was generated from the create fields only, so a field present only in `update` was silently omitted and the edit POST submitted `""` (failing e.g. Postgres `invalid input syntax for type timestamp`). When only one of create/update exists the guards are omitted (behavior unchanged). `hasFile`/`hasPicker`/enctype are computed over the merged set.
 
 ### options_query option rows
 `buildOptionsLoader` scans into `interface{}` then keys the map with `fmt.Sprintf("%v", val)` — the `id`/value column is usually an `INTEGER` (`int64`), scanning into `string` fails silently. `findSQLCQuery` strips a trailing `;` from the query body (it is embedded as `SELECT a,b FROM (... ) AS _opt`, a trailing `;` is a syntax error).

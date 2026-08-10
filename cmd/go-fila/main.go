@@ -17,7 +17,7 @@ import (
 )
 
 // version is the current go-fila release version.
-const version = "0.5.1"
+const version = "0.8.0"
 
 //go:embed AGENTS_for_generated_dashboard.md
 var agentsForGeneratedDashboard string
@@ -84,26 +84,27 @@ Usage:
 Flags:
   --config, -c   Path to YAML config file (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
-  --db DSN       Introspect database (postgres://..., sqlserver://... or sqlite file path)
-  --force        Overwrite existing files
-  --verbose      Enable verbose logging
-  --skip-plugins Skip loading declared plugins (generate cannot use them)
-  --demo         Scaffold a populated sqlite demo project (init only)
-  --admin-password PASSWORD
+  --db, -d DSN   Introspect database (postgres://..., sqlserver://... or sqlite file path)
+  --force, -f    Overwrite existing files
+  --verbose, -v  Enable verbose logging
+  --skip-plugins, -s
+                 Skip loading declared plugins (generate cannot use them)
+  --demo, -D     Scaffold a populated sqlite demo project (init only)
+  --admin-password, -p PASSWORD
                  Set the initial admin password for --demo / --db scaffolding
                  (a random one is generated and printed when omitted)`)
 }
 
 // parseGlobalFlags scans os.Args[2:] for the global flags shared by all
-// subcommands. Flags that take a value (--config/-c, --out/-o, --db) consume
-// the following argument.
+// subcommands. Flags that take a value (--config/-c, --out/-o, --db/-d,
+// --admin-password/-p) consume the following argument.
 // Returns: configPath (YAML config file path, default "go-fila.yaml"),
 // outDir (output directory, default "./admin"),
 // force (overwrite existing files), verbose (enable verbose logging),
 // skipPlugins (skip loading declared plugins),
 // demo (scaffold the populated sqlite demo project instead of the plain
 // starter when initializing),
-// db (connection string for --db introspection mode),
+// db (connection string for --db/-d introspection mode),
 // adminPassword (initial admin password for --demo / --db scaffolding, or "").
 func parseGlobalFlags() (configPath, outDir, db, adminPassword string, force, verbose, skipPlugins, demo bool) {
 	configPath = "go-fila.yaml"
@@ -128,23 +129,23 @@ func parseGlobalFlags() (configPath, outDir, db, adminPassword string, force, ve
 				outDir = args[i+1]
 				i++
 			}
-		case "--db":
+		case "--db", "-d":
 			if i+1 < len(args) {
 				db = args[i+1]
 				i++
 			}
-		case "--admin-password":
+		case "--admin-password", "-p":
 			if i+1 < len(args) {
 				adminPassword = args[i+1]
 				i++
 			}
-		case "--force":
+		case "--force", "-f":
 			force = true
-		case "--verbose":
+		case "--verbose", "-v":
 			verbose = true
-		case "--skip-plugins":
+		case "--skip-plugins", "-s":
 			skipPlugins = true
-		case "--demo":
+		case "--demo", "-D":
 			demo = true
 		}
 	}

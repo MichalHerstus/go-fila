@@ -1395,6 +1395,8 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 		} else if f.Type == "file" || f.Type == "image" {
 			hasFile = true
 			valExprs = append(valExprs, fmt.Sprintf("saveUploadedFile(r, %q)", f.Name))
+		} else if f.Type == "boolean" {
+			valExprs = append(valExprs, fmt.Sprintf("r.FormValue(%q) == \"true\"", f.Name))
 		} else {
 			valExprs = append(valExprs, fmt.Sprintf("r.FormValue(%q)", f.Name))
 		}
@@ -1690,6 +1692,8 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 		if f.Type == "file" || f.Type == "image" {
 			hasFile = true
 			valExprs = append(valExprs, fmt.Sprintf("saveUploadedFile(r, %q)", f.Name))
+		} else if f.Type == "boolean" {
+			valExprs = append(valExprs, fmt.Sprintf("r.FormValue(%q) == \"true\"", f.Name))
 		} else {
 			valExprs = append(valExprs, fmt.Sprintf("r.FormValue(%q)", f.Name))
 		}

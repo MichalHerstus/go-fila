@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -198,11 +199,10 @@ func ActionRBACMiddleware(resource string) func(http.Handler) http.Handler {
             _ = old.Save(r, w)
         }
 
-        session, err := Store.New(r, "go-fila-session")
-        if err != nil {
-            http.Error(w, "Session error", http.StatusInternalServerError)
-            return
-        }
+        // Store.New always returns a usable fresh session; its error only
+        // reports that the incoming (possibly stale) cookie failed to decode,
+        // which is irrelevant here because the new session is saved anyway.
+        session, _ := Store.New(r, "go-fila-session")
 
         session.Values["user_id"] = userID
         session.Values["role"] = userRole
@@ -393,12 +393,45 @@ func GetSession(r *http.Request) (*sessions.Session, error) {
     return Store.Get(r, "go-fila-session")
 }
 
+// clearSessionCookie deletes the session cookie on the response, used when the
+// stored cookie can no longer be decoded.
+func clearSessionCookie(w http.ResponseWriter) {
+    http.SetCookie(w, &http.Cookie{
+        Name:     "go-fila-session",
+        Value:    "",
+        Path:     "/",
+        MaxAge:   -1,
+        HttpOnly: true,
+        Secure:   os.Getenv("APP_ENV") == "production",
+        SameSite: http.SameSiteLaxMode,
+    })
+}
+
+// getOrNewSession returns the request's session. When the stored cookie is
+// unreadable (e.g. signed with an earlier ephemeral SESSION_SECRET after a
+// restart), it clears the stale cookie and returns a fresh anonymous session
+// instead of an error. The boolean reports whether the session was reset.
+func getOrNewSession(r *http.Request, w http.ResponseWriter) (*sessions.Session, bool, bool) {
+    if Store == nil {
+        Init()
+    }
+    session, err := Store.Get(r, "go-fila-session")
+    if err == nil {
+        return session, false, true
+    }
+    clearSessionCookie(w)
+    fresh := sessions.NewSession(Store, "go-fila-session")
+    opts := *Store.Options
+    fresh.Options = &opts
+    return fresh, true, true
+}
+
 // CSRFToken returns the session-bound CSRF token, generating and persisting a
 // new one on first access. The token must be embedded in every state-changing
 // form (hidden _csrf input) or header (X-CSRF-Token) of the rendered page.
 func CSRFToken(r *http.Request, w http.ResponseWriter) string {
-    session, err := GetSession(r)
-    if err != nil {
+    session, _, ok := getOrNewSession(r, w)
+    if !ok {
         return ""
     }
     if tok, ok := session.Values["csrf_token"].(string); ok && tok != "" {
@@ -431,9 +464,17 @@ func CSRFMiddleware(next http.Handler) http.Handler {
             next.ServeHTTP(w, r)
             return
         }
-        session, err := GetSession(r)
-        if err != nil {
+        session, reset, ok := getOrNewSession(r, w)
+        if !ok {
             http.Error(w, "Forbidden", http.StatusForbidden)
+            return
+        }
+        if reset && r.URL.Path == %s {
+            // The session cookie was unreadable (e.g. signed with an earlier
+            // ephemeral secret after a restart), so there is no expected token
+            // to compare against. Let the login request through so the user can
+            // establish a fresh session instead of a hard 403.
+            next.ServeHTTP(w, r)
             return
         }
         expected, _ := session.Values["csrf_token"].(string)
@@ -445,6 +486,8 @@ func CSRFMiddleware(next http.Handler) http.Handler {
     })
 }
 `
+	loginPath := panelPath + "/login"
+	sessionCode = fmt.Sprintf(sessionCode, strconv.Quote(loginPath))
 
 	if err := os.WriteFile(filepath.Join(dir, "session.go"), []byte(sessionCode), 0644); err != nil {
 		return err

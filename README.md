@@ -93,12 +93,15 @@ go-fila version        Print version
 Flags:
   --config, -c   Config file path (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
-  --db DSN       Introspect database (postgres://..., sqlserver://... or sqlite file path)
-  --force        Overwrite existing files
-  --admin-password PASSWORD
+  --db, -d DSN   Introspect database (postgres://..., sqlserver://... or sqlite file path)
+  --force, -f    Overwrite existing files
+  --admin-password, -p PASSWORD
                  Initial admin password for --demo / --db scaffolding (random
                  one-time password generated + printed when omitted)
-  --verbose      Verbose logging
+  --verbose, -v  Verbose logging
+  --skip-plugins, -s
+                 Skip loading declared plugins (generate cannot use them)
+  --demo, -D     With init: seed sqlite demo DB (login admin@demo.test, password generated)
 ```
 
 `sqlc generate` and `npx tailwindcss` failures during `go-fila generate` are non-fatal. Re-run them manually in the output directory.

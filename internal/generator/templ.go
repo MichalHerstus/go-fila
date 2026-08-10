@@ -101,7 +101,7 @@ func (g *Generator) generateViews() error {
 // Returns: an error if any templ file fails to write.
 func (g *Generator) generateResourceViews(r types.Resource) error {
 	viewDir := filepath.Join(g.OutDir, "internal/views/resources", strings.ToLower(r.Name))
-	if err := os.WriteFile(filepath.Join(viewDir, "renderers.templ"), []byte(renderersSource()), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(viewDir, "renderers.templ"), []byte(prefixImports(renderersSource(), g.moduleImport("internal/viewmodels"))), 0644); err != nil {
 		return err
 	}
 	if r.List != nil {
@@ -161,9 +161,9 @@ func renderCell(fieldType, expr string) string {
 	case "gps":
 		return fmt.Sprintf(`@renderGPS(%s)`, expr)
 	case "integer", "string", "text", "password":
-		return fmt.Sprintf(`{ fmt.Sprintf("%%v", %s) }`, expr)
+		return fmt.Sprintf(`{ viewmodels.Stringify(%s) }`, expr)
 	default:
-		return fmt.Sprintf(`{ fmt.Sprintf("%%v", %s) }`, expr)
+		return fmt.Sprintf(`{ viewmodels.Stringify(%s) }`, expr)
 	}
 }
 
@@ -491,33 +491,72 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 	resLower := strings.ToLower(r.Name)
 	panelPath := g.Config.Panel.Path
 
-	formFields := r.Form.Create
-	isCreate := formFields != nil
-	if !isCreate {
-		formFields = r.Form.Update
+	both := r.Form.Create != nil && r.Form.Update != nil
+	var createFields, updateFields []types.Field
+	if r.Form.Create != nil {
+		createFields = r.Form.Create.Fields
 	}
-	if formFields == nil {
-		formFields = &types.FormAction{}
+	if r.Form.Update != nil {
+		updateFields = r.Form.Update.Fields
+	}
+
+	// merged is the union of create + update fields (deduped by name, create
+	// order first then update-only appended). Each entry records which context
+	// it belongs to so the shared form can render the right fields per mode.
+	var merged []struct {
+		f        types.Field
+		inCreate bool
+		inUpdate bool
+	}
+	seen := map[string]int{}
+	for _, f := range createFields {
+		merged = append(merged, struct {
+			f        types.Field
+			inCreate bool
+			inUpdate bool
+		}{f: f, inCreate: true, inUpdate: fieldIn(updateFields, f.Name)})
+		seen[f.Name] = len(merged) - 1
+	}
+	for _, f := range updateFields {
+		if idx, ok := seen[f.Name]; ok {
+			merged[idx].inUpdate = true
+		} else {
+			merged = append(merged, struct {
+				f        types.Field
+				inCreate bool
+				inUpdate bool
+			}{f: f, inCreate: false, inUpdate: true})
+		}
 	}
 
 	var inputs strings.Builder
 
-	for _, f := range formFields.Fields {
+	for _, e := range merged {
+		f := e.f
+		if !e.inCreate && !e.inUpdate {
+			continue
+		}
+		showInCreate := e.inCreate && visibleInContext(f, "create")
+		showInUpdate := e.inUpdate && visibleInContext(f, "update")
+		if !showInCreate && !showInUpdate {
+			continue
+		}
+		guardOpen := ""
+		guardClose := ""
+		if both {
+			if showInCreate && !showInUpdate {
+				guardOpen = "                if data.IsCreate {\n"
+				guardClose = "                }\n"
+			} else if !showInCreate && showInUpdate {
+				guardOpen = "                if !data.IsCreate {\n"
+				guardClose = "                }\n"
+			}
+		}
+		inputs.WriteString(guardOpen)
+
 		label := f.Label
 		if label == "" {
 			label = f.Name
-		}
-		if isCreate && len(f.Visible) > 0 {
-			hasCreate := false
-			for _, v := range f.Visible {
-				if v == "create" {
-					hasCreate = true
-					break
-				}
-			}
-			if !hasCreate {
-				continue
-			}
 		}
 
 		inputs.WriteString(fmt.Sprintf(`            <div>
@@ -529,13 +568,13 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 		} else {
 			switch f.Type {
 			case "text":
-				inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="3" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
+				inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="3" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">{ viewmodels.ItemValue(data.Item, %q) }</textarea>
 `, f.Name, f.Name, f.Name))
 			case "password":
 				inputs.WriteString(fmt.Sprintf(`                <input type="password" id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
 			case "email":
-				inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="email" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 			case "select":
 				inputs.WriteString(fmt.Sprintf(`                <select id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2">
@@ -551,19 +590,19 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 `, f.Name, f.Name, f.Name, f.Name))
 			case "boolean":
 				inputs.WriteString(fmt.Sprintf(`                <input type="checkbox" id="%s" name="%s" value="true" class="rounded border-gray-300 dark:border-gray-600 text-brand-primary focus:ring-brand-primary"
-                    if fmt.Sprintf("%%v", data.Item[%q]) == "true" {
+                    if viewmodels.BoolValue(data.Item[%q]) {
                         checked
                     }
                 />
 `, f.Name, f.Name, f.Name))
 			case "integer", "float":
-				inputs.WriteString(fmt.Sprintf(`                <input type="number" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="number" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 			case "datetime":
-				inputs.WriteString(fmt.Sprintf(`                <input type="datetime-local" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="datetime-local" id="%s" name="%s" value={ viewmodels.TimeInputValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 			case "date":
-				inputs.WriteString(fmt.Sprintf(`                <input type="date" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="date" id="%s" name="%s" value={ viewmodels.DateInputValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 			case "file":
 				inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
@@ -572,19 +611,19 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 				inputs.WriteString(fmt.Sprintf(`                <input type="file" id="%s" name="%s" accept="image/*" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name))
 			case "badge":
-				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="badge value" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="badge value" />
 `, f.Name, f.Name, f.Name))
 			case "relation":
-				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="related ID" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="related ID" />
 `, f.Name, f.Name, f.Name))
 			case "json":
-				inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 font-mono text-xs">{ fmt.Sprintf("%%v", data.Item[%q]) }</textarea>
+				inputs.WriteString(fmt.Sprintf(`                <textarea id="%s" name="%s" rows="5" class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 font-mono text-xs">{ viewmodels.ItemValue(data.Item, %q) }</textarea>
 `, f.Name, f.Name, f.Name))
 			case "gps":
-				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="lat, lng" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" placeholder="lat, lng" />
 `, f.Name, f.Name, f.Name))
 			default:
-				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ fmt.Sprintf("%%v", data.Item[%q]) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+				inputs.WriteString(fmt.Sprintf(`                <input type="text" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } class="w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
 `, f.Name, f.Name, f.Name))
 			}
 		}
@@ -601,19 +640,20 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 		}
 
 		inputs.WriteString("            </div>\n")
+		inputs.WriteString(guardClose)
 	}
 
 	hasFile := false
-	for _, f := range formFields.Fields {
-		if f.Type == "file" || f.Type == "image" {
+	for _, e := range merged {
+		if e.f.Type == "file" || e.f.Type == "image" {
 			hasFile = true
 			break
 		}
 	}
 
 	hasPicker := false
-	for _, f := range formFields.Fields {
-		if isPickerField(f) {
+	for _, e := range merged {
+		if isPickerField(e.f) {
 			hasPicker = true
 			break
 		}
@@ -669,6 +709,31 @@ templ %s(data *viewmodels.FormData) {
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "form.templ"), []byte(code), 0644)
+}
+
+// fieldIn reports whether a field named name appears in the given field list.
+func fieldIn(fields []types.Field, name string) bool {
+	for _, f := range fields {
+		if f.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// visibleInContext reports whether a field should render in the given form
+// context ("create" or "update"). A field with no visible list renders in both
+// contexts; otherwise it renders only in the listed contexts.
+func visibleInContext(f types.Field, context string) bool {
+	if len(f.Visible) == 0 {
+		return true
+	}
+	for _, v := range f.Visible {
+		if v == context {
+			return true
+		}
+	}
+	return false
 }
 
 // isPickerField reports whether a form field should render as a modal record
@@ -1097,7 +1162,7 @@ func (g *Generator) generatePageViews(p types.Page) error {
 	panelID := g.Config.Panel.ID
 
 	capitalID := strings.ToUpper(panelID[:1]) + panelID[1:]
-	templName := capitalID + p.Name
+	templName := capitalID + pageIdent(p.Name)
 	code := fmt.Sprintf(`package views
 
 import (
@@ -1115,7 +1180,7 @@ templ %s(data *viewmodels.PageData) {
 `, templName)
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
-	return os.WriteFile(filepath.Join(viewDir, p.Name+".templ"), []byte(code), 0644)
+	return os.WriteFile(filepath.Join(viewDir, pageIdent(p.Name)+".templ"), []byte(code), 0644)
 }
 
 // detectGridColumns finds the column count of the first stats_grid widget on a
@@ -1159,8 +1224,18 @@ func (g *Generator) generateLayoutViews() error {
 `, panelPath, strings.ToLower(item.Resource), label))
 			}
 			if item.Page != "" {
-				sidebarNav.WriteString(fmt.Sprintf(`            <a href="%s/%s" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-brand-primary/10 hover:text-brand-primary mx-2 rounded-md">%s</a>
-`, panelPath, item.Page, item.Page))
+				pagePath := item.Page
+				for _, pg := range g.Config.Pages {
+					if pg.Name == item.Page {
+						pagePath = pg.Path
+						if pagePath == "" {
+							pagePath = "/" + pageIdent(item.Page)
+						}
+						break
+					}
+				}
+				sidebarNav.WriteString(fmt.Sprintf(`            <a href="%s%s" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-brand-primary/10 hover:text-brand-primary mx-2 rounded-md">%s</a>
+`, panelPath, pagePath, item.Page))
 			}
 			if item.Type == "link" {
 				target := ""
@@ -1377,7 +1452,7 @@ templ Topbar(panelPath string, theme viewmodels.ThemeConfig, userName string, cs
 // Returns: an error on write failure.
 func (g *Generator) generateComponentViews() error {
 	dir := filepath.Join(g.OutDir, "internal/views/components")
-	return os.WriteFile(filepath.Join(dir, "renderers.templ"), []byte(renderersSource()), 0644)
+	return os.WriteFile(filepath.Join(dir, "renderers.templ"), []byte(prefixImports(renderersSource(), g.moduleImport("internal/viewmodels"))), 0644)
 }
 
 // renderersSource returns the templ source for the shared field renderers and
@@ -1390,14 +1465,14 @@ func renderersSource() string {
 
 import (
     "fmt"
-    "time"
+    "internal/viewmodels"
 )
 
 // --- Field Renderers ---
 
 templ renderBadge(value interface{}, color string) {
-    if value != nil {
-        {{ text := fmt.Sprintf("%v", value) }}
+    {{ text := viewmodels.Stringify(value) }}
+    if text != "" {
         {{ c := color }}
         if c == "" {
             {{ c = "gray" }}
@@ -1407,97 +1482,96 @@ templ renderBadge(value interface{}, color string) {
 }
 
 templ renderBoolean(value interface{}) {
-    if value != nil {
-        if b, ok := value.(bool); ok && b {
-            <span class="text-green-600">
-                <svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-            </span>
-        } else {
-            <span class="text-red-600">
-                <svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-            </span>
-        }
+    {{ s := viewmodels.Stringify(value) }}
+    if s == "true" {
+        <span class="text-green-600">
+            <svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+            </svg>
+        </span>
+    } else if s == "false" {
+        <span class="text-red-600">
+            <svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+        </span>
     }
 }
 
 templ renderEmail(value interface{}) {
-    if value != nil {
-        {{ email := fmt.Sprintf("%v", value) }}
+    {{ email := viewmodels.Stringify(value) }}
+    if email != "" {
         <a href={ templ.SafeURL(fmt.Sprintf("mailto:%s", email)) } class="text-brand-primary hover:text-brand-primary/80 underline">{ email }</a>
     }
 }
 
 templ renderImage(value interface{}) {
-    if value != nil {
-        {{ src := fmt.Sprintf("%v", value) }}
+    {{ src := viewmodels.Stringify(value) }}
+    if src != "" {
         <img src={ src } alt="" class="w-10 h-10 rounded-full object-cover" />
     }
 }
 
 templ renderFile(value interface{}) {
-    if value != nil {
-        {{ name := fmt.Sprintf("%v", value) }}
+    {{ name := viewmodels.Stringify(value) }}
+    if name != "" {
         <a href={ templ.SafeURL(name) } class="text-brand-primary hover:text-brand-primary/80 underline" download>{ name }</a>
     }
 }
 
 templ renderDateTime(value interface{}) {
-    if value != nil {
-        if t, ok := value.(time.Time); ok {
-            <span class="text-sm text-gray-600 dark:text-gray-300">{ t.Format("Jan 02, 2006 15:04") }</span>
-        } else {
-            <span class="text-sm text-gray-600 dark:text-gray-300">{ fmt.Sprintf("%v", value) }</span>
-        }
+    {{ t, ok := viewmodels.TimeValue(value) }}
+    if ok {
+        <span class="text-sm text-gray-600 dark:text-gray-300">{ t.Format("Jan 02, 2006 15:04") }</span>
+    } else if s := viewmodels.Stringify(value); s != "" {
+        <span class="text-sm text-gray-600 dark:text-gray-300">{ s }</span>
     }
 }
 
 templ renderDate(value interface{}) {
-    if value != nil {
-        if t, ok := value.(time.Time); ok {
-            <span class="text-sm text-gray-600 dark:text-gray-300">{ t.Format("Jan 02, 2006") }</span>
-        } else {
-            <span class="text-sm text-gray-600 dark:text-gray-300">{ fmt.Sprintf("%v", value) }</span>
-        }
+    {{ t, ok := viewmodels.TimeValue(value) }}
+    if ok {
+        <span class="text-sm text-gray-600 dark:text-gray-300">{ t.Format("Jan 02, 2006") }</span>
+    } else if s := viewmodels.Stringify(value); s != "" {
+        <span class="text-sm text-gray-600 dark:text-gray-300">{ s }</span>
     }
 }
 
 templ renderSelect(value interface{}) {
-    if value != nil {
-        {{ text := fmt.Sprintf("%v", value) }}
+    {{ text := viewmodels.Stringify(value) }}
+    if text != "" {
         <span class="text-sm text-gray-900 dark:text-gray-100">{ text }</span>
     }
 }
 
 templ renderRelation(value interface{}) {
-    if value != nil {
-        {{ text := fmt.Sprintf("%v", value) }}
+    {{ text := viewmodels.Stringify(value) }}
+    if text != "" {
         <a href="#" class="text-brand-primary hover:text-brand-primary/80 underline">{ text }</a>
     }
 }
 
 templ renderJSON(value interface{}) {
-    if value != nil {
-        <pre class="text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-700 p-2 rounded overflow-x-auto max-w-xs">{ fmt.Sprintf("%v", value) }</pre>
+    {{ text := viewmodels.Stringify(value) }}
+    if text != "" {
+        <pre class="text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-700 p-2 rounded overflow-x-auto max-w-xs">{ text }</pre>
     }
 }
 
 templ renderFloat(value interface{}) {
-    if value != nil {
+    {{ s := viewmodels.Stringify(value) }}
+    if s != "" {
         if f, ok := value.(float64); ok {
             <span class="text-sm text-gray-900 dark:text-gray-100">{ fmt.Sprintf("%.2f", f) }</span>
         } else {
-            <span class="text-sm text-gray-900 dark:text-gray-100">{ fmt.Sprintf("%v", value) }</span>
+            <span class="text-sm text-gray-900 dark:text-gray-100">{ s }</span>
         }
     }
 }
 
 templ renderGPS(value interface{}) {
-    if value != nil {
-        {{ coords := fmt.Sprintf("%v", value) }}
+    {{ coords := viewmodels.Stringify(value) }}
+    if coords != "" {
         <a href={ templ.SafeURL(fmt.Sprintf("https://www.google.com/maps?q=%s", coords)) } target="_blank" rel="noopener noreferrer" class="text-brand-primary hover:text-brand-primary/80 underline">{ coords }</a>
     }
 }

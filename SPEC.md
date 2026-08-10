@@ -526,13 +526,15 @@ Usage:
 Flags:
   --config, -c   Path to YAML config file (default: go-fila.yaml)
   --out, -o      Output directory (default: ./admin)
-  --db DSN       Introspect database (postgres://... or sqlite file path)
-  --force        Overwrite existing files
-  --demo         With init: seed sqlite demo DB; login admin@demo.test (password generated)
-  --admin-password PASSWORD
+  --db, -d DSN   Introspect database (postgres://... or sqlite file path)
+  --force, -f    Overwrite existing files
+  --demo, -D     With init: seed sqlite demo DB; login admin@demo.test (password generated)
+  --admin-password, -p PASSWORD
                  Set the initial admin password for --demo / --db scaffolding
                  (a random one-time password is generated and printed when omitted)
-  --verbose      Enable verbose logging
+  --verbose, -v  Enable verbose logging
+  --skip-plugins, -s
+                 Skip loading declared plugins (generate cannot use them)
 ```
 
 ### Generated Dashboard Runtime Flags
