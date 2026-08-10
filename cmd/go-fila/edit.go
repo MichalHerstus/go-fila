@@ -11,6 +11,18 @@ import (
 
 func cmdEdit() {
 	configPath, _, _, _, _, _, _, _ := parseGlobalFlags()
+	apiKey, model, prompt, dryRun := parseEditFlags(os.Args[2:])
+
+	// D7: AI-assisted editing (opt-in). When --prompt is set, the AI path runs
+	// instead of the TUI; the config is sent to OpenRouter (consent is the user
+	// supplying the key + prompt). --dry-run previews without writing.
+	if prompt != "" {
+		if err := editAI(openRouterBaseURL, configPath, apiKey, model, prompt, dryRun); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {

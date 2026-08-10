@@ -173,7 +173,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Audit log resource | Greenfield (strong existing infra: `hooks.Scope`, `RETURNING id`, `auth.UserName`) |
 | CSV import + export column selection | Export exists (all list cols); import + selection new |
 | SQLite stored procedures (batch-in-table) | Greenfield |
-| AI-assisted `go-fila edit` (OpenRouter) | Planned (D7) |
+| AI-assisted `go-fila edit` (OpenRouter) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, single retry, httptest stub) |
 | Drop Node.js/npm from the dashboard build | Planned (D8) |
 
 ---
@@ -310,7 +310,7 @@ missing proc → clean `httperr` page.
 
 ### D7 — AI-assisted config editing (`go-fila edit` via OpenRouter)
 
-**Status: planned (2026-08-10).** Non-interactive and opt-in: AI flags live on `edit`
+**Status: done (2026-08-10).** Non-interactive and opt-in: AI flags live on `edit`
 only; without `--prompt` the current TUI runs unchanged. Provider locked to OpenRouter
 (base URL hardcoded — the only supported provider). Decisions taken (2026-08-10):
 one-shot write + `--dry-run` preview; `--model` flag defaulting to `openrouter/auto`;

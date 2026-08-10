@@ -92,7 +92,15 @@ Flags:
   --demo, -D     Scaffold a populated sqlite demo project (init only)
   --admin-password, -p PASSWORD
                  Set the initial admin password for --demo / --db scaffolding
-                 (a random one is generated and printed when omitted)`)
+                 (a random one is generated and printed when omitted)
+
+AI-assisted edit (edit only):
+  --prompt TEXT  Edit go-fila.yaml via OpenRouter instead of the TUI
+                 (the full config is sent to OpenRouter)
+                 file://PATH reads the prompt from a file (~ expands to home)
+  --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env)
+  --model MODEL  Model id (default: openrouter/auto)
+  --dry-run      Print proposed YAML + diff without writing`)
 }
 
 // parseGlobalFlags scans os.Args[2:] for the global flags shared by all

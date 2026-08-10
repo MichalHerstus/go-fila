@@ -28,6 +28,9 @@ go-fila init --db "sqlserver://user:pass@localhost:1433?database=mydb"   # MSSQL
 
 # Write your SQL schema and queries in sql/
 # Edit go-fila.yaml to configure panel, resources, pages, auth
+# (interactive TUI: go-fila edit — or AI-assisted: go-fila edit --prompt "…"
+# which edits the config via OpenRouter; --apikey KEY, --model, --dry-run flags,
+# and file://PATH prompts supported)
 
 # Generate the admin panel
 go-fila generate              # produces ./admin/
@@ -86,6 +89,7 @@ go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working exampl
                        with --demo flag it generates fully functional demo dashboard including data 
                        with --db flag it introspects an existing DB and generates config + SQL
 go-fila edit           Interactive YAML config editor (TUI)
+                       with --prompt it edits go-fila.yaml via OpenRouter instead (AI-assisted)
 go-fila generate       Generate admin panel Go application
 go-fila validate       Validate YAML + verify SQLC references
 go-fila version        Print version
@@ -102,6 +106,14 @@ Flags:
   --skip-plugins, -s
                  Skip loading declared plugins (generate cannot use them)
   --demo, -D     With init: seed sqlite demo DB (login admin@demo.test, password generated)
+
+AI-assisted edit (edit only):
+  --prompt TEXT  Edit go-fila.yaml via OpenRouter instead of the TUI
+                 (the full config is sent to OpenRouter)
+                 file://PATH reads the prompt from a file (~ expands to home)
+  --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env)
+  --model MODEL  Model id (default: openrouter/auto)
+  --dry-run      Print proposed YAML + diff without writing
 ```
 
 `sqlc generate` and `npx tailwindcss` failures during `go-fila generate` are non-fatal. Re-run them manually in the output directory.

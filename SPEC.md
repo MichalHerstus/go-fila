@@ -535,6 +535,14 @@ Flags:
   --verbose, -v  Enable verbose logging
   --skip-plugins, -s
                  Skip loading declared plugins (generate cannot use them)
+
+AI-assisted edit (edit only):
+  --prompt TEXT  Edit go-fila.yaml via OpenRouter instead of the TUI
+                 (the full config is sent to OpenRouter)
+                 file://PATH reads the prompt from a file (~ expands to home)
+  --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env)
+  --model MODEL  Model id (default: openrouter/auto)
+  --dry-run      Print proposed YAML + diff without writing
 ```
 
 ### Generated Dashboard Runtime Flags
