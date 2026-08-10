@@ -3,6 +3,7 @@ package schema
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/go-fila/go-fila/internal/types"
@@ -159,6 +160,40 @@ CREATE TABLE customers (
 		if !contains(yaml, want) {
 			t.Errorf("yaml missing %q", want)
 		}
+	}
+}
+
+func TestRawBody(t *testing.T) {
+	const file = "-- name: ListUsers :many\nSELECT u.id, u.name\nFROM users u\nORDER BY u.id;\n\n-- name: CountUsers :one\nSELECT COUNT(*) FROM users;\n"
+	qs := ParseQueriesForFile(file, "users.sql")
+	lu, ok := qs["ListUsers"]
+	if !ok {
+		t.Fatal("ListUsers missing")
+	}
+	if want := "SELECT u.id, u.name\nFROM users u\nORDER BY u.id;"; lu.RawBody != want {
+		t.Errorf("RawBody = %q, want %q", lu.RawBody, want)
+	}
+	if !strings.Contains(lu.Body, "FROM users u") || strings.Contains(lu.Body, "\n") {
+		t.Errorf("Body must stay collapsed single-line, got %q", lu.Body)
+	}
+	if lu.File != "users.sql" {
+		t.Errorf("File = %q", lu.File)
+	}
+}
+
+func TestRewriteQueryBody(t *testing.T) {
+	const file = "-- name: ListUsers :many\nSELECT u.id, u.name\nFROM users u;\n\n-- name: CountUsers :one\nSELECT COUNT(*) FROM users;\n"
+	rewritten := RewriteQueryBody(file, "ListUsers", "SELECT id, email FROM users;")
+	for _, want := range []string{"-- name: ListUsers :many", "SELECT id, email FROM users;", "-- name: CountUsers :one", "SELECT COUNT(*) FROM users;"} {
+		if !strings.Contains(rewritten, want) {
+			t.Errorf("rewritten file missing %q:\n%s", want, rewritten)
+		}
+	}
+	if strings.Contains(rewritten, "u.name") {
+		t.Errorf("old body leaked into rewrite:\n%s", rewritten)
+	}
+	if RewriteQueryBody(file, "MissingQuery", "SELECT 1") != file {
+		t.Error("rewriting an unknown query must leave the file unchanged")
 	}
 }
 

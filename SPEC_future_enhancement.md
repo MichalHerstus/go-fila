@@ -173,6 +173,8 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Audit log resource | Greenfield (strong existing infra: `hooks.Scope`, `RETURNING id`, `auth.UserName`) |
 | CSV import + export column selection | Export exists (all list cols); import + selection new |
 | SQLite stored procedures (batch-in-table) | Greenfield |
+| AI-assisted `go-fila edit` (OpenRouter) | Planned (D7) |
+| Drop Node.js/npm from the dashboard build | Planned (D8) |
 
 ---
 
@@ -306,12 +308,98 @@ missing proc → clean `httperr` page.
 
 ---
 
+### D7 — AI-assisted config editing (`go-fila edit` via OpenRouter)
+
+**Status: planned (2026-08-10).** Non-interactive and opt-in: AI flags live on `edit`
+only; without `--prompt` the current TUI runs unchanged. Provider locked to OpenRouter
+(base URL hardcoded — the only supported provider). Decisions taken (2026-08-10):
+one-shot write + `--dry-run` preview; `--model` flag defaulting to `openrouter/auto`;
+API key via `--apikey` with `OPENROUTER_API_KEY` env fallback.
+
+**Command shape:**
+```
+go-fila edit --apikey KEY [--model MODEL] --prompt "Change dashboard title to: Order management"
+go-fila edit [--apikey KEY] --prompt "…" --dry-run      # preview proposed YAML + diff, no write
+```
+
+**Design:**
+- `cmdEdit` branches to an AI path when `--prompt` is set; a second flag pass
+  (`parseEditFlags` in a new `cmd/go-fila/ai.go`) picks out `--apikey/--prompt/--model/
+  --dry-run`, leaving `parseGlobalFlags`'s tuple untouched (only `edit` understands them).
+- Load via `parser.ParseFile(configPath)`, marshal current YAML. Build messages: a system
+  role with the output contract ("return ONLY the complete new go-fila.yaml in a ```yaml```
+  fence; keep `version`; don't invent keys") + a user message of the embedded compact
+  schema cheat-sheet (`//go:embed ai_spec.md`, ~3–4 KB — the 33 KB `SPEC.md` stays out of
+  the prompt to keep tokens low) + the current YAML + the user's instruction.
+- POST `https://openrouter.ai/api/v1/chat/completions` (stdlib `net/http`,
+  `Authorization: Bearer`; the key is never logged/echoed), `temperature: 0`, ~90 s HTTP
+  client timeout. On parse/validate failure, retry **once** feeding the validator error
+  back; on failure exit 1 with the original file untouched.
+- `extractYAMLBlock` (```yaml``` fence with fallback heuristics) → `yaml.Unmarshal` into
+  `types.Config` → `parser.Validate`. `--dry-run` prints the proposed YAML + a compact `±`
+  line diff and exits 0 without writing; otherwise writes `configPath` (0644) and prints
+  the same diff summary.
+- Config-only scope: SQL/`sql/queries` files are not edited by the AI path. Full
+  `go-fila.yaml` is transmitted to OpenRouter (documented in usage text — consent is the
+  user supplying the key + prompt).
+
+**Files:** new `cmd/go-fila/ai.go` (`parseEditFlags`, `openrouterChat`, `buildEditPrompt`,
+`extractYAMLBlock`, `applyAIDiff` with single retry, `diffLines`) + new `ai_spec.md`
+(embedded schema reference); `edit.go` branch; `main.go` usage text.
+
+**Tests / exit criteria:** httptest OpenRouter stub — happy path writes the file + prints a
+diff; retry-on-invalid yields a valid second attempt; `--dry-run` never writes; fence
+extraction; flag/env key resolution (missing key → clear error). Docs: AGENTS.md CLI
+section + `SPEC.md` usage line (config is sent to OpenRouter).
+
+---
+
+### D8 — Drop Node.js/npm from the generated dashboard build
+
+**Status: planned (2026-08-10).** Goal: `make` (and `go-fila generate`) must not require
+node/npm; generated-app output stays byte-identical and runtime stays offline. The only
+npm consumers are Tailwind CSS compilation (`npx tailwindcss`) and Chart.js vendoring
+(`cp node_modules/...`). Decisions taken (2026-08-10): Tailwind via the **standalone
+binary** (PATH + optional `make get-tailwind` download, sqlc-style toolchain model);
+Chart.js **embedded** into go-fila via `//go:embed`.
+
+**Design:**
+- **Chart.js**: commit `chart.umd.min.js` @ **4.4.1** (MIT, license banner intact) at
+  `internal/generator/assets/chart.umd.min.js`; `//go:embed` it and copy to
+  `OutDir/static/js/chart.js` during `generateAssets` (mkdir `static/js`). Charts then work
+  after `go-fila generate` alone — a bare `go build` in `admin/` serves them, zero network.
+  go-fila binary grows ~180 KB. `/static/js/chart.js` reference in `templ.go` unchanged.
+- **Tailwind**: `RunTailwind` in `tailwind.go` swaps `npx tailwindcss` for the
+  `tailwindcss` binary (PATH, honoring a `TAILWIND` env override; still non-fatal from
+  `cmdGenerate`). `generateStaticAssets` **stops emitting `package.json`** (keeps
+  `tailwind.config.js` + `styles.css`). Rewritten generated `Makefile`
+  (`makefile.go`): remove `deps`/`npm install`; `build: css sqlc templ`; `css:`
+  runs `$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css
+  --minify` with `TAILWIND ?= tailwindcss`; new optional `get-tailwind` target maps
+  `uname -s/-m` (linux/macos × x64/arm64; Windows excluded as today) and curls the pinned
+  **v3.4.x** standalone binary to `.tools/tailwindcss`, printing the
+  `make TAILWIND=$(CURDIR)/.tools/tailwindcss css` usage.
+- **Docs + hints**: `cmdGenerate` warning/Next-steps drop npm (`make css` /
+  install the standalone binary); update `AGENTS.md`, `README.md` (prereq table),
+  `SPEC.md`, `AGENTS_for_generated_dashboard.md`.
+
+**Tests / exit criteria:** generator unit — `generateAssets` emits `static/js/chart.js`
+equal to the embedded bytes and **no** `package.json`; the generated `Makefile` contains no
+`npm` and its `css` target invokes `$(TAILWIND)`. E2E — `go-fila init --demo` + `make css`
+with the standalone binary produces `static/css/styles.css` and `static/js/chart.js`; a bare
+`go build` serves chart.js.
+
+---
+
 ### Order, dependencies & cross-cutting
 
 **D2 → D3 → D5 → D6.** Rationale: D2's audit INSERT weaving and transactional single-row
 ops establish the op-wrapping pattern that D3 (transactional import) and D6 (transactional
 proc batches) mirror; D3's `buildCreateParams` refactor is a hard dependency for CSV import
-reuse; D5 and D6 are independent and smallest — last.
+reuse; D5 and D6 are independent and smallest — last. **D7 is independent of D2–D6**
+(CLI-only, no generator changes; smallest surface) and can slot in alongside any milestone.
+**D8 (no-npm build) is independent of D2–D7** — it touches only the build/asset tooling, not
+generated-app handlers or the editor.
 
 Cross-cutting for every milestone: version bump `0.8.0 → 0.9.0`; docs
 (`SPEC.md`, `README.md`, `AGENTS.md`) updated per milestone; every milestone ends with

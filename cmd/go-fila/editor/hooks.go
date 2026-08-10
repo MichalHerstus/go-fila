@@ -8,10 +8,10 @@ import (
 // hooksPage manages the before/after hook lists of a Hooks block.
 func (e *Editor) hooksPage(hooks **types.Hooks, title string) tview.Primitive {
 	return e.formShell(title+" / Hooks", func(f *tview.Form) {
-		f.AddButton("Before hooks", func() {
+		e.addButton(f, "Before hooks", func() {
 			e.showPage("hooks/before", e.hookListPage(hooks, true))
 		})
-		f.AddButton("After hooks", func() {
+		e.addButton(f, "After hooks", func() {
 			e.showPage("hooks/after", e.hookListPage(hooks, false))
 		})
 	})

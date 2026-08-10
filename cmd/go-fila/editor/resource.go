@@ -2,7 +2,10 @@ package editor
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
+	"github.com/go-fila/go-fila/internal/schema"
 	"github.com/go-fila/go-fila/internal/types"
 	"github.com/rivo/tview"
 )
@@ -56,14 +59,90 @@ func (e *Editor) resourcePage(idx int) tview.Primitive {
 		e.pick(f, "ID type", idTypeOptions, r.IDType, func(v string) { r.IDType = v })
 		e.str(f, "ID column", r.IDColumn, func(v string) { r.IDColumn = v })
 		e.head(f, "Views")
-		f.AddButton("List", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/list", e.listPage(idx)) })
-		f.AddButton("Card", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/card", e.cardPage(idx)) })
-		f.AddButton("Detail", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/detail", e.detailPage(idx)) })
-		f.AddButton("Form", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/form", e.formPage(idx)) })
+		e.addButton(f, "List", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/list", e.listPage(idx)) })
+		e.addButton(f, "Card", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/card", e.cardPage(idx)) })
+		e.addButton(f, "Detail", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/detail", e.detailPage(idx)) })
+		e.addButton(f, "Form", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/form", e.formPage(idx)) })
 		e.head(f, "Behavior")
-		f.AddButton("Actions", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/actions", e.actionsPage(idx)) })
-		f.AddButton("Policies", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/policies", e.policiesPage(idx)) })
+		e.addButton(f, "Actions", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/actions", e.actionsPage(idx)) })
+		e.addButton(f, "Policies", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/policies", e.policiesPage(idx)) })
+		e.head(f, "Queries")
+		e.addButton(f, "SQL queries", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/sql", e.sqlQueriesPage(idx)) })
 	})
+}
+
+// sqlQueriesForResource collects the SQLC query names a resource references
+// (list/count/detail/form queries, populate queries and field options_query),
+// deduplicated and sorted.
+func sqlQueriesForResource(r *types.Resource) []string {
+	var names []string
+	seen := map[string]bool{}
+	add := func(n string) {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		names = append(names, n)
+	}
+	addFields := func(fs []types.Field) {
+		for _, f := range fs {
+			add(f.OptionsQuery)
+		}
+	}
+	if r.List != nil {
+		add(r.List.Query)
+		add(r.List.CountQuery)
+	}
+	if r.Detail != nil {
+		add(r.Detail.Query)
+		addFields(r.Detail.Fields)
+	}
+	if r.Card != nil {
+		addFields(r.Card.Fields)
+	}
+	formActions := []*types.FormAction{nil, nil, nil}
+	if r.Form != nil {
+		formActions[0], formActions[1], formActions[2] = r.Form.Create, r.Form.Update, r.Form.Delete
+	}
+	for _, fa := range formActions {
+		if fa == nil {
+			continue
+		}
+		add(fa.Query)
+		add(fa.PopulateQuery)
+		addFields(fa.Fields)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// sqlQueriesPage lists the resource's SQLC query definitions; Enter opens the
+// SQL editor for the selected query.
+func (e *Editor) sqlQueriesPage(idx int) tview.Primitive {
+	r := &e.cfg.Resources[idx]
+	qdir := e.queriesDir()
+	qs := schema.ParseQueries(qdir)
+	names := sqlQueriesForResource(r)
+
+	list := tview.NewList().ShowSecondaryText(true)
+	list.SetBorder(true).SetBorderColor(colBorder).SetTitle("SQL queries — " + r.Name + "  (enter: edit, esc: back)")
+	list.SetMainTextColor(colText)
+	list.SetSecondaryTextColor(colMuted)
+	for _, name := range names {
+		qname := name
+		sub := "not found in " + qdir
+		if q, ok := qs[qname]; ok {
+			sub = q.File
+		}
+		list.AddItem(qname, sub, 0, func() {
+			e.showPage("resources/"+fmt.Sprint(idx)+"/sql/"+qname, e.sqlEditPage(qname))
+		})
+	}
+	if len(names) == 0 {
+		list.AddItem("(no SQLC queries referenced)", "", 0, nil)
+	}
+	return list
 }
 
 // ensureList lazily allocates the resource list config.
@@ -78,12 +157,17 @@ func ensureList(r *types.Resource) *types.ListConfig {
 func (e *Editor) listPage(idx int) tview.Primitive {
 	r := &e.cfg.Resources[idx]
 	l := ensureList(r)
+	qc := e.newSQLViewer()
 	return e.formShell("List: "+r.Name, func(f *tview.Form) {
-		e.str(f, "Query", l.Query, func(v string) { l.Query = v })
-		e.str(f, "Count query", l.CountQuery, func(v string) { l.CountQuery = v })
+		var renderQ, renderCQ func()
+		e.str(f, "Query", l.Query, func(v string) { l.Query = v; renderQ() })
+		renderQ = qc.addRow(f, "", func() string { return l.Query })
+		e.str(f, "Count query", l.CountQuery, func(v string) { l.CountQuery = v; renderCQ() })
+		renderCQ = qc.addRow(f, "", func() string { return l.CountQuery })
 		e.num(f, "Per page", l.PerPage, func(v int) { l.PerPage = v })
 		e.str(f, "Default sort", l.DefaultSort, func(v string) { l.DefaultSort = v })
-		f.AddButton("Columns", func() {
+		qc.reloadButton(f)
+		e.addButton(f, "Columns", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/columns", e.columnsPage(idx))
 		})
 	})
@@ -103,15 +187,24 @@ func (e *Editor) cardPage(idx int) tview.Primitive {
 		}
 		return out
 	}
+	qc := e.newSQLViewer()
 	return e.formShell("Card: "+r.Name, func(f *tview.Form) {
 		e.num(f, "Columns", c.Columns, func(v int) { c.Columns = v })
 		e.num(f, "Rows", c.Rows, func(v int) { c.Rows = v })
 		e.str(f, "Default sort", c.DefaultSort, func(v string) { c.DefaultSort = v })
 		e.pick(f, "Kanban field", kanbanOpts(), c.KanbanField, func(v string) { c.KanbanField = v })
-		f.AddButton("Fields", func() {
+		// The generated card reuses the list query; show it for reference.
+		qc.addRow(f, "Query (List)", func() string {
+			if r.List != nil {
+				return r.List.Query
+			}
+			return ""
+		})
+		qc.reloadButton(f)
+		e.addButton(f, "Fields", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/card-fields", e.cardFieldsPage(idx))
 		})
-		f.AddButton("Searchable", func() {
+		e.addButton(f, "Searchable", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/card-searchable", e.stringListPage("resources/"+fmt.Sprint(idx)+"/card-searchable", "Card searchable", func() []string {
 				return c.Searchable
 			}, func(v []string) { c.Searchable = v }))
@@ -126,14 +219,18 @@ func (e *Editor) detailPage(idx int) tview.Primitive {
 		r.Detail = &types.DetailConfig{}
 	}
 	d := r.Detail
+	qc := e.newSQLViewer()
 	return e.formShell("Detail: "+r.Name, func(f *tview.Form) {
-		e.str(f, "Query", d.Query, func(v string) { d.Query = v })
-		f.AddButton("Params", func() {
+		var renderQ func()
+		e.str(f, "Query", d.Query, func(v string) { d.Query = v; renderQ() })
+		renderQ = qc.addRow(f, "", func() string { return d.Query })
+		qc.reloadButton(f)
+		e.addButton(f, "Params", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/detail-params", e.stringMapPage("resources/"+fmt.Sprint(idx)+"/detail-params", "Detail params", func() map[string]string {
 				return d.Params
 			}, func(v map[string]string) { d.Params = v }))
 		})
-		f.AddButton("Fields", func() {
+		e.addButton(f, "Fields", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/detail-fields", e.detailFieldsPage(idx))
 		})
 	})
@@ -146,15 +243,15 @@ func (e *Editor) formPage(idx int) tview.Primitive {
 		r.Form = &types.FormConfig{}
 	}
 	return e.formShell("Form: "+r.Name, func(f *tview.Form) {
-		f.AddButton("Create", func() {
+		e.addButton(f, "Create", func() {
 			e.ensureFormAction(r, "create")
 			e.showPage("resources/"+fmt.Sprint(idx)+"/form-create", e.formActionPage(idx, "create"))
 		})
-		f.AddButton("Update", func() {
+		e.addButton(f, "Update", func() {
 			e.ensureFormAction(r, "update")
 			e.showPage("resources/"+fmt.Sprint(idx)+"/form-update", e.formActionPage(idx, "update"))
 		})
-		f.AddButton("Delete", func() {
+		e.addButton(f, "Delete", func() {
 			e.ensureFormAction(r, "delete")
 			e.showPage("resources/"+fmt.Sprint(idx)+"/form-delete", e.formActionPage(idx, "delete"))
 		})
@@ -197,18 +294,23 @@ func (e *Editor) formActionPage(idx int, which string) tview.Primitive {
 		fa = r.Form.Delete
 		label = "Delete"
 	}
+	qc := e.newSQLViewer()
 	return e.formShell(label+" form: "+r.Name, func(f *tview.Form) {
-		e.str(f, "Query", fa.Query, func(v string) { fa.Query = v })
-		e.str(f, "Populate query", fa.PopulateQuery, func(v string) { fa.PopulateQuery = v })
-		f.AddButton("Populate params", func() {
+		var renderQ, renderPQ func()
+		e.str(f, "Query", fa.Query, func(v string) { fa.Query = v; renderQ() })
+		renderQ = qc.addRow(f, "", func() string { return fa.Query })
+		e.str(f, "Populate query", fa.PopulateQuery, func(v string) { fa.PopulateQuery = v; renderPQ() })
+		renderPQ = qc.addRow(f, "", func() string { return fa.PopulateQuery })
+		qc.reloadButton(f)
+		e.addButton(f, "Populate params", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/"+which+"-params", e.stringMapPage("resources/"+fmt.Sprint(idx)+"/"+which+"-params", label+" populate params", func() map[string]string {
 				return fa.PopulateParams
 			}, func(v map[string]string) { fa.PopulateParams = v }))
 		})
-		f.AddButton("Fields", func() {
+		e.addButton(f, "Fields", func() {
 			e.showPage("resources/"+fmt.Sprint(idx)+"/"+which+"-fields", e.formFieldsPage(idx, which))
 		})
-		f.AddButton("Hooks", func() {
+		e.addButton(f, "Hooks", func() {
 			ensureHooks(fa)
 			e.showPage("resources/"+fmt.Sprint(idx)+"/"+which+"-hooks", e.hooksPage(&fa.Hooks, label))
 		})

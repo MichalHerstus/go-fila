@@ -16,6 +16,7 @@ import (
 type QueryRef struct {
 	Name   string
 	Origin string // human-readable location, e.g. "User > list.query"
+	Inline bool   // true when the reference is inline SQL, not a SQLC query name
 }
 
 // References is the full set of YAML-side references extracted from a config.
@@ -92,7 +93,14 @@ func (refs *References) addQuery(name, origin string) {
 			return
 		}
 	}
-	refs.Queries = append(refs.Queries, QueryRef{Name: name, Origin: origin})
+	refs.Queries = append(refs.Queries, QueryRef{Name: name, Origin: origin, Inline: isInlineSQL(name)})
+}
+
+// isInlineSQL reports whether a YAML query value is literal SQL rather than a
+// SQLC query name. Query names are single identifiers without whitespace;
+// inline SQL always contains spaces (SELECT/UPDATE/INSERT/DELETE/WITH …).
+func isInlineSQL(s string) bool {
+	return strings.ContainsAny(s, " \t\n")
 }
 
 func (refs *References) addColumn(resource, col string) {

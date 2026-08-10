@@ -19,16 +19,17 @@ type syncReport struct {
 	tables      []schema.Table
 	queries     map[string]schema.Query
 	missingQ    []schema.QueryRef
-	missingTabs []string // resource names with no matching table
-	missingCols []string // "resource: column" entries with no matching column
-	fkTargets   []string // FK target tables lacking a List query
+	inlineQ     []schema.QueryRef // inline SQL refs (widgets/actions), not query names
+	missingTabs []string          // resource names with no matching table
+	missingCols []string          // "resource: column" entries with no matching column
+	fkTargets   []string          // FK target tables lacking a List query
 	err         string
 }
 
 // analyze runs the sync analysis over the config's schema/queries dirs.
 func (e *Editor) analyze() *syncReport {
 	rep := &syncReport{}
-	base := filepath.Dir(e.configPath)
+	base := e.sqlBase()
 	schemaDir := e.cfg.SQLC.SchemaDir
 	if schemaDir == "" {
 		schemaDir = "./sql/migrations"
@@ -50,7 +51,18 @@ func (e *Editor) analyze() *syncReport {
 	rep.queries = schema.ParseQueries(queriesDir)
 
 	refs := schema.CollectReferences(e.cfg)
+	seenInline := map[string]bool{}
 	for _, q := range refs.Queries {
+		if q.Inline {
+			// Inline SQL (widget/action queries) is complete SQL in the YAML —
+			// it can never resolve to a -- name: definition, so it is reported
+			// separately as informational, not as a missing query.
+			if !seenInline[q.Name] {
+				seenInline[q.Name] = true
+				rep.inlineQ = append(rep.inlineQ, q)
+			}
+			continue
+		}
 		if _, ok := rep.queries[q.Name]; !ok {
 			rep.missingQ = append(rep.missingQ, q)
 		}
@@ -100,7 +112,8 @@ func tableHasColumn(t schema.Table, col string) bool {
 	return false
 }
 
-// syncPage renders the sync analysis and action buttons.
+// syncPage renders a simple list of schema tables, query definitions and the
+// missing-reference summary, plus the apply/navigation buttons.
 func (e *Editor) syncPage() tview.Primitive {
 	rep := e.analyze()
 	tv := tview.NewTextView().SetDynamicColors(true)
@@ -135,6 +148,12 @@ func (e *Editor) syncPage() tview.Primitive {
 	for _, q := range rep.missingQ {
 		fmt.Fprintf(tv, "    %s  [::d](%s)[-:-:-]\n", q.Name, q.Origin)
 	}
+	if len(rep.inlineQ) > 0 {
+		fmt.Fprintf(tv, "  [green]inline SQL (widget/action queries, not query names): %d[-:-:-]\n", len(rep.inlineQ))
+		for _, q := range rep.inlineQ {
+			fmt.Fprintf(tv, "    [::d](%s)[-:-:-]\n", q.Origin)
+		}
+	}
 	color = "green"
 	if len(rep.missingTabs) > 0 {
 		color = "red"
@@ -164,16 +183,13 @@ func (e *Editor) syncPage() tview.Primitive {
 	actions.SetBorder(false)
 	actions.SetButtonBackgroundColor(colAccent)
 	actions.SetButtonTextColor(tcell.ColorWhite)
-	actions.AddButton("Generate missing queries", func() {
+	e.addButton(actions, "Generate missing queries", func() {
 		e.generateMissingQueries(rep)
 	})
-	actions.AddButton("Import resources from schema", func() {
-		e.importResourcesFromSchema(rep)
-	})
-	actions.AddButton("Refresh", func() {
+	e.addButton(actions, "Refresh", func() {
 		e.refreshPage("sync", e.syncPage())
 	})
-	actions.AddButton("Back", e.back)
+	e.addButton(actions, "Back", e.back)
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
 	flex.AddItem(tv, 0, 1, true)
@@ -184,7 +200,7 @@ func (e *Editor) syncPage() tview.Primitive {
 // generateMissingQueries writes SQLC query files for schema tables that do not
 // yet have a file in sql/queries. Existing files are never overwritten.
 func (e *Editor) generateMissingQueries(rep *syncReport) {
-	base := filepath.Dir(e.configPath)
+	base := e.sqlBase()
 	queriesDir := e.cfg.SQLC.QueriesDir
 	if queriesDir == "" {
 		queriesDir = "./sql/queries"
@@ -205,7 +221,7 @@ func (e *Editor) generateMissingQueries(rep *syncReport) {
 		written = append(written, fname)
 	}
 	if len(written) == 0 {
-		e.toast("Nothing to generate")
+		e.toast("Nothing to generate: all queries present")
 		return
 	}
 	sort.Strings(written)
@@ -213,7 +229,8 @@ func (e *Editor) generateMissingQueries(rep *syncReport) {
 }
 
 // importResourcesFromSchema appends resource blocks for schema tables that are
-// not yet mapped to a resource, using the driver-aware YAML builder.
+// not yet mapped to a resource, using the driver-aware YAML builder. Kept out
+// of the UI; used by tests.
 func (e *Editor) importResourcesFromSchema(rep *syncReport) {
 	driver := schema.Driver(e.cfg)
 	existing := map[string]bool{}

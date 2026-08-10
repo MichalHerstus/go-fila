@@ -102,7 +102,7 @@ func (e *Editor) head(form *tview.Form, title string) {
 
 // back adds a "Back" button that pops to the previous page.
 func (e *Editor) backButton(form *tview.Form) {
-	form.AddButton("Back", e.back)
+	e.addButton(form, "Back", e.back)
 }
 
 // showPage pushes a named page and focuses it.
@@ -110,6 +110,7 @@ func (e *Editor) showPage(name string, prim tview.Primitive) {
 	e.pages.AddPage(name, prim, true, true)
 	e.pages.SwitchToPage(name)
 	e.history = append(e.history, name)
+	e.bindShortcuts(name)
 	e.app.SetFocus(e.pages)
 	e.refreshTitle()
 }
@@ -119,6 +120,7 @@ func (e *Editor) showPage(name string, prim tview.Primitive) {
 func (e *Editor) refreshPage(name string, prim tview.Primitive) {
 	e.pages.AddPage(name, prim, true, true)
 	e.pages.SwitchToPage(name)
+	e.bindShortcuts(name)
 	e.app.SetFocus(e.pages)
 	e.refreshTitle()
 }
@@ -157,12 +159,13 @@ func (e *Editor) toast(msg string) {
 
 // errorModal shows a message box with a single OK button.
 func (e *Editor) errorModal(title, msg string) {
-	modal := tview.NewModal().
-		SetText(title + "\n\n" + msg).
-		AddButtons([]string{"OK"}).
-		SetDoneFunc(func(_ int, _ string) {
-			e.closeModal()
-		})
+	modal := tview.NewModal().SetText(title + "\n\n" + msg)
+	labels := e.addModalButtons([]string{"OK"}, func(_ int, _ string) {
+		e.closeModal()
+	})
+	modal.AddButtons(labels).SetDoneFunc(func(_ int, _ string) {
+		e.closeModal()
+	})
 	e.showModal(modal)
 }
 
@@ -173,6 +176,7 @@ func (e *Editor) closeModal() {
 	}
 	e.pages.RemovePage("modal")
 	e.modalOpen = false
+	delete(e.shortcuts, "modal")
 	if len(e.history) > 0 {
 		e.pages.SwitchToPage(e.history[len(e.history)-1])
 	}
@@ -183,6 +187,7 @@ func (e *Editor) closeModal() {
 func (e *Editor) showModal(p tview.Primitive) {
 	e.pages.AddPage("modal", p, true, true)
 	e.pages.SwitchToPage("modal")
+	e.bindShortcuts("modal")
 	e.modalOpen = true
 	e.app.SetFocus(e.pages)
 }

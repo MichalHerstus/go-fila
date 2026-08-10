@@ -66,7 +66,8 @@ fields.go   (form/card/detail field editor, validation, visible)
 actions.go  (custom actions editor)
 hooks.go    (before/after hooks: name + fn|sql)
 maps.go     (map[string]string editor)
-sync.go     (SQL<->YAML analysis report + apply actions)
+sqledit.go  (per-resource SQLC query SQL editor: staged, flushed on save)
+sync.go     (SQL<->YAML analysis: simple list of schema tables, queries, missing refs)
 preview.go  (dashboard + per-resource ASCII-frame previews)
 + editor_test.go, run_test.go (tview sim-screen integration tests)
 ```
@@ -78,7 +79,7 @@ No separate `model.go`/`panel.go`/`auth.go`/`pages.go` — those sections live i
 Small, testable, UI-independent. Used by the Sync screen:
 
 - `schema.go` — `Table{Name, Columns[]Column{Name,Type,Nullable,Default,IsPrimaryKey,FKs}}`; `ParseSchema(files...)` parses `CREATE TABLE` from `sql/migrations/*.sql` (regex-based, sqlite + postgres dialect). Takes explicit file paths (glob with `filepath.Glob` first).
-- `queries.go` — `Query{Name,Variant,Body,File,SelectCols[]string}`; `ParseQueries(dir)` scans `-- name: X :variant` and best-effort extracts the SELECT projection.
+- `queries.go` — `Query{Name,Variant,Body,RawBody,File,SelectCols[]string}`; `ParseQueries(dir)` scans `-- name: X :variant` and best-effort extracts the SELECT projection; `ParseQueriesForFile(text, file)` parses one file's text (used by the editor to overlay staged edits); `RewriteQueryBody(text, name, newBody)` replaces one query block, leaving every other block byte-identical.
 - `references.go` — `CollectReferences(cfg)` walks every YAML query reference (list/detail/form/delete/action/options_query/page widgets incl. nested) returning `{name, origin}`; plus table/column references per resource.
 - `generate.go` — ports the `generateQueries`/`writeResourceYAML` SQL/YAML emitters from `introspect.go` (string-builders only; no DB) so the sync tool can generate stubs.
 
@@ -92,6 +93,7 @@ Everything the old editor covered stays editable; new coverage:
 | Connections | multi-connection list + add/delete/rename (old editor handled first conn only) |
 | Navigation | group **name/icon/sort** (old `buildGroupForm` was unwired) |
 | Resource basic | `table`, `id_type` (dropdown), `id_column` |
+| Resource SQL | per-resource **SQL queries** list (list/count/detail/form/populate/options_query, deduped) + full-text SQL editor; edits stage into sql/queries files and flush with the global save |
 | Resource list | `query`, `count_query`, `default_sort` (old editor left these uneditable), column `options` map |
 | Resource detail | `params` map, fields editor |
 | Resource card | fields editor (old editor left it unwired), `searchable` tag editor |
@@ -117,22 +119,26 @@ Reusable widgets in `widgets.go`: textField, passwordField, intField (numeric ac
 
 **Per-resource preview** (from resource menu → Preview): list view as a `tview.Table` (columns as headers, type-appropriate placeholder rows), form view as a read-only `tview.Form` built from `form.create.fields` (field-type→control mapping: InputField/PasswordField/DropDown/Checkbox/TextArea), detail view as key/value table.
 
-Implementation note: the preview is a single `tview.TextView` rendering an ASCII frame (topbar strip + two-column sidebar/content split built from `cfg.Navigation` / resource names). The generated dashboard is **not** run; widget types are drawn as labelled boxes. This keeps preview free of a DB or the generated app.
+Implementation note: the preview is a single `tview.TextView` rendering an ASCII frame (topbar strip + two-column sidebar/content split built from `cfg.Navigation` / resource names). The grid chrome (`│ ├ ┬ ┤ ┌ ┐ └ ┘ ─`) is light blue while the cell text stays white; every row is padded (`padVisual`, tag-aware via `tview.TaggedStringWidth`) to the identical total width (`previewWidth`, chrome rows share the same sidebar/content layout), with full color resets in content rewritten to attribute-only resets. The generated dashboard is **not** run; widget types are drawn as labelled boxes. This keeps preview free of a DB or the generated app.
 
 ## 7. Sync tool
 
-Reads config dir `sql/` via `internal/schema`. Renders a **report table** with status colors:
-- 🔴 ERROR — query referenced in YAML but missing in `queries/*.sql` (shows origin).
-- 🟡 WARNING — SQL query defined but never referenced (orphan); YAML column/field absent from its query's projection or the table columns.
-- 🔵 INFO — schema table without a resource / resource table missing from schema.
-- 🟢 OK — matched.
+Reads the project's `sql/` via `internal/schema`. Renders a **simple scrolling `tview.TextView`** (`sync.go`) listing:
 
-**Apply actions** (mutate cfg in memory + write SQL files, confirm modal where destructive):
-1. Generate missing SQLC query stubs into `sql/queries/{table}.sql` (one file per schema table; existing files are never overwritten).
-2. Add missing resources (from parsed schema tables → YAML block + queries).
-3. Add missing columns/fields into list/detail/form.
-4. Remove orphan queries (confirm).
-5. Re-scan (refresh).
+1. **Schema** — every table from `sql/migrations/*.sql` with its column count.
+2. **Queries** — every SQLC query definition found in `sql/queries`, sorted.
+3. **YAML references** — a colored summary of missing queries (with their YAML origin), missing tables, missing columns and missing FK-target `List{Table}` queries, each with detail lines.
+
+**SQL path resolution** (`sqlBase()` in `sqledit.go`): `sqlc.queries_dir` / `sqlc.schema_dir` are relative to the generated output dir where sqlc runs — `init`/`init --demo` write `sql/{migrations,queries}` into `./admin/sql`. The editor resolves them against the **config dir** when it has any sql tree (the generator copies `configDir/sql` into the output dir), otherwise against `{configDir}/admin`, falling back to the config dir. So both the classic root-level `sql/` layout and the default `admin/sql` layout resolve the same files sqlc will consume.
+
+The per-resource editor pages already show the live SQL bodies of a single resource's queries (List/Detail/Form/Card/Field `options_query`, with a `Reload SQL query` button); Sync complements that as the whole-project health check.
+
+**Buttons** (each with a Ctrl+letter shortcut from its first free label letter):
+1. Generate missing queries (Ctrl+G) — writes SQLC query stubs into `sql/queries/{table}.sql` (one file per schema table; existing files are never overwritten).
+2. Refresh (Ctrl+R) — re-run the analysis.
+3. Back (Ctrl+B) — return to the previous screen.
+
+`importResourcesFromSchema` (add missing resources from parsed schema tables) is kept as a method for tests but not exposed in the UI.
 
 ## 8. Implementation order
 

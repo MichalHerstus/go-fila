@@ -50,7 +50,7 @@ func (e *Editor) actionPage(idx, aidx int) tview.Primitive {
 		e.yesno(f, "Bulk action", a.Bulk, func(v bool) { a.Bulk = v })
 		e.long(f, "Query", a.Query, func(v string) { a.Query = v })
 		e.str(f, "Proc", a.Proc, func(v string) { a.Proc = v })
-		f.AddButton("Hooks", func() {
+		e.addButton(f, "Hooks", func() {
 			if a.Hooks == nil {
 				a.Hooks = &types.Hooks{}
 			}

@@ -48,7 +48,7 @@ func (e *Editor) columnPage(idx, cidx int) tview.Primitive {
 		e.pick(f, "Type", fieldTypeOptions, c.Type, func(v string) { c.Type = v })
 		e.yesno(f, "Sortable", c.Sortable, func(v bool) { c.Sortable = v })
 		e.yesno(f, "Searchable", c.Searchable, func(v bool) { c.Searchable = v })
-		f.AddButton("Options", func() {
+		e.addButton(f, "Options", func() {
 			e.showPage("column-options/"+fmt.Sprint(cidx), e.stringMapPage("column-options/"+fmt.Sprint(cidx), "Column options", func() map[string]string {
 				return c.Options
 			}, func(v map[string]string) { c.Options = v }))

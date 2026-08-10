@@ -46,26 +46,30 @@ func (e *Editor) fieldsListPage(name, title string, get func() *[]types.Field) t
 func (e *Editor) fieldPage(name string, get func() *[]types.Field, idx int) tview.Primitive {
 	fs := *get()
 	fld := &fs[idx]
+	qc := e.newSQLViewer()
 	return e.formShell("Field: "+fld.Name, func(f *tview.Form) {
 		e.str(f, "Name", fld.Name, func(v string) { fld.Name = v })
 		e.str(f, "Label", fld.Label, func(v string) { fld.Label = v })
 		e.pick(f, "Type", fieldTypeOptions, fld.Type, func(v string) { fld.Type = v })
 		e.yesno(f, "Required", fld.Required, func(v bool) { fld.Required = v })
-		e.str(f, "Options query", fld.OptionsQuery, func(v string) { fld.OptionsQuery = v })
+		var renderOpt func()
+		e.str(f, "Options query", fld.OptionsQuery, func(v string) { fld.OptionsQuery = v; renderOpt() })
+		renderOpt = qc.addRow(f, "", func() string { return fld.OptionsQuery })
 		e.str(f, "Options value", fld.OptionsValue, func(v string) { fld.OptionsValue = v })
 		e.str(f, "Options label", fld.OptionsLabel, func(v string) { fld.OptionsLabel = v })
-		f.AddButton("Validation", func() {
+		qc.reloadButton(f)
+		e.addButton(f, "Validation", func() {
 			if fld.Validation == nil {
 				fld.Validation = &types.Validation{}
 			}
 			e.showPage(name+"/val/"+fmt.Sprint(idx), e.validationPage(name, get, idx))
 		})
-		f.AddButton("Options", func() {
+		e.addButton(f, "Options", func() {
 			e.showPage(name+"/opts/"+fmt.Sprint(idx), e.stringMapPage(name+"/opts/"+fmt.Sprint(idx), "Field options", func() map[string]string {
 				return fld.Options
 			}, func(v map[string]string) { fld.Options = v }))
 		})
-		f.AddButton("Visible", func() {
+		e.addButton(f, "Visible", func() {
 			e.showPage(name+"/vis/"+fmt.Sprint(idx), e.tagsPage(name+"/vis/"+fmt.Sprint(idx), "Field visible in", visibleOptions, func() []string {
 				return fld.Visible
 			}, func(v []string) { fld.Visible = v }))

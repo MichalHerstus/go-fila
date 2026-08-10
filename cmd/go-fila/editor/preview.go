@@ -9,6 +9,14 @@ import (
 	"github.com/rivo/tview"
 )
 
+// preview dimensions: every frame/grid row renders exactly previewWidth cells
+// wide (light blue grid), so all rows of the mock share the same total width.
+const (
+	previewWidth        = 78
+	previewSideWidth    = 26
+	previewContentWidth = previewWidth - previewSideWidth - 3 // 49; inner = 47
+)
+
 // previewPage lists the views that can be previewed: the dashboard (first
 // default page or the first page) plus every configured page and resource.
 func (e *Editor) previewPage() tview.Primitive {
@@ -22,7 +30,7 @@ func (e *Editor) previewPage() tview.Primitive {
 		f.AddTextView("", "Pages", 0, 1, true, false)
 		for _, p := range e.cfg.Pages {
 			name := p.Name
-			f.AddButton("Page: "+name, func() {
+			e.addButton(f, "Page: "+name, func() {
 				e.showPage("preview/page", e.pagePreview(name))
 			})
 		}
@@ -31,7 +39,7 @@ func (e *Editor) previewPage() tview.Primitive {
 		f.AddTextView("", "Resources", 0, 1, true, false)
 		for _, r := range e.cfg.Resources {
 			name := r.Name
-			f.AddButton("Resource: "+name, func() {
+			e.addButton(f, "Resource: "+name, func() {
 				e.showPage("preview/resource", e.resourcePreview(name))
 			})
 		}
@@ -39,7 +47,7 @@ func (e *Editor) previewPage() tview.Primitive {
 	if len(e.cfg.Pages) == 0 && len(e.cfg.Resources) == 0 {
 		f.AddTextView("", "No pages or resources configured yet.", 0, 1, true, false)
 	}
-	f.AddButton("Back", e.back)
+	e.addButton(f, "Back", e.back)
 	return f
 }
 
@@ -89,7 +97,7 @@ func (e *Editor) resourcePreview(resName string) tview.Primitive {
 			cols = append(cols, "id")
 		}
 		body += "  " + strings.Join(cols, "   |   ") + "\n"
-		body += "  " + strings.Repeat("-", 46) + "\n"
+		body += "  " + strings.Repeat("-", previewContentWidth-2) + "\n"
 		for row := 0; row < 4; row++ {
 			cells := make([]string, len(cols))
 			for i := range cells {
@@ -135,18 +143,14 @@ func widgetMock(w types.Widget, depth int) string {
 }
 
 // mockFrame wraps content in a crude sidebar + topbar frame to show the panel
-// shell (navigation groups from config on the left).
+// shell (navigation groups from config on the left). The grid is drawn in light
+// blue and every row is padded to the exact same total width (previewWidth).
 func mockFrame(e *Editor, content string) string {
-	var b strings.Builder
-	width := 78
+	content = colorStable(content)
 	panelName := e.cfg.Panel.Name
 	if panelName == "" {
 		panelName = "admin"
 	}
-
-	// topbar
-	b.WriteString("┌" + strings.Repeat("─", width-2) + "┐\n")
-	b.WriteString("│ " + padRight(panelName, width-4) + " │\n")
 
 	// sidebar (first navigation group/items, else resource names)
 	var side []string
@@ -167,37 +171,58 @@ func mockFrame(e *Editor, content string) string {
 		}
 	}
 
-	// two-column frame: sidebar 26 chars, content the rest
-	sideW := 26
-	contentW := width - 2 - sideW
-	b.WriteString("├" + strings.Repeat("─", sideW) + "┬" + strings.Repeat("─", contentW) + "┤\n")
-	sideLines := make([]string, len(side))
-	for i, s := range side {
-		sideLines[i] = s
-	}
+	width := previewWidth
+	sideW := previewSideWidth
+	contentW := previewContentWidth
+	grid, text := "[lightblue]", "[white]"
+	var b strings.Builder
+	b.WriteString(grid + "┌" + strings.Repeat("─", width-2) + "┐\n")
+	b.WriteString(grid + "│ " + text + padVisual(panelName, width-4) + grid + " │\n")
+	b.WriteString(grid + "├" + strings.Repeat("─", sideW) + "┬" + strings.Repeat("─", contentW) + "┤\n")
+
 	contentLines := splitLines(content)
-	max := len(sideLines)
+	max := len(side)
 	if len(contentLines) > max {
 		max = len(contentLines)
 	}
 	for i := 0; i < max; i++ {
 		sl := ""
-		if i < len(sideLines) {
-			sl = sideLines[i]
+		if i < len(side) {
+			sl = side[i]
 		}
 		cl := ""
 		if i < len(contentLines) {
 			cl = contentLines[i]
 		}
-		b.WriteString("│ " + padRight(sl, sideW-2) + " │ " + padRight(cl, contentW-2) + " │\n")
+		b.WriteString(grid + "│ " + text + padVisual(sl, sideW-2) + grid + " │ " + text + padVisual(cl, contentW-2) + grid + " │\n")
 	}
-	b.WriteString("└" + strings.Repeat("─", sideW) + "┴" + strings.Repeat("─", contentW) + "┘")
+	b.WriteString(fmt.Sprintf("%s└%s┴%s┘", grid, strings.Repeat("─", sideW), strings.Repeat("─", contentW)))
 	return b.String()
 }
 
-func padRight(s string, n int) string {
-	if len(s) >= n {
-		return s[:n]
+// padVisual pads s with trailing spaces so its rendered (tag-aware) width is
+// exactly n. Long untagged text is truncated; tagged overflow is left as-is
+// (preview content stays short).
+func padVisual(s string, n int) string {
+	w := tview.TaggedStringWidth(s)
+	if w < n {
+		return s + strings.Repeat(" ", n-w)
 	}
-	return s + strings.Repeat(" ", n-len(s))
+	if w == n {
+		return s
+	}
+	if !strings.Contains(s, "[") {
+		if rs := []rune(s); len(rs) > n {
+			return string(rs[:n])
+		}
+	}
+	return s
+}
+
+// colorStable replaces full color-reset tags with attribute-only resets so the
+// preview's light-blue grid color survives content emphasis tags ([::-] has no
+// "[:]"/"[-:-:-]" substring, so replacement is order-safe).
+func colorStable(s string) string {
+	s = strings.ReplaceAll(s, "[-:-:-]", "[::-]")
+	return strings.ReplaceAll(s, "[:]", "[::-]")
 }

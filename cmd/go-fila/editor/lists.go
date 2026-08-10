@@ -72,15 +72,19 @@ func (e *Editor) renderList(spec listSpec, list *tview.List) {
 
 // confirm shows a yes/no modal. onYes runs when the user confirms.
 func (e *Editor) confirm(title, msg string, onYes func()) {
-	modal := tview.NewModal().
-		SetText(title + "\n\n" + msg).
-		AddButtons([]string{"Yes", "No"}).
-		SetDoneFunc(func(index int, _ string) {
-			e.closeModal()
-			if index == 0 {
-				onYes()
-			}
-		})
+	modal := tview.NewModal().SetText(title + "\n\n" + msg)
+	labels := e.addModalButtons([]string{"Yes", "No"}, func(index int, _ string) {
+		e.closeModal()
+		if index == 0 {
+			onYes()
+		}
+	})
+	modal.AddButtons(labels).SetDoneFunc(func(index int, _ string) {
+		e.closeModal()
+		if index == 0 {
+			onYes()
+		}
+	})
 	e.showModal(modal)
 }
 
@@ -192,12 +196,12 @@ func (e *Editor) promptForm(title string, input *tview.InputField, onDone func(s
 	form.SetFieldBackgroundColor(tcell.NewHexColor(0x27272a))
 	form.SetButtonBackgroundColor(colAccent)
 	form.AddFormItem(input)
-	form.AddButton("OK", func() {
+	e.addButton(form, "OK", func() {
 		val := input.GetText()
 		e.closeModal()
 		onDone(val)
 		e.app.SetFocus(e.pages)
 	})
-	form.AddButton("Cancel", e.closeModal)
+	e.addButton(form, "Cancel", e.closeModal)
 	return form
 }

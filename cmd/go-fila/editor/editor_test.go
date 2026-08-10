@@ -146,7 +146,6 @@ func TestProcPages(t *testing.T) {
 	}
 }
 
-
 func TestSyncReport(t *testing.T) {
 	dir := t.TempDir()
 	migrations := filepath.Join(dir, "sql", "migrations")
@@ -225,6 +224,61 @@ func queryRefNames(rep *syncReport) []string {
 		out = append(out, q.Name)
 	}
 	return out
+}
+
+// TestSyncInlineSQLSplit verifies that inline SQL references (widget/action
+// queries) are reported separately and never counted as missing named queries.
+func TestSyncInlineSQLSplit(t *testing.T) {
+	dir := t.TempDir()
+	migrations := filepath.Join(dir, "sql", "migrations")
+	queries := filepath.Join(dir, "sql", "queries")
+	if err := os.MkdirAll(migrations, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(queries, 0755); err != nil {
+		t.Fatal(err)
+	}
+	schemaSQL := `CREATE TABLE users (
+  id INTEGER PRIMARY KEY,
+  email TEXT NOT NULL
+);`
+	if err := os.WriteFile(filepath.Join(migrations, "001.sql"), []byte(schemaSQL), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Every named query the config references exists.
+	usersQ := `-- name: ListUsers :many
+SELECT id, email FROM users;
+-- name: CountUsers :one
+SELECT COUNT(*) FROM users;
+-- name: GetUser :one
+SELECT id, email FROM users WHERE id = ?;
+-- name: CreateUser :one
+INSERT INTO users (email) VALUES (?) RETURNING id;
+`
+	if err := os.WriteFile(filepath.Join(queries, "users.sql"), []byte(usersQ), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig()
+	cfg.SQLC.SchemaDir = "./sql/migrations"
+	cfg.SQLC.QueriesDir = "./sql/queries"
+	cfg.Connections["default"] = types.Connection{Driver: "sqlite"}
+	e := New(cfg, filepath.Join(dir, "go-fila.yaml"))
+	rep := e.analyze()
+
+	if len(rep.missingQ) != 0 {
+		t.Errorf("all named queries exist; got missing %v", queryRefNames(rep))
+	}
+	// testConfig has one action (UPDATE ...) and one widget (SELECT ...) with
+	// inline SQL — they must land in inlineQ (deduped by name), never missingQ.
+	if len(rep.inlineQ) != 2 {
+		t.Errorf("expected 2 inline SQL refs (action + widget), got %d: %v", len(rep.inlineQ), rep.inlineQ)
+	}
+	for _, q := range rep.inlineQ {
+		if !strings.ContainsAny(q.Name, " \t") {
+			t.Errorf("inline ref %q looks like a query name: %+v", q.Name, q)
+		}
+	}
 }
 
 // TestGenerateQueriesProducesValidBody sanity-checks the query output.

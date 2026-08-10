@@ -17,6 +17,7 @@ type Query struct {
 	Name       string   // SQLC function name (-- name: ...)
 	Variant    string   // :one | :many | :exec | :execrows ...
 	Body       string   // the SQL body without the annotation
+	RawBody    string   // the body exactly as written in the file (multi-line)
 	File       string   // base name of the containing .sql file
 	SelectCols []string // best-effort SELECT output column aliases
 }
@@ -50,11 +51,13 @@ func parseQueryFile(text, file string, out map[string]Query) {
 		}
 		q := Query{Name: name, Variant: variant, File: file}
 		var body strings.Builder
+		var raw []string
 		for j := i + 1; j < len(lines); j++ {
 			next := strings.TrimSpace(lines[j])
 			if _, _, isAnn := parseAnnotation(next); isAnn {
 				break
 			}
+			raw = append(raw, lines[j])
 			if next == "" || strings.HasPrefix(next, "--") {
 				continue
 			}
@@ -62,9 +65,52 @@ func parseQueryFile(text, file string, out map[string]Query) {
 			body.WriteString(" ")
 		}
 		q.Body = strings.TrimSpace(body.String())
+		q.RawBody = strings.TrimRight(strings.Join(raw, "\n"), " \t\r\n")
 		q.SelectCols = SelectColumns(q.Body)
 		out[name] = q
 	}
+}
+
+// ParseQueriesForFile parses the annotated queries from a single file's text.
+func ParseQueriesForFile(text, file string) map[string]Query {
+	out := make(map[string]Query)
+	parseQueryFile(text, file, out)
+	return out
+}
+
+// RewriteQueryBody returns text with the SQL body of the query named name
+// replaced by newBody, keeping every other block intact. The variant from the
+// original annotation is preserved; a blank line separates blocks. Returns text
+// unchanged when the query name is not found.
+func RewriteQueryBody(text, name, newBody string) string {
+	lines := strings.Split(text, "\n")
+	for i := 0; i < len(lines); i++ {
+		qname, variant, ok := parseAnnotation(strings.TrimSpace(lines[i]))
+		if !ok || qname != name {
+			continue
+		}
+		end := len(lines)
+		for j := i + 1; j < len(lines); j++ {
+			if _, _, isAnn := parseAnnotation(strings.TrimSpace(lines[j])); isAnn {
+				end = j
+				break
+			}
+		}
+		block := []string{"-- name: " + name}
+		if variant != "" {
+			block[0] += " " + variant
+		}
+		for _, l := range strings.Split(strings.TrimRight(newBody, "\n"), "\n") {
+			block = append(block, strings.TrimRight(l, " \t"))
+		}
+		block = append(block, "")
+		out := make([]string, 0, len(lines)-(end-i)+len(block))
+		out = append(out, lines[:i]...)
+		out = append(out, block...)
+		out = append(out, lines[end:]...)
+		return strings.Join(out, "\n")
+	}
+	return text
 }
 
 // parseAnnotation parses a "-- name: X :variant" comment line.

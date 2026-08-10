@@ -18,7 +18,7 @@ func (e *Editor) formShell(title string, fill func(*tview.Form)) tview.Primitive
 	f.SetButtonBackgroundColor(colAccent)
 	f.SetButtonTextColor(tcell.ColorWhite)
 	fill(f)
-	f.AddButton("Back", e.back)
+	e.addButton(f, "Back", e.back)
 	return f
 }
 
@@ -29,9 +29,9 @@ func (e *Editor) panelPage() tview.Primitive {
 		e.str(f, "ID", p.ID, func(v string) { p.ID = v })
 		e.str(f, "Name", p.Name, func(v string) { p.Name = v })
 		e.str(f, "Path", p.Path, func(v string) { p.Path = v })
-		f.AddButton("Brand", func() { e.showPage("panel/brand", e.brandPage()) })
-		f.AddButton("Layout", func() { e.showPage("panel/layout", e.layoutPage()) })
-		f.AddButton("Theme", func() { e.showPage("panel/theme", e.themePage()) })
+		e.addButton(f, "Brand", func() { e.showPage("panel/brand", e.brandPage()) })
+		e.addButton(f, "Layout", func() { e.showPage("panel/layout", e.layoutPage()) })
+		e.addButton(f, "Theme", func() { e.showPage("panel/theme", e.themePage()) })
 	})
 }
 
@@ -144,7 +144,7 @@ func (e *Editor) authPage() tview.Primitive {
 		e.yesno(f, "Registration", a.Registration, func(v bool) { a.Registration = v })
 		e.yesno(f, "Password reset", a.PasswordReset, func(v bool) { a.PasswordReset = v })
 		e.yesno(f, "Remember me", a.RememberMe, func(v bool) { a.RememberMe = v })
-		f.AddButton("Login fields", func() {
+		e.addButton(f, "Login fields", func() {
 			e.showPage("auth/login-fields", e.tagsPage("auth/login-fields", "Auth / Login fields", loginFieldOptions, func() []string {
 				return a.Login.Fields
 			}, func(v []string) { a.Login.Fields = v }))
@@ -193,7 +193,7 @@ func (e *Editor) navGroupPage(idx int) tview.Primitive {
 		e.str(f, "Group", g.Group, func(v string) { g.Group = v })
 		e.pick(f, "Icon", iconOptions, g.Icon, func(v string) { g.Icon = v })
 		e.num(f, "Sort", g.Sort, func(v int) { g.Sort = v })
-		f.AddButton("Items", func() {
+		e.addButton(f, "Items", func() {
 			e.showPage("navigation/group/"+fmt.Sprint(idx)+"/items", e.navItemsPage(idx))
 		})
 	})
@@ -303,7 +303,7 @@ func (e *Editor) pagePage(idx int) tview.Primitive {
 		e.str(f, "Name", p.Name, func(v string) { p.Name = v })
 		e.str(f, "Path", p.Path, func(v string) { p.Path = v })
 		e.yesno(f, "Default", p.Default, func(v bool) { p.Default = v })
-		f.AddButton("Widgets", func() {
+		e.addButton(f, "Widgets", func() {
 			e.showPage("pages/"+fmt.Sprint(idx)+"/widgets", e.widgetsPage(idx))
 		})
 	})
@@ -361,7 +361,7 @@ func (e *Editor) widgetPage(pidx, idx int) tview.Primitive {
 			e.str(f, "Prefix", w.Prefix, func(v string) { w.Prefix = v })
 		case "stats_grid":
 			e.num(f, "Columns", w.Columns, func(v int) { w.Columns = v })
-			f.AddButton("Sub-widgets", func() {
+			e.addButton(f, "Sub-widgets", func() {
 				e.showPage("widget/subs/"+fmt.Sprint(idx), e.subWidgetsPage(pidx, idx))
 			})
 		case "chart":
@@ -375,7 +375,7 @@ func (e *Editor) widgetPage(pidx, idx int) tview.Primitive {
 		case "table", "list":
 			e.str(f, "Query", w.Query, func(v string) { w.Query = v })
 			e.num(f, "Limit", w.Limit, func(v int) { w.Limit = v })
-			f.AddButton("Data columns", func() {
+			e.addButton(f, "Data columns", func() {
 				e.showPage("widget/columns/"+fmt.Sprint(idx), e.stringListPage("widget/columns/"+fmt.Sprint(idx), "Data columns", func() []string {
 					return w.DataColumns
 				}, func(v []string) { w.DataColumns = v }))
