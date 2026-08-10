@@ -1,3 +1,4 @@
+# this just template not the finished licence conditions!
 # 🚀 FIGO - yaml based dashboard generator
 
 [Stručný a úderný popis jedním větou, např. "Moderní a rychlý generátor boilerplate kódu pro REST API z konfigurace YAML."]
