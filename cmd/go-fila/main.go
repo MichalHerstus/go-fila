@@ -17,7 +17,7 @@ import (
 )
 
 // version is the current go-fila release version.
-const version = "0.8.0"
+const version = "0.8.1"
 
 //go:embed AGENTS_for_generated_dashboard.md
 var agentsForGeneratedDashboard string

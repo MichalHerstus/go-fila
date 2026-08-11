@@ -40,6 +40,20 @@ func (g *Generator) generateMain() error {
 		authTable = "users"
 	}
 
+	poolCode := ""
+	for _, conn := range g.Config.Connections {
+		if conn.Pool.MaxOpen > 0 {
+			poolCode += fmt.Sprintf("\n\tdb.SetMaxOpenConns(%d)\n", conn.Pool.MaxOpen)
+		}
+		if conn.Pool.MaxIdle > 0 {
+			poolCode += fmt.Sprintf("\n\tdb.SetMaxIdleConns(%d)\n", conn.Pool.MaxIdle)
+		}
+		if conn.Pool.Lifetime != "" {
+			poolCode += fmt.Sprintf("\n\tif d, err := time.ParseDuration(%q); err == nil {\n\t\tdb.SetConnMaxLifetime(d)\n\t}\n", conn.Pool.Lifetime)
+		}
+		break
+	}
+
 	sanityQuery := fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", authTable)
 	if g.isMSSQL() {
 		sanityQuery = fmt.Sprintf("SELECT TOP 1 1 FROM %s", authTable)
@@ -98,7 +112,7 @@ func main() {
 	if err := db.Ping(); err != nil {
 		log.Fatal(err)
 	}
-
+%s
 	var one int
 	if err := db.QueryRow(%q).Scan(&one); err != nil && err != sql.ErrNoRows {
 		log.Fatalf("database not initialized: %%v", err)
@@ -139,7 +153,7 @@ func main() {
 		log.Fatal(err)
 	}
 }
-`, driverImport, g.moduleImport("internal/panel"), g.moduleImport("internal/panel/auth"), getDSN(g.Config), driverName, sanityQuery)
+`, driverImport, g.moduleImport("internal/panel"), g.moduleImport("internal/panel/auth"), getDSN(g.Config), driverName, poolCode, sanityQuery)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "main.go"), []byte(code), 0644)
 }

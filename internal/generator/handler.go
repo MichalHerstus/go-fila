@@ -1066,12 +1066,12 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 `, tName)
 		middle += g.hookCallsStr(r.Form.Delete.Hooks.Before, "scope", "        ") + "\n"
 	}
-	middle += fmt.Sprintf(`        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE id = $1", int64(id))
+	middle += fmt.Sprintf(`        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE %s = $1", int64(id))
         if err != nil {
             httperr.Internal(w, err)
             return
         }
-`, tName)
+`, tName, idColumn(r))
 	if g.hookBlockEmits(r.Form.Delete.Hooks) {
 		middle += g.hookCallsStr(r.Form.Delete.Hooks.After, "scope", "        ") + "\n"
 	}
@@ -1293,21 +1293,33 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
 
+	hasExec := false
+	for _, a := range r.Actions {
+		if a.Bulk && g.actionExecSQL(a) != "" {
+			hasExec = true
+			break
+		}
+	}
+
 	var dispatch []string
 	for _, a := range r.Actions {
 		if !a.Bulk {
 			continue
 		}
+		executor := "db"
+		if hasExec {
+			executor = "tx"
+		}
 		if exec := g.actionExecSQL(a); exec != "" {
 			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
         for _, id := range ids {
-            _, err := db.ExecContext(r.Context(), %q, id)
+            _, err := %s.ExecContext(r.Context(), %q, id)
             if err != nil {
                 httperr.Internal(w, err)
                 return
             }
         }
-`, a.Name, exec))
+`, a.Name, executor, exec))
 		} else {
 			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
         for _, id := range ids {
@@ -1315,6 +1327,27 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
         }
 `, a.Name))
 		}
+	}
+
+	txCode := ""
+	if hasExec {
+		txCode = fmt.Sprintf(`
+        tx, err := db.BeginTx(r.Context(), nil)
+        if err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+        defer tx.Rollback()
+`)
+	}
+	commitCode := ""
+	if hasExec {
+		commitCode = `
+        if err := tx.Commit(); err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+`
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1342,16 +1375,17 @@ func Bulk(db *sql.DB) http.HandlerFunc {
             }
         }
 
+%s
         switch actionName {
 %s    default:
             http.Error(w, "unknown action", http.StatusNotFound)
             return
         }
-
+%s
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), strings.Join(dispatch, "\n"), listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), txCode, strings.Join(dispatch, "\n"), commitCode, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "bulk.go"), []byte(code), 0644)
 }
@@ -1587,12 +1621,18 @@ func Create(db *sql.DB) http.HandlerFunc {
 func buildOptionsLoader(queryDir string, fields []types.Field) (optVars map[string]string, loadCode string) {
 	optVars = make(map[string]string)
 	var loads []string
+	loaded := map[string]string{}
 	for _, f := range fields {
 		if f.OptionsQuery == "" {
 			continue
 		}
+		if varName, ok := loaded[f.OptionsQuery]; ok {
+			optVars[f.Name] = varName
+			continue
+		}
 		varName := f.Name + "Opts"
 		optVars[f.Name] = varName
+		loaded[f.OptionsQuery] = varName
 		rawSQL := findSQLCQuery(queryDir, f.OptionsQuery)
 		if rawSQL == "" {
 			rawSQL = f.OptionsQuery
@@ -1778,8 +1818,8 @@ func safeUploadExt(ext string) bool {
             setClauses[i] = fmt.Sprintf("%%s = $%%d", col, i+1)
         }
         vals = append(vals, int64(id))
-        query := fmt.Sprintf("UPDATE %%s SET %%s WHERE id = $%%d", %q, strings.Join(setClauses, ", "), len(cols)+1)
-`, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
+        query := fmt.Sprintf("UPDATE %%s SET %%s WHERE %%s = $%%d", %q, strings.Join(setClauses, ", "), %q, len(cols)+1)
+`, colsLiteral(colNames), strings.Join(valExprs, ", "), tName, idColumn(r))
 	if g.hookBlockEmits(update.Hooks) {
 		postCode += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,

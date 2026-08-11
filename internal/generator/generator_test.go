@@ -252,7 +252,10 @@ func TestGenerateProcPostgres(t *testing.T) {
 		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", int64(id))`,
 	})
 	assert("internal/panel/resources/user/bulk.go", []string{
-		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", id)`,
+		`tx, err := db.BeginTx(r.Context(), nil)`,
+		`defer tx.Rollback()`,
+		`tx.ExecContext(r.Context(), "CALL sp_archive_user($1)", id)`,
+		`tx.Commit()`,
 	})
 }
 
@@ -285,7 +288,10 @@ func TestGenerateProcMSSQL(t *testing.T) {
 		`db.ExecContext(r.Context(), "EXEC sp_archive_user $1", int64(id))`,
 	})
 	assert("internal/panel/resources/user/bulk.go", []string{
-		`db.ExecContext(r.Context(), "EXEC sp_archive_user $1", id)`,
+		`tx, err := db.BeginTx(r.Context(), nil)`,
+		`defer tx.Rollback()`,
+		`tx.ExecContext(r.Context(), "EXEC sp_archive_user $1", id)`,
+		`tx.Commit()`,
 	})
 }
 
@@ -1150,5 +1156,305 @@ func TestGenerateViewmodelsStringify(t *testing.T) {
 		if !strings.Contains(modelsStr, want) {
 			t.Errorf("models.go missing %q", want)
 		}
+	}
+}
+
+// poolConfig returns a config whose first connection carries pool settings.
+func poolConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {
+				Driver: "postgres",
+				DSN:    "postgres://user:pass@host:5432/db",
+				Pool:   types.PoolConfig{MaxOpen: 25, MaxIdle: 5, Lifetime: "30m"},
+			},
+		},
+		Resources: []types.Resource{
+			{
+				Name: "User",
+				List: &types.ListConfig{Columns: []types.Column{{Name: "name"}}},
+			},
+		},
+	}
+}
+
+// TestGeneratePoolSettings ensures the generated main.go wires connections.*.pool
+// (max_open/max_idle/lifetime) into the database/sql pool after Ping, and omits
+// the setters when no pool block is configured.
+func TestGeneratePoolSettings(t *testing.T) {
+	dir := t.TempDir()
+	g := New(poolConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	main, err := os.ReadFile(filepath.Join(dir, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	mainStr := string(main)
+	for _, want := range []string{
+		`db.SetMaxOpenConns(25)`,
+		`db.SetMaxIdleConns(5)`,
+		`if d, err := time.ParseDuration("30m"); err == nil {`,
+		`db.SetConnMaxLifetime(d)`,
+	} {
+		if !strings.Contains(mainStr, want) {
+			t.Errorf("main.go missing %q\n--- generated:\n%s", want, mainStr)
+		}
+	}
+	// SetMaxOpenConns must appear after Ping, before the sanity query.
+	ping := strings.Index(mainStr, "db.Ping()")
+	sanity := strings.Index(mainStr, "database not initialized")
+	setMax := strings.Index(mainStr, "db.SetMaxOpenConns(25)")
+	if !(ping < setMax && setMax < sanity) {
+		t.Error("pool setters must run after Ping and before the auth-table sanity query")
+	}
+
+	// No pool block => no setters emitted.
+	cfg := poolConfig()
+	cfg.Connections["default"] = types.Connection{Driver: "postgres", DSN: "x"}
+	dir2 := t.TempDir()
+	g2 := New(cfg, dir2)
+	if err := g2.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	main2, err := os.ReadFile(filepath.Join(dir2, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	for _, not := range []string{"SetMaxOpenConns", "SetMaxIdleConns", "SetConnMaxLifetime"} {
+		if strings.Contains(string(main2), not) {
+			t.Errorf("main.go without pool config must not emit %q", not)
+		}
+	}
+}
+
+// TestGenerateBulkTransaction ensures bulk actions with SQL run inside a single
+// transaction (BeginTx/Rollback/Commit) instead of N ExecContext calls, while a
+// proc-only bulk action on sqlite stays a transaction-less no-op loop.
+func TestGenerateBulkTransaction(t *testing.T) {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "x"},
+		},
+		Resources: []types.Resource{
+			{
+				Name: "User",
+				List: &types.ListConfig{Columns: []types.Column{{Name: "name"}}},
+				Actions: []types.Action{
+					{Name: "mark", Label: "Mark", Query: "UPDATE users SET status = 'done' WHERE id = $1", Bulk: true},
+				},
+			},
+		},
+	}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	bulk, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "bulk.go"))
+	if err != nil {
+		t.Fatalf("read bulk.go: %v", err)
+	}
+	bulkStr := string(bulk)
+	for _, want := range []string{
+		`tx, err := db.BeginTx(r.Context(), nil)`,
+		`defer tx.Rollback()`,
+		`tx.ExecContext(r.Context(), "UPDATE users SET status = 'done' WHERE id = $1", id)`,
+		`if err := tx.Commit(); err != nil {`,
+	} {
+		if !strings.Contains(bulkStr, want) {
+			t.Errorf("bulk.go missing %q\n--- generated:\n%s", want, bulkStr)
+		}
+	}
+	if strings.Contains(bulkStr, `db.ExecContext`) {
+		t.Error("bulk.go must not use db.ExecContext inside a transaction")
+	}
+}
+
+// TestGenerateOptionsLoaderDedupe ensures fields sharing an options_query emit a
+// single options-load block whose variable is reused by both fields (no N+1).
+func TestGenerateOptionsLoaderDedupe(t *testing.T) {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "x"},
+		},
+		Resources: []types.Resource{
+			{
+				Name: "User",
+				List: &types.ListConfig{Columns: []types.Column{{Name: "name"}}},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "role_id", Type: "relation", OptionsQuery: "ListRoles"},
+							{Name: "manager_id", Type: "relation", OptionsQuery: "ListRoles"},
+						},
+					},
+				},
+			},
+		},
+	}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	create, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "create.go"))
+	if err != nil {
+		t.Fatalf("read create.go: %v", err)
+	}
+	createStr := string(create)
+	if n := strings.Count(createStr, `ListRoles`) - 0; n < 1 {
+		t.Fatalf("create.go missing the options query reference: %d", n)
+	}
+	if got := strings.Count(createStr, `:= map[string]string{}`); got != 1 {
+		t.Errorf("expected 1 options-load block, got %d\n--- generated:\n%s", got, createStr)
+	}
+	if !strings.Contains(createStr, `role_idOpts := map[string]string{}`) {
+		t.Errorf("create.go missing shared options var role_idOpts\n--- generated:\n%s", createStr)
+	}
+	if strings.Contains(createStr, `manager_idOpts :=`) {
+		t.Error("manager_id must reuse the shared role_idOpts var, not load its own options")
+	}
+	// Both field defs must reference the shared var.
+	if n := strings.Count(createStr, `Options: role_idOpts`); n != 2 {
+		t.Errorf("both fields must wire Options to role_idOpts (got %d references)", n)
+	}
+}
+
+// idColumnConfig returns a config whose resource keys on a non-"id" column, as
+// `init --db` emits for MSSQL tables with an identity "ID" column.
+func idColumnConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "mssql", DSN: "sqlserver://sa:pw@host:1433"},
+		},
+		Resources: []types.Resource{
+			{
+				Name:     "Zamestnanec",
+				Table:    "Zamestnanec",
+				IDColumn: "ID",
+				List:     &types.ListConfig{Columns: []types.Column{{Name: "CeleJmeno"}}},
+				Form: &types.FormConfig{
+					Update: &types.FormAction{
+						Fields: []types.Field{{Name: "CeleJmeno", Type: "text"}},
+					},
+					Delete: &types.FormAction{},
+				},
+			},
+		},
+	}
+}
+
+// TestGenerateIDColumnUpdateDelete ensures update.go and delete.go key on
+// idColumn(r) ("ID") instead of the hardcoded "id", so introspected MSSQL
+// tables with an identity "ID" column work.
+func TestGenerateIDColumnUpdateDelete(t *testing.T) {
+	dir := t.TempDir()
+	g := New(idColumnConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	upd, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/zamestnanec", "update.go"))
+	if err != nil {
+		t.Fatalf("read update.go: %v", err)
+	}
+	updStr := string(upd)
+	if want := `query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d", "Zamestnanec", strings.Join(setClauses, ", "), "ID", len(cols)+1)`; !strings.Contains(updStr, want) {
+		t.Errorf("update.go missing idColumn WHERE clause %q\n--- generated:\n%s", want, updStr)
+	}
+	if strings.Contains(updStr, `WHERE id = $`) {
+		t.Error("update.go must not hardcode WHERE id")
+	}
+	del, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/zamestnanec", "delete.go"))
+	if err != nil {
+		t.Fatalf("read delete.go: %v", err)
+	}
+	delStr := string(del)
+	if want := `db.ExecContext(r.Context(), "DELETE FROM Zamestnanec WHERE ID = $1", int64(id))`; !strings.Contains(delStr, want) {
+		t.Errorf("delete.go missing idColumn WHERE clause %q\n--- generated:\n%s", want, delStr)
+	}
+	if strings.Contains(delStr, `WHERE id = $1`) {
+		t.Error("delete.go must not hardcode WHERE id")
+	}
+}
+
+// widgetPageConfig returns a postgres config with a page exercising every widget
+// type (stat, chart, table, stats_grid, list, html).
+func widgetPageConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "x"},
+		},
+		Resources: []types.Resource{
+			{
+				Name: "User",
+				List: &types.ListConfig{Columns: []types.Column{{Name: "name"}}},
+			},
+		},
+		Pages: []types.Page{
+			{
+				Name: "Dashboard",
+				Path: "/dashboard",
+				Widgets: []types.Widget{
+					{Type: "stat", Label: "Total Users", Query: "SELECT COUNT(*) FROM users"},
+					{Type: "chart", Label: "By Role", Chart: &types.ChartConfig{Type: "bar"}, Query: "SELECT role, COUNT(*) FROM users GROUP BY role"},
+					{Type: "table", Label: "Latest", DataColumns: []string{"id", "name"}, Query: "SELECT id, name FROM users"},
+					{Type: "stats_grid", Widgets: []types.Widget{{Type: "stat", Label: "Sub", Query: "SELECT 1"}}},
+					{Type: "list", Label: "Feed", Query: "SELECT id, name FROM users"},
+					{Type: "html", Label: "Note", Query: "SELECT note FROM settings"},
+				},
+			},
+		},
+	}
+}
+
+// TestGenerateWidgetErrorLogging ensures page handlers log widget DB query and
+// scan errors instead of silently swallowing them, and keep rendering the widget
+// with empty data on failure.
+func TestGenerateWidgetErrorLogging(t *testing.T) {
+	dir := t.TempDir()
+	g := New(widgetPageConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	page, err := os.ReadFile(filepath.Join(dir, "internal/panel/pages", "dashboard.go"))
+	if err != nil {
+		t.Fatalf("read dashboard.go: %v", err)
+	}
+	pageStr := string(page)
+	for _, want := range []string{
+		`"log"`,
+		`log.Printf("page %s widget %d (%s) stat: %v", "Dashboard", 0, "Total Users", err)`,
+		`log.Printf("page %s widget %d (%s) chart: %v", "Dashboard", 1, "By Role", err)`,
+		`log.Printf("page %s widget %d (%s) chart scan: %v", "Dashboard", 1, "By Role", err)`,
+		`log.Printf("page %s widget %d (%s) table: %v", "Dashboard", 2, "Latest", err)`,
+		`log.Printf("page %s widget %d (%s) stats_grid: %v", "Dashboard", 3, "Sub", err)`,
+		`log.Printf("page %s widget %d (%s) list: %v", "Dashboard", 4, "Feed", err)`,
+		`log.Printf("page %s widget %d (%s) html: %v", "Dashboard", 5, "Note", err)`,
+	} {
+		if !strings.Contains(pageStr, want) {
+			t.Errorf("dashboard.go missing %q\n--- generated:\n%s", want, pageStr)
+		}
+	}
+	if strings.Contains(pageStr, `_ = db.QueryRowContext`) {
+		t.Error("page handler must not swallow stat widget errors with _ =")
+	}
+	if strings.Contains(pageStr, `if err == nil {`) {
+		t.Error("page handler must not gate widget fetching on a silent if err == nil")
 	}
 }

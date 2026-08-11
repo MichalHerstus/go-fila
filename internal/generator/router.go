@@ -222,7 +222,9 @@ func (g *Generator) generatePage(p types.Page) error {
 			widgetInit = append(widgetInit, fmt.Sprintf(`
         var count%d int64
         if q := %q; q != "" {
-            _ = db.QueryRowContext(r.Context(), q).Scan(&count%d)
+            if err := db.QueryRowContext(r.Context(), q).Scan(&count%d); err != nil {
+                log.Printf("page %%s widget %%d (%%s) stat: %%v", %q, %d, %q, err)
+            }
         }
         widgets = append(widgets, viewmodels.WidgetData{
             Type: "stat",
@@ -230,7 +232,7 @@ func (g *Generator) generatePage(p types.Page) error {
             Color: %q,
             Icon: %q,
             Value: %s,
-        })`, i, w.Query, i, w.Label, w.Color, w.Icon, valExpr))
+        })`, i, w.Query, i, p.Name, i, w.Label, w.Label, w.Color, w.Icon, valExpr))
 		case "chart":
 			widgetInit = append(widgetInit, fmt.Sprintf(`
         {
@@ -238,15 +240,19 @@ func (g *Generator) generatePage(p types.Page) error {
         var chartValues []float64
         if q := %q; q != "" {
             rows, err := db.QueryContext(r.Context(), q)
-            if err == nil {
+            if err != nil {
+                log.Printf("page %%s widget %%d (%%s) chart: %%v", %q, %d, %q, err)
+            } else {
                 defer rows.Close()
                 for rows.Next() {
                     var label string
                     var val float64
-                    if err := rows.Scan(&label, &val); err == nil {
-                        chartLabels = append(chartLabels, label)
-                        chartValues = append(chartValues, val)
+                    if err := rows.Scan(&label, &val); err != nil {
+                        log.Printf("page %%s widget %%d (%%s) chart scan: %%v", %q, %d, %q, err)
+                        continue
                     }
+                    chartLabels = append(chartLabels, label)
+                    chartValues = append(chartValues, val)
                 }
             }
         }
@@ -259,7 +265,7 @@ func (g *Generator) generatePage(p types.Page) error {
             ChartLabelsJSON: string(chartLabelsJSON),
             ChartValuesJSON: string(chartValuesJSON),
         })
-        }`, w.Query, w.Label, w.Chart.Type))
+        }`, w.Query, p.Name, i, w.Label, p.Name, i, w.Label, w.Label, w.Chart.Type))
 		case "table":
 			colList := "[]string{"
 			for _, col := range w.DataColumns {
@@ -271,7 +277,9 @@ func (g *Generator) generatePage(p types.Page) error {
         var tableRows []map[string]interface{}
         if q := %q; q != "" {
             dataRows, err := db.QueryContext(r.Context(), q)
-            if err == nil {
+            if err != nil {
+                log.Printf("page %%s widget %%d (%%s) table: %%v", %q, %d, %q, err)
+            } else {
                 defer dataRows.Close()
                 dCols, _ := dataRows.Columns()
                 for dataRows.Next() {
@@ -280,13 +288,15 @@ func (g *Generator) generatePage(p types.Page) error {
                     for i := range vals {
                         valPtrs[i] = &vals[i]
                     }
-                    if err := dataRows.Scan(valPtrs...); err == nil {
-                        row := make(map[string]interface{})
-                        for i, col := range dCols {
-                            row[col] = vals[i]
-                        }
-                        tableRows = append(tableRows, row)
+                    if err := dataRows.Scan(valPtrs...); err != nil {
+                        log.Printf("page %%s widget %%d (%%s) table scan: %%v", %q, %d, %q, err)
+                        continue
                     }
+                    row := make(map[string]interface{})
+                    for i, col := range dCols {
+                        row[col] = vals[i]
+                    }
+                    tableRows = append(tableRows, row)
                 }
             }
         }
@@ -296,7 +306,7 @@ func (g *Generator) generatePage(p types.Page) error {
             TableColumns: %s,
             TableRows: tableRows,
         })
-        }`, w.Query, w.Label, colList))
+        }`, w.Query, p.Name, i, w.Label, p.Name, i, w.Label, w.Label, colList))
 		case "stats_grid":
 			widgetInit = append(widgetInit, fmt.Sprintf(`
         var subWidgets%d []viewmodels.WidgetData`, i))
@@ -305,7 +315,9 @@ func (g *Generator) generatePage(p types.Page) error {
         {
             var subCount int64
             if q := %q; q != "" {
-                _ = db.QueryRowContext(r.Context(), q).Scan(&subCount)
+                if err := db.QueryRowContext(r.Context(), q).Scan(&subCount); err != nil {
+                    log.Printf("page %%s widget %%d (%%s) stats_grid: %%v", %q, %d, %q, err)
+                }
             }
             subWidgets%d = append(subWidgets%d, viewmodels.WidgetData{
                 Type: "stat",
@@ -314,7 +326,7 @@ func (g *Generator) generatePage(p types.Page) error {
                 Icon: %q,
                 Value: template.HTML(fmt.Sprintf("%%d", subCount)),
             })
-        }`, sw.Query, i, i, sw.Label, sw.Color, sw.Icon))
+        }`, sw.Query, p.Name, i, sw.Label, i, i, sw.Label, sw.Color, sw.Icon))
 			}
 			widgetInit = append(widgetInit, fmt.Sprintf(`
         widgets = append(widgets, viewmodels.WidgetData{
@@ -327,7 +339,9 @@ func (g *Generator) generatePage(p types.Page) error {
         var listRows []map[string]interface{}
         if q := %q; q != "" {
             listQueryRows, err := db.QueryContext(r.Context(), q)
-            if err == nil {
+            if err != nil {
+                log.Printf("page %%s widget %%d (%%s) list: %%v", %q, %d, %q, err)
+            } else {
                 defer listQueryRows.Close()
                 listCols, _ := listQueryRows.Columns()
                 for listQueryRows.Next() {
@@ -336,13 +350,15 @@ func (g *Generator) generatePage(p types.Page) error {
                     for i := range listVals {
                         listPtrs[i] = &listVals[i]
                     }
-                    if err := listQueryRows.Scan(listPtrs...); err == nil {
-                        listRow := make(map[string]interface{})
-                        for i, col := range listCols {
-                            listRow[col] = listVals[i]
-                        }
-                        listRows = append(listRows, listRow)
+                    if err := listQueryRows.Scan(listPtrs...); err != nil {
+                        log.Printf("page %%s widget %%d (%%s) list scan: %%v", %q, %d, %q, err)
+                        continue
                     }
+                    listRow := make(map[string]interface{})
+                    for i, col := range listCols {
+                        listRow[col] = listVals[i]
+                    }
+                    listRows = append(listRows, listRow)
                 }
             }
         }
@@ -351,21 +367,29 @@ func (g *Generator) generatePage(p types.Page) error {
             Label: %q,
             TableRows: listRows,
         })
-        }`, w.Query, w.Label))
+        }`, w.Query, p.Name, i, w.Label, p.Name, i, w.Label, w.Label))
 		case "html":
 			widgetInit = append(widgetInit, fmt.Sprintf(`
         {
         var htmlVal string
         if q := %q; q != "" {
-            _ = db.QueryRowContext(r.Context(), q).Scan(&htmlVal)
+            if err := db.QueryRowContext(r.Context(), q).Scan(&htmlVal); err != nil {
+                log.Printf("page %%s widget %%d (%%s) html: %%v", %q, %d, %q, err)
+            }
         }
         widgets = append(widgets, viewmodels.WidgetData{
             Type: "html",
             Label: %q,
             Value: template.HTML(htmlVal),
         })
-        }`, w.Query, w.Label))
+        }`, w.Query, p.Name, i, w.Label, w.Label))
 		}
+	}
+
+	logImport := ""
+	if len(p.Widgets) > 0 {
+		logImport = `    "log"
+`
 	}
 
 	jsonImport := ""
@@ -383,7 +407,7 @@ import (
     "database/sql"
 %s    "fmt"
     "html/template"
-    "net/http"
+%s    "net/http"
 
     %q
     auth %q
@@ -411,7 +435,7 @@ func %s(db *sql.DB) http.HandlerFunc {
         }
     }
 }
-`, jsonImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
+`, jsonImport, logImport, g.moduleImport("internal/viewmodels"), g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), g.moduleImport("internal/views/pages"),
 		handlerName, strings.Join(widgetInit, "\n"), p.Name, panelID, panelPath, viewName)
 
 	return os.WriteFile(filepath.Join(dir, name+".go"), []byte(code), 0644)
