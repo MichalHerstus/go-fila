@@ -11,21 +11,40 @@ import (
 	"github.com/go-fila/go-fila/internal/types"
 )
 
-// Validate checks a parsed config for required fields and applies defaults:
-// version, panel.name and panel.path must be present; panel.id, sqlc paths,
-// resource labels and page paths are defaulted when empty; at least one
-// resource or page must exist.
+// Validate checks a parsed config for required fields and applies defaults. It
+// returns the first validation problem (or nil); callers that need every
+// problem at once (e.g. the editor's Validate screen) use ValidateAll.
 // Params: cfg (the config to validate; may be mutated to set defaults).
 // Returns: an error describing the first validation problem, or nil.
 func Validate(cfg *types.Config) error {
+	errs := ValidateAll(cfg)
+	if len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
+}
+
+// ValidateAll checks a parsed config for required fields and applies defaults
+// (see the Validate doc comment), collecting every problem found instead of
+// stopping at the first. Defaulting still runs even when errors are present so
+// a follow-up pass sees the same normalized config.
+// Params: cfg (the config to validate; may be mutated to set defaults).
+// Returns: the validation problems found (empty when the config is valid).
+func ValidateAll(cfg *types.Config) []error {
+	var errs []error
+	add := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
 	if cfg.Version == "" {
-		return fmt.Errorf("version is required")
+		add(fmt.Errorf("version is required"))
 	}
 	if cfg.Panel.Name == "" {
-		return fmt.Errorf("panel.name is required")
+		add(fmt.Errorf("panel.name is required"))
 	}
 	if cfg.Panel.Path == "" {
-		return fmt.Errorf("panel.path is required")
+		add(fmt.Errorf("panel.path is required"))
 	}
 	if cfg.Panel.ID == "" {
 		cfg.Panel.ID = "admin"
@@ -43,24 +62,24 @@ func Validate(cfg *types.Config) error {
 		cfg.SQLC.OutputPkg = "internal/data"
 	}
 	if len(cfg.Resources) == 0 && len(cfg.Pages) == 0 {
-		return fmt.Errorf("at least one resource or page is required")
+		add(fmt.Errorf("at least one resource or page is required"))
 	}
 	for i, pl := range cfg.Plugins {
 		if pl.Name == "" {
-			return fmt.Errorf("plugins[%d].name is required", i)
+			add(fmt.Errorf("plugins[%d].name is required", i))
 		}
 		if pl.Source == "" {
-			return fmt.Errorf("plugins[%d].source is required", i)
+			add(fmt.Errorf("plugins[%d].source is required", i))
 		}
 		for j := 0; j < i; j++ {
 			if cfg.Plugins[j].Name == pl.Name {
-				return fmt.Errorf("plugins[%d].name %q is duplicated", i, pl.Name)
+				add(fmt.Errorf("plugins[%d].name %q is duplicated", i, pl.Name))
 			}
 		}
 	}
 	for i, r := range cfg.Resources {
 		if r.Name == "" {
-			return fmt.Errorf("resources[%d].name is required", i)
+			add(fmt.Errorf("resources[%d].name is required", i))
 		}
 		if r.Label == "" {
 			cfg.Resources[i].Label = r.Name
@@ -77,18 +96,18 @@ func Validate(cfg *types.Config) error {
 			r.List.PerPage = 20
 		}
 		if err := validateResourceHooks(r); err != nil {
-			return fmt.Errorf("resources[%d]: %w", i, err)
+			add(fmt.Errorf("resources[%d]: %w", i, err))
 		}
 	}
 	for i, p := range cfg.Pages {
 		if p.Name == "" {
-			return fmt.Errorf("pages[%d].name is required", i)
+			add(fmt.Errorf("pages[%d].name is required", i))
 		}
 		if p.Path == "" {
 			cfg.Pages[i].Path = "/" + p.Name
 		}
 	}
-	return nil
+	return errs
 }
 
 // validateResourceHooks checks that every hook declared on a resource's form

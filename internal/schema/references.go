@@ -19,18 +19,28 @@ type QueryRef struct {
 	Inline bool   // true when the reference is inline SQL, not a SQLC query name
 }
 
+// ColumnRef pins a column reference to its exact location in the config so the
+// editor's Validate screen can jump straight to the offending row.
+type ColumnRef struct {
+	Column  string // the referenced column/field name
+	Section string // list.columns / card.fields / detail.fields / form.create.fields / ...
+	Index   int    // index of the column/field within that section
+}
+
 // References is the full set of YAML-side references extracted from a config.
 type References struct {
-	Queries []QueryRef
-	Tables  map[string]string   // resource name -> table name (lowercased)
-	Columns map[string][]string // resource name -> column/field names referenced
+	Queries    []QueryRef
+	Tables     map[string]string   // resource name -> table name (lowercased)
+	Columns    map[string][]string // resource name -> column/field names referenced
+	ColumnRefs map[string][]ColumnRef // resource name -> column references with location
 }
 
 // CollectReferences walks cfg and returns all query/table/column references.
 func CollectReferences(cfg *types.Config) *References {
 	refs := &References{
-		Tables:  map[string]string{},
-		Columns: map[string][]string{},
+		Tables:     map[string]string{},
+		Columns:    map[string][]string{},
+		ColumnRefs: map[string][]ColumnRef{},
 	}
 	for _, r := range cfg.Resources {
 		name := r.Name
@@ -38,19 +48,31 @@ func CollectReferences(cfg *types.Config) *References {
 		if r.List != nil {
 			refs.addQuery(r.List.Query, name+".list.query")
 			refs.addQuery(r.List.CountQuery, name+".list.count_query")
-			for _, c := range r.List.Columns {
-				refs.addColumn(name, c.Name)
+			for i, c := range r.List.Columns {
+				refs.addColumnRef(name, "list.columns", i, c.Name)
+			}
+			if r.List.DefaultSort != "" {
+				refs.addColumnRef(name, "list.default_sort", 0, sortColumn(r.List.DefaultSort))
 			}
 		}
 		if r.Card != nil {
-			for _, f := range r.Card.Fields {
-				refs.addFieldRefs(name, f, name+".card.fields")
+			for i, f := range r.Card.Fields {
+				refs.addFieldRefs(name, "card.fields", i, f, name+".card.fields")
+			}
+			for i, col := range r.Card.Searchable {
+				refs.addColumnRef(name, "card.searchable", i, col)
+			}
+			if r.Card.KanbanField != "" {
+				refs.addColumnRef(name, "card.kanban_field", 0, r.Card.KanbanField)
+			}
+			if r.Card.DefaultSort != "" {
+				refs.addColumnRef(name, "card.default_sort", 0, sortColumn(r.Card.DefaultSort))
 			}
 		}
 		if r.Detail != nil {
 			refs.addQuery(r.Detail.Query, name+".detail.query")
-			for _, f := range r.Detail.Fields {
-				refs.addFieldRefs(name, f, name+".detail.fields")
+			for i, f := range r.Detail.Fields {
+				refs.addFieldRefs(name, "detail.fields", i, f, name+".detail.fields")
 			}
 		}
 		if r.Form != nil {
@@ -69,8 +91,8 @@ func CollectReferences(cfg *types.Config) *References {
 				}
 				refs.addQuery(fa.Query, name+"."+section+".query")
 				refs.addQuery(fa.PopulateQuery, name+"."+section+".populate_query")
-				for _, f := range fa.Fields {
-					refs.addFieldRefs(name, f, name+"."+section+".fields")
+				for i, f := range fa.Fields {
+					refs.addFieldRefs(name, section+".fields", i, f, name+"."+section+".fields")
 				}
 			}
 		}
@@ -82,6 +104,12 @@ func CollectReferences(cfg *types.Config) *References {
 		collectWidgetQueries(refs, p.Widgets, "page "+p.Name)
 	}
 	return refs
+}
+
+// sortColumn strips a leading "-" from a default_sort value (a "-" prefix means
+// descending order; the referenced column is the rest).
+func sortColumn(s string) string {
+	return strings.TrimPrefix(strings.TrimSpace(s), "-")
 }
 
 func (refs *References) addQuery(name, origin string) {
@@ -115,8 +143,23 @@ func (refs *References) addColumn(resource, col string) {
 	refs.Columns[resource] = append(refs.Columns[resource], col)
 }
 
-func (refs *References) addFieldRefs(resource string, f types.Field, origin string) {
-	refs.addColumn(resource, f.Name)
+// addColumnRef records a column reference together with its exact location
+// (section + index) and keeps the deduplicated Columns summary in sync.
+func (refs *References) addColumnRef(resource, section string, index int, col string) {
+	if col == "" {
+		return
+	}
+	refs.addColumn(resource, col)
+	for _, c := range refs.ColumnRefs[resource] {
+		if c.Column == col && c.Section == section && c.Index == index {
+			return
+		}
+	}
+	refs.ColumnRefs[resource] = append(refs.ColumnRefs[resource], ColumnRef{Column: col, Section: section, Index: index})
+}
+
+func (refs *References) addFieldRefs(resource, section string, index int, f types.Field, origin string) {
+	refs.addColumnRef(resource, section, index, f.Name)
 	if f.OptionsQuery != "" {
 		refs.addQuery(f.OptionsQuery, origin+"."+f.Name)
 	}

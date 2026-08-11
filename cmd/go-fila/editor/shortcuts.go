@@ -18,6 +18,7 @@ import (
 var globalKeys = map[tcell.Key]bool{
 	tcell.KeyCtrlS: true,
 	tcell.KeyCtrlQ: true,
+	tcell.KeyCtrlV: true, // Validate
 }
 
 // ctrlKey returns the tcell key for Ctrl+<letter>, or 0 for non-letters.

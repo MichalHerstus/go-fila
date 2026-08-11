@@ -36,12 +36,13 @@ Decisions:
 │  Resources  │                                                  │
 │  Pages      │                                                  │
 │ ─────────── │                                                  │
+│  Validate   │                                                  │
 │  Sync       │                                                  │
 │  Preview    │                                                  │
 │  Save       │                                                  │
 │  Quit       │                                                  │
 ├─────────────┴──────────────────────────────────────────────────┤
-│  ↑↓ Enter    Ctrl+S save   Esc back   F10 quit   toast area    │
+│  ↑↓ Enter    Ctrl+S save   Ctrl+V validate   Esc back   F10 quit   toast area │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,6 +50,7 @@ Decisions:
 - **Live editing**: form fields bind to structs via `SetChangedFunc` closures; any change sets `modified` (status bar shows it).
 - **Save** (Ctrl+S / Save menu item): `yaml.Marshal(cfg)` → write → toast "Saved". Runs `parser.Validate` first; errors shown in a modal, file not written.
 - **Quit** (F10 / Quit item / Esc at root): if `modified`, modal confirm *Save & quit / Discard / Cancel*.
+- **Validate** (Ctrl+V / Validate nav item): full health check listing every structural + schema finding; Enter on a row jumps to the exact editor page and highlights the offending column/field.
 - tview Forms have no page-groups: sections separated with `AddTextView`. Type-dependent widget/field forms rebuild via `form.Clear(true)` + re-add on type change.
 
 **Files** (`cmd/go-fila/editor/`, old bubbletea/huh files deleted):
@@ -68,6 +70,7 @@ hooks.go    (before/after hooks: name + fn|sql)
 maps.go     (map[string]string editor)
 sqledit.go  (per-resource SQLC query SQL editor: staged, flushed on save)
 sync.go     (SQL<->YAML analysis: simple list of schema tables, queries, missing refs)
+validate.go (validation screen: structural + schema findings, jump-to-fix)
 preview.go  (dashboard + per-resource ASCII-frame previews)
 + editor_test.go, run_test.go (tview sim-screen integration tests)
 ```

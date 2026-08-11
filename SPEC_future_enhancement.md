@@ -175,6 +175,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | SQLite stored procedures (batch-in-table) | Greenfield |
 | AI-assisted `go-fila edit` (OpenRouter) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, single retry, httptest stub) |
 | Drop Node.js/npm from the dashboard build | Planned (D8) |
+| Editor Validate (main menu → results list → jump-to-fix) | **Done (D9)** |
 
 ---
 
@@ -351,6 +352,65 @@ go-fila edit [--apikey KEY] --prompt "…" --dry-run      # preview proposed YAM
 diff; retry-on-invalid yields a valid second attempt; `--dry-run` never writes; fence
 extraction; flag/env key resolution (missing key → clear error). Docs: AGENTS.md CLI
 section + `SPEC.md` usage line (config is sent to OpenRouter).
+
+---
+
+### D9 — Editor validation with jump-to-fix (`go-fila edit` → Validate)
+
+**Status: done (2026-08-11).** Adds a "Validate" entry to the editor's left
+nav that runs a full health check (structural + field-name + missing table/query)
+and lists every problem; pressing Enter on a finding jumps to the exact editor
+page and highlights the offending column/field row. Decisions taken (2026-08-11):
+results-list screen (not jump-to-first), full health-check scope, missing columns
+are warnings (computed-column tolerance) while structural / missing-table /
+missing-query findings are errors.
+
+**Design:**
+1. **`internal/parser/validator.go`** — split `Validate` into
+   `ValidateAll(cfg) []error` (collects every structural problem instead of
+   early-returning) plus a thin `Validate` wrapper returning the first error, so
+   `parser.Parse` and the editor's save path keep their current behaviour.
+2. **`internal/schema/references.go`** — location-aware column refs: new
+   `ColumnRef{Column, Section string, Index int}` +
+   `References.ColumnRefs map[string][]ColumnRef` (kept beside the existing
+   `Columns` map). `CollectReferences` records section+index for `list.columns`,
+   `card.fields`, `detail.fields`, `form.create/update/delete.fields`, plus
+   `list/card.default_sort`, `card.kanban_field`, `card.searchable` (leading `-`
+   stripped via a `sortColumn` helper).
+3. **`cmd/go-fila/editor/sync.go`** — `syncReport.missingCols` becomes
+   `[]colMissing{resource string; ref schema.ColumnRef}`; the Sync screen renders
+   `resource.section.column` (more precise than today's `resource.column`).
+4. **`cmd/go-fila/editor/validate.go` (new)** — `finding{kind, label, detail;
+   goTo}` + `runValidation()`:
+   - structural: validate a YAML copy via `parser.ValidateAll` (same copy
+     technique as `validateCopy`); a `goTo` is attached when the message parses
+     `resources[i]`/`pages[i]` (→ resource/page page) or mentions `panel.name`/
+     `panel.path` (→ panel page).
+   - schema: reuse `analyze()` — missing tables → resource page; missing columns
+     → `sectionJump`; missing queries → the resource's SQL-queries page (query
+     row focused when it appears there); missing FK `List{}` queries →
+     informational warning linking to the Sync screen.
+   - `sectionJump(idx, section, focusIdx)` maps sections to the existing builders
+     (`columnsPage`, `cardFieldsPage`, `detailFieldsPage`, `formFieldsPage(idx,
+     which)`, `listPage`, `cardPage`), `showPage`s the result, then
+     `SetCurrentItem(focusIdx)` to highlight the bad row.
+   - `validatePage()`: tview.List of findings (red errors / yellow warnings),
+     "No problems found" empty state, Refresh (Ctrl+R) + Back (Ctrl+B) buttons —
+     mirrors the Sync screen layout.
+5. **`cmd/go-fila/editor/editor.go`** — `buildNav` gains
+   `e.navItem("Validate (Ctrl+V)", "validate", e.validatePage)` between "Sync SQL
+   & YAML" and "Preview", plus a global `tcell.KeyCtrlV` case in `capture`.
+
+**Tests / exit criteria (met):** parser — `ValidateAll` returns multiple errors while
+`Validate` returns the first (`TestValidateAllReportsEveryProblem`); schema — `ColumnRefs` sections/indexes asserted in
+`TestCollectReferences`; editor — `validatePage` builds (added to
+`TestPageBuilders`), `runValidation` flags a bad column in list/card/form sections
+with a working `goTo` (`TestRunValidationFindsBadColumns`), `sectionJump` focuses
+the offending row (`TestSectionJumpFocusesOffendingRow`), sim-screen smoke
+navigates to Validate (`TestValidateGlobalShortcut`). Also added a save-then-quit
+regression test for the reported "Ctrl+S then Ctrl+Q asks to save" bug
+(`TestSaveThenQuitSkipsConfirm`, `TestQuitConfirmClearsModified`). Docs: AGENTS.md
+editor section.
 
 ---
 

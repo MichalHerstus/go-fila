@@ -14,6 +14,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// colMissing is a column reference that does not exist in its table, with the
+// exact config location (resource + section + index) so the Validate screen can
+// jump to it.
+type colMissing struct {
+	resource string
+	ref      schema.ColumnRef
+}
+
 // syncReport is the result of one analysis pass over schema/queries/YAML.
 type syncReport struct {
 	tables      []schema.Table
@@ -21,7 +29,7 @@ type syncReport struct {
 	missingQ    []schema.QueryRef
 	inlineQ     []schema.QueryRef // inline SQL refs (widgets/actions), not query names
 	missingTabs []string          // resource names with no matching table
-	missingCols []string          // "resource: column" entries with no matching column
+	missingCols []colMissing      // column refs with no matching column
 	fkTargets   []string          // FK target tables lacking a List query
 	err         string
 }
@@ -74,15 +82,15 @@ func (e *Editor) analyze() *syncReport {
 		}
 	}
 
-	for rname, cols := range refs.Columns {
+	for rname, refsList := range refs.ColumnRefs {
 		table := refs.Tables[rname]
 		t := schema.FindTableByName(tables, table)
 		if t == nil {
 			continue
 		}
-		for _, c := range cols {
-			if !tableHasColumn(*t, c) {
-				rep.missingCols = append(rep.missingCols, rname+"."+c)
+		for _, ref := range refsList {
+			if !tableHasColumn(*t, ref.Column) {
+				rep.missingCols = append(rep.missingCols, colMissing{resource: rname, ref: ref})
 			}
 		}
 	}
@@ -167,8 +175,8 @@ func (e *Editor) syncPage() tview.Primitive {
 		color = "yellow"
 	}
 	fmt.Fprintf(tv, "  ["+color+"]missing columns: %d[-:-:-]\n", len(rep.missingCols))
-	for _, c := range rep.missingCols {
-		fmt.Fprintf(tv, "    %s\n", c)
+	for _, m := range rep.missingCols {
+		fmt.Fprintf(tv, "    %s.%s.%s\n", m.resource, m.ref.Section, m.ref.Column)
 	}
 	color = "green"
 	if len(rep.fkTargets) > 0 {

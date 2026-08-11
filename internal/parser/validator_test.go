@@ -3,6 +3,8 @@ package parser
 import (
 	"strings"
 	"testing"
+
+	"github.com/go-fila/go-fila/internal/types"
 )
 
 const hooksYAML = `
@@ -197,5 +199,44 @@ func TestParsePluginRejectsDuplicateNames(t *testing.T) {
 		t.Fatal("expected error for duplicate plugin names")
 	} else if !strings.Contains(err.Error(), "duplicated") {
 		t.Fatalf("expected duplicate-name error, got: %v", err)
+	}
+}
+
+// TestValidateAllReportsEveryProblem verifies ValidateAll collects all
+// structural problems while Validate still returns only the first.
+func TestValidateAllReportsEveryProblem(t *testing.T) {
+	cfg := &types.Config{
+		Version:   "1",
+		Panel:     types.Panel{Name: "Admin", Path: "/admin"},
+		Resources: []types.Resource{{Name: "User"}},
+	}
+	// Break it in several ways at once.
+	cfg.Version = ""
+	cfg.Panel.Name = ""
+	cfg.Panel.Path = ""
+	cfg.Plugins = []types.PluginConfig{{}, {}}
+
+	errs := ValidateAll(cfg)
+	want := []string{
+		"version is required",
+		"panel.name is required",
+		"panel.path is required",
+		"plugins[0].name is required",
+		"plugins[0].source is required",
+		"plugins[1].name is required",
+		"plugins[1].source is required",
+		`plugins[1].name "" is duplicated`,
+	}
+	if len(errs) != len(want) {
+		t.Fatalf("ValidateAll returned %d errors, want %d: %v", len(errs), len(want), errs)
+	}
+	for i, w := range want {
+		if errs[i].Error() != w {
+			t.Errorf("errs[%d] = %q, want %q", i, errs[i].Error(), w)
+		}
+	}
+	// Validate keeps the old single-first-error contract used by Parse/save.
+	if got := Validate(cfg); got == nil || got.Error() != "version is required" {
+		t.Errorf("Validate should return the first error, got %v", got)
 	}
 }

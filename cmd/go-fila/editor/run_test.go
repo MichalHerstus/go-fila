@@ -100,3 +100,36 @@ func TestEditorSaveRoundTrip(t *testing.T) {
 		t.Errorf("config file not written: %v", err)
 	}
 }
+
+// TestSaveThenQuitSkipsConfirm reproduces the reported bug: edit a field, save
+// with Ctrl+S, then quit with Ctrl+Q. The save must clear the modified flag so
+// quitConfirm exits directly instead of asking to save/discard.
+func TestSaveThenQuitSkipsConfirm(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/go-fila.yaml"
+
+	screen := newSimScreen(t)
+	e := New(testConfig(), path)
+	e.SetScreen(screen)
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		screen.InjectKey(tcell.KeyEnter, 0, tcell.ModNone) // open Panel (first nav item)
+		time.Sleep(150 * time.Millisecond)
+		screen.InjectKey(tcell.KeyRune, 'x', tcell.ModNone) // type into first field
+		time.Sleep(150 * time.Millisecond)
+		screen.InjectKey(tcell.KeyCtrlS, 0, tcell.ModNone) // save
+		time.Sleep(200 * time.Millisecond)
+		screen.InjectKey(tcell.KeyCtrlQ, 0, tcell.ModNone) // quit — must not ask
+	}()
+
+	saved, err := e.Run()
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	if !saved {
+		t.Error("expected save")
+	}
+	if e.modified {
+		t.Error("modified should be false after Ctrl+S, so Ctrl+Q must quit directly")
+	}
+}

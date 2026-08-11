@@ -114,6 +114,7 @@ func (e *Editor) buildNav() {
 	e.navItem("Resources", "resources", e.resourcesPage)
 	e.navItem("Pages", "pages", e.pagesPage)
 	e.nav.AddItem("", "", 0, nil)
+	e.navItem("Validate (Ctrl+V)", "validate", e.validatePage)
 	e.navItem("Sync SQL & YAML", "sync", e.syncPage)
 	e.navItem("Preview", "preview", e.previewPage)
 	e.nav.AddItem("", "", 0, nil)
@@ -129,6 +130,9 @@ func (e *Editor) capture(event *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyF10, tcell.KeyCtrlQ:
 		e.quitConfirm()
+		return nil
+	case tcell.KeyCtrlV:
+		e.showPage("validate", e.validatePage())
 		return nil
 	case tcell.KeyEsc:
 		if e.modalOpen {
@@ -181,7 +185,7 @@ func (e *Editor) homePage() tview.Primitive {
 		fmt.Fprintf(tv, "  %s %s%s\n", p.Name, p.Path, mark)
 	}
 	fmt.Fprintf(tv, "\n[::b]Connections[::-]:\n%s\n", strings.Join(conns, "\n"))
-	fmt.Fprintf(tv, "\n[::d]Use the left menu to edit. Ctrl+S saves, Ctrl+Q quits.[::-]")
+	fmt.Fprintf(tv, "\n[::d]Use the left menu to edit. Ctrl+S saves, Ctrl+V validates, Ctrl+Q quits.[::-]")
 	return tv
 }
 
@@ -208,7 +212,7 @@ func (e *Editor) renderStatus() {
 	if e.status == nil {
 		return
 	}
-	e.status.SetText(" [::d]↑↓/j/k navigate   Enter edit   a add   d delete   Esc back   Ctrl+S save   Ctrl+Q quit[::-]")
+	e.status.SetText(" [::d]↑↓/j/k navigate   Enter edit   a add   d delete   Esc back   Ctrl+S save   Ctrl+V validate   Ctrl+Q quit[::-]")
 }
 
 // save marshals the config and writes it back to configPath, flushing any

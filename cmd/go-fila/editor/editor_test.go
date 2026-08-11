@@ -89,6 +89,7 @@ func TestPageBuilders(t *testing.T) {
 		"navigation":  e.navGroupsPage,
 		"pages":       e.pagesPage,
 		"resources":   e.resourcesPage,
+		"validate":    e.validatePage,
 		"preview":     e.previewPage,
 	}
 	for name, build := range builders {
