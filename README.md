@@ -8,7 +8,7 @@
 |---|---|---|
 | [Go](https://go.dev/dl/) 1.26+ | Running go-fila + building generated app | |
 | [SQLC](https://docs.sqlc.dev/en/latest/overview/install.html) | Generating the data layer (`internal/data/`) | Generator runs it, failure is non-fatal |
-| [Node.js](https://nodejs.org/) + npm | Building Tailwind CSS + vendoring Chart.js in the generated app | `make css` / `npm install && npm run build:css && npm run copy:chartjs` in the output dir |
+| [Tailwind CSS standalone binary](https://github.com/tailwindlabs/tailwindcss/releases) | Building the dashboard CSS | `make get-tailwind` downloads the pinned `v3.4.19` binary to `.tools/`; or point `TAILWIND` at any `tailwindcss` on PATH — **no Node.js/npm required** |
 | [Templ](https://templ.dev/) | Compiling `.templ` files in the generated app | Optional — the generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` is handled by the Go toolchain |
 
 ## Quick start
@@ -45,14 +45,14 @@ make run                    # make run PORT=9090 LOG=err for custom port / error
 # Or run the binary directly:
 ./admin --port 8080         # --log full (default) | err — err logs only error responses
 
-# Individual steps: make deps / css / sqlc / templ / tidy / clean
+# Individual steps: make css / sqlc / templ / tidy / get-tailwind / clean
 # Deploy: make package (tar.gz of binary + static + sql + data), extract on
 # the target machine and run the binary from the extracted dir.
 ```
 
-The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `npm install` → `npm run build:css` → `npm run copy:chartjs` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `npm install`, `npm run build:css`, `npm run copy:chartjs`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
+The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `css` (Tailwind via the standalone binary) → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. **No Node.js/npm is required** — Chart.js is embedded into go-fila and vendored into `static/js/chart.js` at generation time, and Tailwind CSS builds with the `tailwindcss` standalone binary (`make TAILWIND=$(CURDIR)/.tools/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` binary for linux/macos × x64/arm64). The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `make css`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
 
-Chart.js is vendored into `static/js/chart.js` at build time (pinned to `^4.4.1`; `copy:chartjs` copies `node_modules/chart.js/dist/chart.umd.js`), so the running dashboard serves charts locally and needs **no internet at runtime**. A plain `go build` skips the npm steps, so run `make` (or `make css`) at least once or `/static/js/chart.js` will 404.
+Chart.js is vendored into `static/js/chart.js` at **generation time** (the go-fila binary embeds the pinned Chart.js 4.4.1 UMD bundle, MIT license banner intact), so the running dashboard serves charts locally and needs **no internet at runtime**. A bare `go build` in `admin/` serves chart.js immediately — no npm step to forget.
 
 ## Deployment
 
@@ -116,7 +116,7 @@ AI-assisted edit (edit only):
   --dry-run      Print proposed YAML + diff without writing
 ```
 
-`sqlc generate` and `npx tailwindcss` failures during `go-fila generate` are non-fatal. Re-run them manually in the output directory.
+`sqlc generate` and the Tailwind build failures during `go-fila generate` are non-fatal. Re-run them manually in the output directory (`make css` with the standalone binary).
 
 ## Project structure
 
@@ -158,7 +158,8 @@ output/
 ├── go.mod / go.sum                  # go.mod declares templ as a Go tool
 ├── Makefile                         # make / make build — builds the binary
 ├── sqlc.yaml
-├── package.json / tailwind.config.js
+├── tailwind.config.js               # no package.json — no npm needed
+├── static/js/chart.js               # Chart.js, vendored at generation time
 ├── sql/
 │   ├── migrations/schema.sql        # Copied from your project
 │   └── queries/*.sql                # Copied from your project

@@ -440,7 +440,7 @@ go-fila generate --config go-fila.yaml --out ./output
 7. **Generate auth** — login handler, session middleware, RBAC middleware
 8. **Generate main.go** — DB pool init, chi setup, server start
 9. **Compile Tailwind** — scan `.templ` files for classes, output `styles.css`
-10. **Generate go.mod + Makefile** — `tool github.com/a-h/templ/cmd/templ` directive; a `Makefile` whose `build` target runs all steps (npm deps, Tailwind, sqlc, tidy, templ, `go build -o <binary> .`) to produce the dashboard binary
+10. **Generate go.mod + Makefile** — `tool github.com/a-h/templ/cmd/templ` directive; a `Makefile` whose `build` target runs all steps (Tailwind via the standalone binary, sqlc, tidy, templ, `go build -o <binary> .`) to produce the dashboard binary — **no npm/node required**
 
 ---
 
@@ -452,6 +452,8 @@ output/
 ├── go.mod / go.sum             # go.mod declares templ as a Go tool
 ├── Makefile                    # make / make build — builds the dashboard binary
 ├── sqlc.yaml
+├── tailwind.config.js          # no package.json — no npm needed
+├── static/js/chart.js          # Chart.js, vendored at generation time
 ├── sql/
 │   ├── schema.sql
 │   └── queries/
@@ -501,10 +503,12 @@ output/
 │   │       └── modal.templ
 │   └── assets/
 │       └── css/
-│           └── styles.css      # compiled Tailwind (produced by Tailwind CLI)
+│           └── styles.css      # Tailwind input (compiled to static/css by the standalone binary)
 └── static/
+    ├── css/
+    │   └── styles.css          # compiled Tailwind (produced by the standalone binary)
     └── js/
-        └── chart.js            # bundled Chart.js
+        └── chart.js            # bundled Chart.js (embedded in go-fila, copied at generate time)
 ```
 
 ---

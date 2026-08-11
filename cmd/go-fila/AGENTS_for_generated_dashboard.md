@@ -33,7 +33,8 @@ All other generated files are **off-limits**, including:
 `admin/main.go`, `admin/internal/panel/**` (handlers/router/auth),
 `admin/internal/views/**` (templ), `admin/internal/data/**` (sqlc output),
 `admin/internal/viewmodels/**`, `admin/internal/assets/**`, `admin/sqlc.yaml`,
-`admin/tailwind.config.js`, `admin/package.json`, `admin/Makefile`, `admin/static/**`.
+`admin/tailwind.config.js`, `admin/Makefile`, `admin/static/**`.
+(There is no `package.json` — the dashboard builds with no npm/node.)
 
 ## Build & regeneration
 
@@ -41,14 +42,16 @@ All other generated files are **off-limits**, including:
 # from the repo root (~/dev/pokus-fila)
 ./go-fila generate --config go-fila.yaml --out admin --force   # regenerate
 cd admin
-make                                                           # npm + tailwind + sqlc + templ + go build
+make                                                           # tailwind + sqlc + templ + go build
 ./admin --port 8080                                            # run
 ```
 
 - `generate` runs `sqlc generate` + tailwind itself but their failure is
   **non-fatal** — re-run `make` afterwards; it redoes them in the right order.
-- `make` targets: `build` (default), `deps`, `css`, `sqlc`, `templ`, `tidy`,
-  `run`, `package`, `clean`.
+  Tailwind needs the standalone binary: `make get-tailwind` downloads it to
+  `.tools/`, then `make TAILWIND=$(CURDIR)/.tools/tailwindcss css`.
+- `make` targets: `build` (default), `css`, `sqlc`, `templ`, `tidy`,
+  `get-tailwind`, `run`, `package`, `clean`.
 - Sanity-check a config without building: `./go-fila validate --verbose`
   (parses YAML; does NOT verify SQL references — that check is manual, see below).
 

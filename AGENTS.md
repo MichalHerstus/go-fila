@@ -74,19 +74,19 @@ Flags: `init --db <dsn> --config <yaml> --out <dir> --force` (short variants `-d
 
 **Preview screen** (`preview.go`): ASCII-frame mock of the dashboard (topbar + sidebar from `cfg.Navigation` + per-page widget boxes) and per-resource list mock. The grid chrome (`│ ├ ┬ ┤ ┌ ┐ └ ┘ ─`) is drawn in light blue (`[lightblue]`) while the cell text is white (`[white]`), and every row is padded to the exact same total width (`previewWidth`=78) via `padVisual` (tag-aware: `tview.TaggedStringWidth`) — content row widths are `previewSideWidth`=26 / `previewContentWidth`=49 so the chrome rows (top/bottom borders, column separator) all add up to `previewWidth`. `colorStable` rewrites full color resets (`[-:-:-]`/`[:]`) from content into attribute-only `[::-]` so neither grid nor text color survives emphasis tags intact. No DB, no generated app.
 
-The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `npm install` → `npm run build:css` → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `deps`, `css`, `sqlc`, `templ`, `tidy` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`.
+The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `css` (Tailwind via the standalone binary) → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `css`, `sqlc`, `templ`, `tidy`, `get-tailwind` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`. **No npm/node is required** (D8): Chart.js is embedded into the go-fila binary and vendored to `static/js/chart.js` at generation time, and Tailwind runs via the `tailwindcss` standalone binary (`TAILWIND ?= tailwindcss`, override with `make TAILWIND=$(CURDIR)/.tools/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` standalone binary for the current OS/arch — linux/macos × x64/arm64 — via `uname -s/-m` mapping and curl).
 
 Equivalent manual steps:
 
 ```sh
 cd admin
-npm install && npm run build:css   # build tailwind
+make css   # or: make get-tailwind && make TAILWIND=$(CURDIR)/.tools/tailwindcss css
 sqlc generate                       # retry if it failed during generate
 go tool templ generate              # compile .templ -> *_templ.go (required before go build)
 go mod tidy && go build -o admin .
 ```
 
-`sqlc generate` and `npx tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
+`sqlc generate` and `tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
 
 Flags: `generate --config <yaml> --out <dir> --force --verbose` (short variants `-c`, `-o`, `-f`, `-v`). `--out` basename becomes the module name.
 
@@ -368,7 +368,7 @@ The generated app ships security defaults. Keep them intact when editing the emi
 
 Supported widget types: `stat`, `stats_grid`, `chart` (line/bar/pie/area via Chart.js), `table`, `list`, `html`. Each queries DB via raw SQL at request time. Chart data serialized to JSON in `data-chart-labels` / `data-chart-values` attributes. **Widget query errors are logged, not fatal**: every widget's `QueryRowContext`/`Scan` error is emitted as `log.Printf("page %s widget %d (%s) <widget>: %v", pageName, i, widgetName, err)` (scan errors use a `"… <widget> scan: %v"` variant) and the widget renders with whatever rows it got — a broken widget never blanks the whole page or 500s.
 
-Chart.js is **vendored at build time** — no CDN, runtime is offline. The generated `package.json` declares `chart.js` (pinned `^4.4.1`) in `devDependencies` and a `copy:chartjs` script (`mkdir -p static/js && cp node_modules/chart.js/dist/chart.umd.js static/js/chart.js`). The Makefile `css` target runs `npm run build:css` **and** `npm run copy:chartjs`; `templ.go` `Base` references `/static/js/chart.js`. Version is pinned to 4.4.x because 4.5+ renamed the UMD bundle to `chart.umd.min.js`. `go-fila generate` itself never runs npm, so chart.js is only copied by the `make`/`css` step — a plain `go build` (without `make`) will 404 on chart.js.
+Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is offline. The go-fila binary embeds the pinned Chart.js **4.4.1** UMD bundle (`internal/generator/assets/chart.umd.js`, MIT license banner intact, `//go:embed`'d as `chartUmdJS` in `tailwind.go`) and `generateAssets()` writes it to `static/js/chart.js` (the same name `templ.go` `Base` references via `<script src="/static/js/chart.js">`). 4.4.1 ships only the unminified `chart.umd.js` (4.5+ added a `.min.js` variant); the file is embedded as-is. A bare `go build` in `admin/` serves chart.js with zero network — there is no `package.json` emitted and no npm step anywhere.
 
 ## Repo layout
 
@@ -381,7 +381,7 @@ Chart.js is **vendored at build time** — no CDN, runtime is offline. The gener
 | `cmd/go-fila/editor/` | tview TUI editor: 3-pane shell, section editors, sync + validate + preview screens (18 files, see `edit` above) |
 | `internal/types/` | YAML-tagged Go structs for config schema (5 files: config.go, panel.go, resource.go, field.go, hook.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (13 files, see above) |
+| `internal/generator/` | Code generation pipeline (13 files, see above; `assets/` holds the embedded Chart.js 4.4.1 bundle) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/go-fila/main.go`'s `cmdInit` |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
 | `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |
@@ -390,4 +390,4 @@ Chart.js is **vendored at build time** — no CDN, runtime is offline. The gener
 
 `github.com/a-h/templ`, `github.com/go-chi/chi/v5`, `github.com/gorilla/sessions`, `golang.org/x/crypto`. Plus `github.com/jackc/pgx/v5` (postgres, blank-imported in main.go), `github.com/mattn/go-sqlite3 v1.14.24` (sqlite, blank-imported in main.go), and `github.com/microsoft/go-mssqldb v1.10.0` (mssql, blank-imported in main.go) — the `pgx` stdlib driver registers the `"pgx"` database/sql name, so generated main.go calls `sql.Open("pgx", dsn)` for postgres.
 
-The generated `go.mod` also declares `tool github.com/a-h/templ/cmd/templ` so `go tool templ generate` works without a manual templ install, and `generateMakefile()` emits a `Makefile` whose `build` target runs all steps (npm deps, Tailwind, sqlc, tidy, templ, `go build -o <binary> .`).
+The generated `go.mod` also declares `tool github.com/a-h/templ/cmd/templ` so `go tool templ generate` works without a manual templ install, and `generateMakefile()` emits a `Makefile` whose `build` target runs all steps (Tailwind via the standalone binary, sqlc, tidy, templ, `go build -o <binary> .`) with no npm dependency.

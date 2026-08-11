@@ -416,7 +416,7 @@ editor section.
 
 ### D8 — Drop Node.js/npm from the generated dashboard build
 
-**Status: planned (2026-08-10).** Goal: `make` (and `go-fila generate`) must not require
+**Status: implemented (2026-08-11).** Goal: `make` (and `go-fila generate`) must not require
 node/npm; generated-app output stays byte-identical and runtime stays offline. The only
 npm consumers are Tailwind CSS compilation (`npx tailwindcss`) and Chart.js vendoring
 (`cp node_modules/...`). Decisions taken (2026-08-10): Tailwind via the **standalone

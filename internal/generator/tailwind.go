@@ -1,12 +1,15 @@
 // tailwind.go
 //
 // Generates the Tailwind CSS source and static assets (tailwind.config.js and
-// package.json) for the admin panel application, and runs the Tailwind CSS
-// build. The build is non-fatal: it is invoked after generation and may be
-// re-run manually by the user.
+// the vendored Chart.js bundle) for the admin panel application, and runs the
+// Tailwind CSS build. The build is non-fatal: it is invoked after generation
+// and may be re-run manually by the user. Chart.js is embedded into the go-fila
+// binary (internal/generator/assets/chart.umd.js) so the generated dashboard
+// needs no npm/node and stays offline at runtime.
 package generator
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,14 +17,21 @@ import (
 	"strings"
 )
 
+//go:embed assets/chart.umd.js
+var chartUmdJS []byte
+
 // generateAssets generates all static assets for the project: the Tailwind
-// input CSS and the tailwind.config.js + package.json files.
-// Returns: an error if either step fails.
+// input CSS, the tailwind.config.js file and the vendored Chart.js bundle at
+// static/js/chart.js.
+// Returns: an error if any step fails.
 func (g *Generator) generateAssets() error {
 	if err := g.generateTailwindCSS(); err != nil {
 		return err
 	}
-	return g.generateStaticAssets()
+	if err := g.generateStaticAssets(); err != nil {
+		return err
+	}
+	return g.writeChartJS()
 }
 
 // generateTailwindCSS writes the Tailwind directives file that serves as the
@@ -37,8 +47,8 @@ func (g *Generator) generateTailwindCSS() error {
 
 // generateStaticAssets writes tailwind.config.js (scanning the templ views
 // for class names, with dark mode enabled via the 'class' strategy and brand
-// colors/fonts from the config) and package.json (with the build:css script)
-// into the output directory. Returns an error if either file cannot be written.
+// colors/fonts from the config) into the output directory. Returns an error if
+// the file cannot be written.
 func (g *Generator) generateStaticAssets() error {
 	primary := g.Config.Panel.Brand.Colors.Primary
 	if primary == "" {
@@ -80,27 +90,14 @@ module.exports = {
   plugins: [],
 }
 `, primary, secondary, fontExtend)
-	if err := os.WriteFile(filepath.Join(g.OutDir, "tailwind.config.js"), []byte(tailwindConfig), 0644); err != nil {
-		return err
-	}
-
-	packageJSON := `{
-  "private": true,
-  "scripts": {
-    "build:css": "tailwindcss -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify",
-    "copy:chartjs": "mkdir -p static/js && cp node_modules/chart.js/dist/chart.umd.js static/js/chart.js"
-  },
-  "devDependencies": {
-    "tailwindcss": "^3.4.0",
-    "chart.js": "^4.4.1"
-  }
+	return os.WriteFile(filepath.Join(g.OutDir, "tailwind.config.js"), []byte(tailwindConfig), 0644)
 }
-`
-	if err := os.WriteFile(filepath.Join(g.OutDir, "package.json"), []byte(packageJSON), 0644); err != nil {
-		return err
-	}
 
-	return nil
+// writeChartJS writes the embedded Chart.js UMD bundle to static/js/chart.js
+// so the generated dashboard serves charts locally with no npm step and no CDN
+// at runtime. Returns an error on write failure.
+func (g *Generator) writeChartJS() error {
+	return os.WriteFile(filepath.Join(g.OutDir, "static/js/chart.js"), chartUmdJS, 0644)
 }
 
 // fontStack converts a comma-separated CSS font stack ("Inter, sans-serif")
@@ -124,12 +121,19 @@ func fontStack(family string) string {
 	return "[" + strings.Join(parts, ", ") + "]"
 }
 
-// RunTailwind executes `npx tailwindcss` to build the compiled CSS into
-// static/css/styles.css, streaming output through to the user.
-// Returns an error if npx/node are unavailable or the build fails.
+// RunTailwind executes the Tailwind CSS standalone binary to build the compiled
+// CSS into static/css/styles.css, streaming output through to the user. The
+// binary is resolved from the TAILWIND environment variable when set (e.g. the
+// standalone binary downloaded by `make get-tailwind`), otherwise from PATH
+// ("tailwindcss"). No npm/node is required.
+// Returns an error if the binary is unavailable or the build fails.
 func (g *Generator) RunTailwind() error {
 	fmt.Println("Running Tailwind CSS build...")
-	cmd := exec.Command("npx", "tailwindcss",
+	bin := os.Getenv("TAILWIND")
+	if bin == "" {
+		bin = "tailwindcss"
+	}
+	cmd := exec.Command(bin,
 		"-i", "./internal/assets/css/styles.css",
 		"-o", "./static/css/styles.css",
 		"--minify")

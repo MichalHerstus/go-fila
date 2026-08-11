@@ -1,9 +1,11 @@
 // makefile.go
 //
 // Generates a Makefile in the generated admin panel application with targets
-// that run every step required to build the dashboard binary: installing the
-// npm dependencies, building the Tailwind CSS, regenerating the sqlc queries
-// and templ views, tidying the Go module and compiling the binary.
+// that run every step required to build the dashboard binary: building the
+// Tailwind CSS, regenerating the sqlc queries and templ views, tidying the Go
+// module and compiling the binary. No npm/node is required — Tailwind CSS runs
+// via the standalone binary (TAILWIND override + optional get-tailwind
+// download) and Chart.js is vendored at generation time.
 package generator
 
 import (
@@ -11,11 +13,15 @@ import (
 	"path/filepath"
 )
 
+// tailwindStandaloneVersion is the pinned Tailwind CSS standalone release used
+// by the generated Makefile's get-tailwind target.
+const tailwindStandaloneVersion = "v3.4.19"
+
 // generateMakefile writes a Makefile into the output directory. The default
 // target builds the dashboard binary from scratch; the individual steps are
-// also exposed as separate targets (deps, css, sqlc, templ, tidy) so they can
-// be re-run on their own. The binary is named after the output directory base
-// name (matching the module name written to go.mod).
+// also exposed as separate targets (css, sqlc, templ, tidy, get-tailwind) so
+// they can be re-run on their own. The binary is named after the output
+// directory base name (matching the module name written to go.mod).
 // Returns an error on write failure.
 func (g *Generator) generateMakefile() error {
 	binary := filepath.Base(g.OutDir)
@@ -31,27 +37,49 @@ PORT ?= 8080
 # Log level for the dashboard (passed to the binary as --log): full or err.
 LOG ?= full
 
+# Tailwind CSS standalone binary. Defaults to "tailwindcss" on PATH; point it
+# at the binary downloaded by the get-tailwind target to build without a JS
+# toolchain:
+#   make TAILWIND=$(CURDIR)/.tools/tailwindcss css
+TAILWIND ?= tailwindcss
+
+# Pinned Tailwind CSS standalone release used by the get-tailwind target.
+TAILWIND_VERSION ?= ` + tailwindStandaloneVersion + `
+
 # Release archive name (binary name + date stamp). Override to customize:
 #   make package PACKAGE_NAME=my-release
 PACKAGE_NAME ?= $(BINARY)-$(shell date +%Y%m%d)
 
-.PHONY: all build deps css sqlc templ tidy run package clean
+.PHONY: all build css sqlc templ tidy get-tailwind run package clean
 
 all: build
 
 # Build the dashboard binary and its assets (default target).
-build: deps css sqlc templ
+build: css sqlc templ
 	go build -o $(BINARY) .
 
-# Install the npm dependencies (tailwindcss, chart.js).
-deps:
-	npm install
+# Build the Tailwind CSS into static/css/styles.css. Chart.js is already
+# vendored into static/js/chart.js at generation time — no JS toolchain step.
+css:
+	$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify
 
-# Build the Tailwind CSS into static/css/styles.css and vendor Chart.js
-# into static/js/chart.js (so the dashboard needs no CDN at runtime).
-css: deps
-	npm run build:css
-	npm run copy:chartjs
+# Download the Tailwind CSS standalone binary for this OS/arch (linux/macos x
+# x64/arm64; Windows is not supported) into .tools/ so the dashboard builds
+# with only the Go toolchain plus this single binary.
+get-tailwind:
+	mkdir -p .tools
+	@case "$$(uname -s)-$$(uname -m)" in \
+	  Linux-x86_64) file=tailwindcss-linux-x64 ;; \
+	  Linux-aarch64|Linux-arm64) file=tailwindcss-linux-arm64 ;; \
+	  Darwin-x86_64) file=tailwindcss-macos-x64 ;; \
+	  Darwin-arm64) file=tailwindcss-macos-arm64 ;; \
+	  *) echo "Unsupported platform: $$(uname -s)-$$(uname -m)"; exit 1 ;; \
+	esac; \
+	echo "Downloading tailwindcss $(TAILWIND_VERSION) ($$file)..." ; \
+	curl -sL -o .tools/tailwindcss "https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/$$file" ; \
+	chmod +x .tools/tailwindcss ; \
+	echo "Downloaded .tools/tailwindcss" ; \
+	echo "Next: make TAILWIND=$(CURDIR)/.tools/tailwindcss css"
 
 # Regenerate the sqlc query code into internal/data.
 sqlc:

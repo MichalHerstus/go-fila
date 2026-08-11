@@ -1458,3 +1458,68 @@ func TestGenerateWidgetErrorLogging(t *testing.T) {
 		t.Error("page handler must not gate widget fetching on a silent if err == nil")
 	}
 }
+
+// TestGenerateChartJSAsset ensures generateAssets writes the embedded Chart.js
+// bundle to static/js/chart.js (byte-identical to the embedded copy) and stops
+// emitting package.json — the generated dashboard no longer needs npm.
+func TestGenerateChartJSAsset(t *testing.T) {
+	dir := t.TempDir()
+	g := New(poolConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	chart, err := os.ReadFile(filepath.Join(dir, "static/js/chart.js"))
+	if err != nil {
+		t.Fatalf("read static/js/chart.js: %v", err)
+	}
+	if len(chart) == 0 {
+		t.Fatal("static/js/chart.js is empty")
+	}
+	if string(chart) != string(chartUmdJS) {
+		t.Errorf("static/js/chart.js does not match the embedded Chart.js bundle (embedded %d bytes, written %d)", len(chartUmdJS), len(chart))
+	}
+	if !strings.HasPrefix(string(chart), "/*!") {
+		t.Error("static/js/chart.js must keep the Chart.js license banner intact")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); !os.IsNotExist(err) {
+		t.Error("package.json must not be emitted (npm build is gone)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tailwind.config.js")); err != nil {
+		t.Errorf("tailwind.config.js must still be emitted: %v", err)
+	}
+}
+
+// TestGenerateMakefileNoNPM ensures the generated Makefile contains no npm and
+// its css target invokes $(TAILWIND); the get-tailwind target pins the
+// standalone binary download.
+func TestGenerateMakefileNoNPM(t *testing.T) {
+	dir := t.TempDir()
+	g := New(poolConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	mk, err := os.ReadFile(filepath.Join(dir, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	mkStr := string(mk)
+	for _, forbidden := range []string{"npm", "npx", "node_modules", "package.json"} {
+		if strings.Contains(mkStr, forbidden) {
+			t.Errorf("Makefile must not reference %q\n--- generated:\n%s", forbidden, mkStr)
+		}
+	}
+	for _, want := range []string{
+		`TAILWIND ?= tailwindcss`,
+		`TAILWIND_VERSION ?= ` + tailwindStandaloneVersion,
+		`build: css sqlc templ`,
+		`css:`,
+		`$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify`,
+		`get-tailwind:`,
+		`https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/$$file`,
+		`make TAILWIND=$(CURDIR)/.tools/tailwindcss css`,
+	} {
+		if !strings.Contains(mkStr, want) {
+			t.Errorf("Makefile missing %q\n--- generated:\n%s", want, mkStr)
+		}
+	}
+}
