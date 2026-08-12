@@ -173,9 +173,11 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Audit log resource | Greenfield (strong existing infra: `hooks.Scope`, `RETURNING id`, `auth.UserName`) |
 | CSV import + export column selection | Export exists (all list cols); import + selection new |
 | SQLite stored procedures (batch-in-table) | Greenfield |
-| AI-assisted `go-fila edit` (OpenRouter) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, single retry, httptest stub) |
-| Drop Node.js/npm from the dashboard build | Planned (D8) |
+| AI-assisted `go-fila edit` (OpenRouter) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, changed-section-only output, httptest stub + `mergeYAML` suite) |
+| Drop Node.js/npm from the dashboard build | **Done (D8)** |
 | Editor Validate (main menu → results list → jump-to-fix) | **Done (D9)** |
+| Rename project to YAGA (binary, module path, repo, docs) | Planned (D10) |
+| List/Card filter section (`list.filter` / `card.filter`, collapsible, `$N` params) | Planned (D11) |
 
 ---
 
@@ -315,12 +317,16 @@ missing proc → clean `httperr` page.
 only; without `--prompt` the current TUI runs unchanged. Provider locked to OpenRouter
 (base URL hardcoded — the only supported provider). Decisions taken (2026-08-10):
 one-shot write + `--dry-run` preview; `--model` flag defaulting to `openrouter/auto`;
-API key via `--apikey` with `OPENROUTER_API_KEY` env fallback.
+API key via `--apikey` with `OPENROUTER_API_KEY` env fallback; after a successful run
+the effective key/model are persisted to `.ENV` in the current folder so later runs can
+omit the flags (`--apikey` > `OPENROUTER_API_KEY` env > `.ENV`; `--model` > `.ENV` > default);
+terminal output prints only the changed top-level YAML sections, never the whole file.
 
 **Command shape:**
 ```
 go-fila edit --apikey KEY [--model MODEL] --prompt "Change dashboard title to: Order management"
-go-fila edit [--apikey KEY] --prompt "…" --dry-run      # preview proposed YAML + diff, no write
+go-fila edit [--apikey KEY] --prompt "…" --dry-run      # preview changed sections, no write
+go-fila edit --prompt "…"                               # uses key + model persisted in .ENV
 ```
 
 **Design:**
@@ -328,30 +334,44 @@ go-fila edit [--apikey KEY] --prompt "…" --dry-run      # preview proposed YAM
   (`parseEditFlags` in a new `cmd/go-fila/ai.go`) picks out `--apikey/--prompt/--model/
   --dry-run`, leaving `parseGlobalFlags`'s tuple untouched (only `edit` understands them).
 - Load via `parser.ParseFile(configPath)`, marshal current YAML. Build messages: a system
-  role with the output contract ("return ONLY the complete new go-fila.yaml in a ```yaml```
-  fence; keep `version`; don't invent keys") + a user message of the embedded compact
-  schema cheat-sheet (`//go:embed ai_spec.md`, ~3–4 KB — the 33 KB `SPEC.md` stays out of
-  the prompt to keep tokens low) + the current YAML + the user's instruction.
+  role with the output contract ("return ONLY the changed sections of the config as a YAML
+  fragment in a ```yaml fence; keyed-item lists by `name` / navigation groups by `group` /
+  items by `resource`/`page`/`url`; keep `version`; don't invent keys") + a user message of
+  the embedded compact schema cheat-sheet (`//go:embed ai_spec.md`, ~7 KB — the 33 KB
+  `SPEC.md` stays out of the prompt to keep tokens low) + the current YAML + the user's
+  instruction.
 - POST `https://openrouter.ai/api/v1/chat/completions` (stdlib `net/http`,
-  `Authorization: Bearer`; the key is never logged/echoed), `temperature: 0`, ~90 s HTTP
-  client timeout. On parse/validate failure, retry **once** feeding the validator error
-  back; on failure exit 1 with the original file untouched.
-- `extractYAMLBlock` (```yaml``` fence with fallback heuristics) → `yaml.Unmarshal` into
-  `types.Config` → `parser.Validate`. `--dry-run` prints the proposed YAML + a compact `±`
-  line diff and exits 0 without writing; otherwise writes `configPath` (0644) and prints
-  the same diff summary.
+  `Authorization: Bearer`; the key is never logged/echoed), `temperature: 0`, 300 s HTTP
+  client timeout; a `spinner` on stderr gives live progress while waiting. On
+  merge/validate failure, retry **once** feeding the validator error back; on failure exit 1
+  with the original file untouched.
+- `extractYAMLBlock` (```yaml``` fence with fallback heuristics) → `mergeYAML` (yaml.v3
+  Node merge: mappings recurse, sequences merge item-by-item by identity key, keyless lists
+  replace wholesale, null fragment values leave targets untouched, no deletion support) →
+  `yaml.Unmarshal` into `types.Config` → `parser.Validate`. After the run `persistEnv`
+  writes the effective `OPENROUTER_API_KEY`/`MODEL` into `.ENV` (0600, unrelated lines
+  preserved); both write and `--dry-run` then print only the changed top-level sections
+  (`changedSections`/`nodeEqual` render the differing keys from the proposed doc) and exit 0
+  without echoing the whole file. Fragment-only output keeps responses small, so slow
+  free-tier models finish instead of timing out.
 - Config-only scope: SQL/`sql/queries` files are not edited by the AI path. Full
   `go-fila.yaml` is transmitted to OpenRouter (documented in usage text — consent is the
   user supplying the key + prompt).
 
-**Files:** new `cmd/go-fila/ai.go` (`parseEditFlags`, `openrouterChat`, `buildEditPrompt`,
-`extractYAMLBlock`, `applyAIDiff` with single retry, `diffLines`) + new `ai_spec.md`
-(embedded schema reference); `edit.go` branch; `main.go` usage text.
+**Files:** `cmd/go-fila/ai.go` (`parseEditFlags`+`.ENV` fallback, `openrouterChat`,
+`buildEditPrompt`, `extractYAMLBlock`, `mergeYAML` + identity-key merge helpers, `proposeEdit`
+with single retry, `spinner`, `changedSections`/`nodeEqual`, `readEnvFile`/`writeEnvFile`/
+`persistEnv`, `envPathFunc`, `diffLines`) + `ai_spec.md` (embedded schema reference incl. § AI edit
+output); `edit.go` branch; `main.go` usage text.
 
-**Tests / exit criteria:** httptest OpenRouter stub — happy path writes the file + prints a
-diff; retry-on-invalid yields a valid second attempt; `--dry-run` never writes; fence
-extraction; flag/env key resolution (missing key → clear error). Docs: AGENTS.md CLI
-section + `SPEC.md` usage line (config is sent to OpenRouter).
+**Tests / exit criteria:** httptest OpenRouter stub — happy path writes the file + prints only the
+changed sections and preserves unrelated sections; retry-on-invalid yields a valid second attempt;
+`--dry-run` never writes (but still persists `.ENV`); fence extraction; a `mergeYAML` unit suite
+(mapping deep-merge, keyed-item resource/fields/navigation merge, item append, wholesale widgets
+replace, null leaves untouched, unknown-key/malformed/empty/non-mapping fragment errors); flag/env/
+`.ENV` key resolution (missing key → clear error, `.ENV` persisted + reused, precedence flag > env >
+`.ENV`, model flag > `.ENV` > default, unrelated `.ENV` lines preserved). Docs: AGENTS.md CLI section
++ `SPEC.md` usage line (config is sent to OpenRouter).
 
 ---
 
@@ -451,6 +471,146 @@ with the standalone binary produces `static/css/styles.css` and `static/js/chart
 
 ---
 
+### D10 — Rename project to YAGA
+
+**Status: decided (2026-08-11), not started.** Rename the project/brand from "go-fila" to
+**YAGA** (**YA**ml-based **G**enerator of **A**pplications) across code, generated output,
+binary, module path, GitHub repository and documentation. Decisions taken (2026-08-11): new
+module path `github.com/MichalHerstus/yaga` (matches the real remote owner — the current
+`github.com/go-fila/go-fila` never matched the remote `github.com/MichalHerstus/go-fila`);
+default config file `go-fila.yaml` → `yaga.yaml`; version bumped 0.9.0 → 1.0.0; generated-app
+runtime identifiers renamed (`go-fila-session` cookie → `yaga-session`, `gf-theme` storage key
+→ `yaga-theme` — sessions invalidate + theme resets on redeploy, acceptable at 1.0.0); GitHub
+repo renamed to `MichalHerstus/yaga`; `session-ses_*.md` transcripts left untouched (historical).
+
+**Design:**
+1. **Repo restructure** — `git mv cmd/go-fila cmd/yaga` (embedded `ai_spec.md` +
+   `AGENTS_for_generated_dashboard.md` move with it); repo `Makefile` `BINARY := yaga` and
+   `build` target `go build -o $(BINARY) ./cmd/yaga`; `.gitignore` `/go-fila` → `/yaga`.
+2. **Module path** — `go.mod` → `module github.com/MichalHerstus/yaga`; replace
+   `github.com/go-fila/go-fila` → `github.com/MichalHerstus/yaga` across ~51 imports,
+   `internal/generator/plugin.go` `gofilaModule` const (→ `yagaModule`, plus
+   `gofilaCheckout`/`findGoFilaCheckout` → `yaga*`), and `examples/plugins/audit/go.mod`
+   (require + `replace ... => ../../..`).
+3. **CLI** — binary/command name `go-fila` → `yaga` in usage text (`main.go`), version
+   output (`yaga version 1.0.0`, `main.go:46`), next-step prints (`main.go:413`,
+   `demo.go:80`, `introspect.go:1456`), and default config path `go-fila.yaml` →
+   `yaga.yaml` (`main.go:118`). TUI nav + title bar (`editor.go`) → "YAGA".
+4. **Generated output** (`internal/generator/`) — session cookie `go-fila-session` →
+   `yaga-session` (`auth.go`, 5 sites), theme key `gf-theme` → `yaga-theme` (`templ.go`,
+   `auth.go`), Makefile comment "generated by go-fila" → "generated by YAGA"
+   (`makefile.go:28`), plugin shim tmpdir `go-fila-plugin-shim` → `yaga-plugin-shim`
+   (`plugin.go:65`).
+5. **Docs & embedded content** — `README.md` (incl. `go install
+   github.com/MichalHerstus/yaga/cmd/yaga@latest`), `AGENTS.md`, `SPEC.md`,
+   `SPECv05plus.md`, `SPEC_yaml_editor.md`, `cmd/go-fila/ai_spec.md`,
+   `cmd/go-fila/AGENTS_for_generated_dashboard.md` (lands inside generated apps:
+   `./yaga generate --config yaga.yaml ...`). Prose brand = "YAGA", CLI word = `yaga`.
+6. **GitHub** — after the commit: `gh repo rename yaga --repo MichalHerstus/go-fila`,
+   `git remote set-url origin https://github.com/MichalHerstus/yaga.git`, push.
+
+**Tests / exit criteria:** new generator unit test asserting generated output contains no
+`go-fila`; `go build ./...` / `go vet ./...` / `go test ./...` / `gofmt -l .` clean;
+`grep -r go-fila` matches only `session-ses_*.md`. E2E — fresh `./yaga init --demo` →
+`yaga generate` → `make` in the generated dir → login smoke verifying `yaga.yaml`,
+`yaga-session` cookie, `yaga-theme` key, no npm.
+
+---
+
+### D11 — List/Card filter section
+
+**Status: planned (2026-08-11), not started.** A YAML-defined filter on list and card
+views: a collapsible filter section above the table/cards that builds an arbitrary
+AND/OR filtering combination over the resource's columns, with runtime-valued
+`$N` parameters. Decisions taken (2026-08-11): **one filter per view** (`list.filter`,
+`card.filter` — the "multiple filters per view" idea was stepped down); expression is a
+**mini-DSL** compiled at generation time to dialect-correct SQL (no raw SQL in YAML);
+`$N` values are collected via **inline labeled inputs** in the filter form and travel in
+URL query params (`filter=1`, `fp_<name>=<value>`); an empty param on Apply **skips the
+filter** (like an empty search box).
+
+**YAML schema** (`internal/types/resource.go`: `Filter *FilterConfig` on `ListConfig`
+and `CardConfig`):
+
+```yaml
+list:
+  filter:
+    label: "Advanced filter"               # shown in the collapsible header
+    where: "(price > 1000 and prod_name contains 'abc') or prod_code = $1"
+    params:                                # optional; defaults to p<N> / "Value N"
+      - name: code
+        label: "Product code"
+```
+
+**DSL** (new package `internal/filterexpr/`, shared by generator + schema refs; standard
+SQL precedence — AND binds tighter than OR — plus parentheses):
+
+```
+expr      := or
+or        := and ( "and" and )*
+and       := primary ( "or" primary )*
+primary   := "(" expr ")" | condition
+condition := column OP [value]
+column    := [A-Za-z_][A-Za-z0-9_]*          # emitted with the `t.` colPrefix when FK joins exist
+OP        := =  !=  <>  <  <=  >  >=  | contains | not_contains | is_null | is_not_null
+value     := number | 'quoted string' ('' escapes) | $N
+```
+
+Driver mapping: `contains` → `ILIKE` (pg) / `LIKE` (sqlite, mssql), `not_contains` →
+`NOT ILIKE`/`NOT LIKE`; literal values baked into the emitted SQL string; `$N` becomes a
+runtime placeholder token (`__GFP__` in the emitted source, replaced at request time with
+`?` / `$<argIdx>` per occurrence in SQL-text order, so `$2` before `$1` binds correctly);
+`contains` binds are runtime-wrapped `"%" + v + "%"`. Deliberately excluded from the DSL:
+`in`, `between`, `not`, param `type:` (values pass as strings; DB coerces — same class as
+the existing search args, documented caveat).
+
+**Runtime behavior:** Apply sets `filter=1` + `fp_*` params; the handler builds filter
+WHERE fragments *before* the search block (sqlite binds positionally — placement matches
+WHERE text order) reusing the existing `argIdx` numbering on pg/mssql; final WHERE =
+`(<search ORed>) AND (<filters ANDed>)` via a `parts` join that degrades to today's exact
+behavior when no filter exists. Missing/empty param → that filter block is skipped.
+Pagination echoes `&filter=1&fp_x=...` so filters survive page changes (extend the shared
+`pagination(...)` templ with a `filterQS` string arg). CSV export deliberately untouched
+(no filter support in v1, mirrors its existing lack of search). Security posture intact:
+only columns/literals from the trusted YAML and bound param values reach the SQL.
+
+**Touch points:**
+1. `internal/types/resource.go` — `FilterConfig`/`FilterParam`; `Filter` on list/card.
+2. `internal/filterexpr/` (new) — parser + compile: `SQL(driver, colPrefix)` →
+   (frag, placeholders in text order, param usage), `Columns()` for validation.
+3. `internal/generator/handler.go` — filter build block per driver in
+   `generateListHandler`/`generateCardHandler` (token replace, contains-wrapped args,
+   whole-filter-skip on empty param), `net/url` import (only when a filter exists),
+   `filterClauses` + `parts` WHERE join, `FilterData` population.
+4. `internal/generator/viewmodels.go` — `FilterData`/`FilterParamData` (`Key`,
+   `Label`, `Value`) + `Applied` flag on `ListData`/`CardData`.
+5. `internal/generator/templ.go` — collapsible filter section in
+   `generateListTempl`/`generateCardTempl` (toggle + GET form echoing
+   `search/sort/order`, prefilled param inputs, Apply/Clear); `pagination(...)`
+   gains `filterQS`. No-filter resources emit nothing new.
+6. `internal/parser/validator.go` — `where` required; params count ≥ max `$N` when
+   `params` present; param names non-empty + unique.
+7. `internal/schema/references.go` — record columns referenced by
+   `list.filter`/`card.filter` (Section `"list.filter"`, `"card.filter"`) so the editor
+   Validate screen flags missing columns; `cmd/go-fila/editor/validate.go` goTo mapping.
+8. `cmd/go-fila/editor/` — list/card sub-editor gains a "Filter" page (label/where
+   text inputs + name/label params list, reusing `listSpec`).
+9. `cmd/go-fila/ai_spec.md` (cheat-sheet example), `cmd/go-fila/demo.go` (one demo
+   resource, e.g. orders `status = $1`, to exercise the feature end-to-end).
+10. Docs — `SPEC.md` (schema + DSL), `README.md`, `TESTs.md`, `AGENTS.md`.
+
+**Tests / exit criteria:** `internal/filterexpr` unit tests (grammar, precedence,
+`$2`-before-`$1` ordering, pg/sqlite/mssql SQL output, contains arg wrapping, column
+extraction, qualification); generator tests via `assertGeneratedGoParses` (emitted
+fragments per driver, token-replacement code, missing-param skip, literal-only filter,
+pagination arg; existing no-filter tests stay green); parser validation tests;
+editor goTo test. Gates: `go build ./...`, `go vet ./...`, `go test ./...`,
+`gofmt -l .`; E2E — `init --demo` → demo YAML filter → `generate` → `make` → login,
+exercise filter/collapse/pagination. Regression guard: filter-off output stays
+byte-identical.
+
+---
+
 ### Order, dependencies & cross-cutting
 
 **D2 → D3 → D5 → D6.** Rationale: D2's audit INSERT weaving and transactional single-row
@@ -460,6 +620,10 @@ reuse; D5 and D6 are independent and smallest — last. **D7 is independent of D
 (CLI-only, no generator changes; smallest surface) and can slot in alongside any milestone.
 **D8 (no-npm build) is independent of D2–D7** — it touches only the build/asset tooling, not
 generated-app handlers or the editor.
+**D10 (rename to YAGA) is independent of all other phases** and lands last: it renames the
+project, module path, CLI, repo and the very docs/`cmd` paths this roadmap references.
+**D11 (list/card filters) is independent of D2–D9; it should land after D10 since its
+docs/code references and example YAML (demo/ai_spec) touch the renamed paths.**
 
 Cross-cutting for every milestone: version bump `0.8.0 → 0.9.0`; docs
 (`SPEC.md`, `README.md`, `AGENTS.md`) updated per milestone; every milestone ends with

@@ -98,8 +98,8 @@ AI-assisted edit (edit only):
   --prompt TEXT  Edit go-fila.yaml via OpenRouter instead of the TUI
                  (the full config is sent to OpenRouter)
                  file://PATH reads the prompt from a file (~ expands to home)
-  --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env)
-  --model MODEL  Model id (default: openrouter/auto)
+  --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env, then .ENV)
+  --model MODEL  Model id (fallback: .ENV, then openrouter/auto)
   --dry-run      Print proposed YAML + diff without writing`)
 }
 

@@ -192,3 +192,22 @@ plugins:
   `sql` (raw SQL), or `proc` (stored proc; sqlite ignores procs).
 - Do not invent keys outside this cheat-sheet; preserve unrelated sections of
   the current config verbatim.
+
+## AI edit output
+
+`go-fila edit --prompt "…"` returns ONLY the changed sections of config as a
+YAML fragment in a ```yaml fence:
+
+- Include only the top-level keys you changed (`panel`, `connections`, `sqlc`,
+  `auth`, `navigation`, `resources`, `pages`, `plugins`), nested only as deep
+  as the change. Never return unchanged sections.
+- Keep `version` unchanged — do not include it in the fragment.
+- Lists identified by `name` (`resources`, `pages`, `fields`, `actions`):
+  return only the changed items, each with its `name`; matched items merge,
+  new items are appended.
+- `navigation` groups are keyed by `group`; their `items` by
+  `resource` / `page` / `url` (whichever the item uses).
+- Lists without an identity key (e.g. page `widgets`) are replaced wholesale —
+  return the complete replacement list.
+- Omit unchanged keys; a null value leaves the existing value untouched
+  (deletion is not supported). Do not invent YAML keys.
