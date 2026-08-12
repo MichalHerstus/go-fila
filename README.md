@@ -29,8 +29,9 @@ go-fila init --db "sqlserver://user:pass@localhost:1433?database=mydb"   # MSSQL
 # Write your SQL schema and queries in sql/
 # Edit go-fila.yaml to configure panel, resources, pages, auth
 # (interactive TUI: go-fila edit — or AI-assisted: go-fila edit --prompt "…"
-# which edits the config via OpenRouter; --apikey KEY, --model, --dry-run flags,
-# and file://PATH prompts supported)
+# which edits the config via OpenRouter, or via a local LM Studio server with
+# --model "lmstudio"; --apikey KEY, --model, --dry-run flags, and file://PATH
+# prompts supported)
 
 # Generate the admin panel
 go-fila generate              # produces ./admin/
@@ -108,11 +109,12 @@ Flags:
   --demo, -D     With init: seed sqlite demo DB (login admin@demo.test, password generated)
 
 AI-assisted edit (edit only):
-  --prompt TEXT  Edit go-fila.yaml via OpenRouter instead of the TUI
-                 (the full config is sent to OpenRouter)
+  --prompt TEXT  Edit go-fila.yaml via AI instead of the TUI
+                 (the full config is sent to the AI provider)
                  file://PATH reads the prompt from a file (~ expands to home)
   --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env, then .ENV)
-  --model MODEL  Model id (fallback: .ENV, then openrouter/auto)
+  --model MODEL  Model id (fallback: .ENV, then openrouter/auto);
+                 "lmstudio" uses a local LM Studio server (127.0.0.1:1234, no key)
   --dry-run      Print proposed YAML + diff without writing
 ```
 

@@ -1,9 +1,11 @@
 // ai.go
 //
-// D7 — AI-assisted config editing (go-fila edit via OpenRouter). Non-interactive
-// and opt-in: the AI path only runs when `go-fila edit --prompt "…"` is given,
-// otherwise the TUI editor runs unchanged. One-shot write with a single retry on
-// invalid output, `--dry-run` preview, provider locked to OpenRouter.
+// D7 — AI-assisted config editing (go-fila edit via OpenRouter or a local LM
+// Studio server). Non-interactive and opt-in: the AI path only runs when
+// `go-fila edit --prompt "…"` is given, otherwise the TUI editor runs
+// unchanged. One-shot write with a single retry on invalid output, `--dry-run`
+// preview. The provider is selected by --model: any value routes to OpenRouter
+// (the default); the sentinel "lmstudio" routes to a local LM Studio server.
 package main
 
 import (
@@ -17,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,15 +29,25 @@ import (
 )
 
 const (
-	// openRouterBaseURL is the OpenRouter API root. The provider is locked:
-	// this is the only supported endpoint.
+	// openRouterBaseURL is the OpenRouter API root. The default provider.
 	openRouterBaseURL = "https://openrouter.ai/api/v1"
+	// lmStudioBaseURL is the OpenAI-compatible root of a local LM Studio
+	// server. Reached when --model is the lmStudioModel sentinel; no API key
+	// is required.
+	lmStudioBaseURL = "http://127.0.0.1:1234/v1"
+	// lmStudioModel is the --model sentinel that selects the local LM Studio
+	// provider instead of OpenRouter.
+	lmStudioModel = "lmstudio"
 	// defaultModel is used when --model is omitted.
 	defaultModel = "openrouter/auto"
 	// aiHTTPTimeout caps a single chat request. 300s is generous enough for
 	// slow free-tier models (e.g. nvidia/nemotron-...:free) to regenerate a
 	// full multi-KB go-fila.yaml; the old 90s deadline regularly fired on them.
 	aiHTTPTimeout = 300 * time.Second
+	// aiModelTimeout caps the LM Studio model-discovery call (GET /models).
+	// A refused connection on localhost is immediate, so a short budget is
+	// enough for a fast error.
+	aiModelTimeout = 10 * time.Second
 	// aiMaxResponseBytes bounds how much of the model response we buffer.
 	aiMaxResponseBytes = 8 << 20
 )
@@ -50,6 +63,7 @@ var aiSpec string
 // skips the flags it does not know. The API key falls back to the
 // OPENROUTER_API_KEY environment variable, then to the current folder's .ENV
 // file (see persistEnv). The model falls back to .ENV, then to the default.
+// The model value "lmstudio" selects the local LM Studio provider (no key).
 // Returns: apiKey (--apikey, then OPENROUTER_API_KEY env, then .ENV),
 // model (--model, then .ENV, else "openrouter/auto"),
 // prompt (the edit instruction), dryRun (preview without writing).
@@ -92,9 +106,9 @@ func parseEditFlags(args []string) (apiKey, model, prompt string, dryRun bool) {
 	return
 }
 
-// envPathFunc returns the .ENV file that records the last used OpenRouter
-// credentials (a dotenv file in the current folder). It is a variable so tests
-// can redirect it away from the repository.
+// envPathFunc returns the .ENV file that records the last used credentials (a
+// dotenv file in the current folder). It is a variable so tests can redirect it
+// away from the repository.
 var envPathFunc = func() string {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -225,14 +239,14 @@ type chatMessage struct {
 	Content string `json:"content"`
 }
 
-// chatRequest is the /chat/completions request body sent to OpenRouter.
+// chatRequest is the /chat/completions request body sent to the provider.
 type chatRequest struct {
 	Model       string        `json:"model"`
 	Messages    []chatMessage `json:"messages"`
 	Temperature float64       `json:"temperature"`
 }
 
-// chatResponse is the subset of the OpenRouter response we consume.
+// chatResponse is the subset of the provider response we consume.
 type chatResponse struct {
 	Choices []struct {
 		Message chatMessage `json:"message"`
@@ -264,10 +278,12 @@ func buildEditPrompt(cheatsheet, currentYAML, instruction string) []chatMessage 
 	}
 }
 
-// openrouterChat posts the messages to OpenRouter and returns the assistant's
-// reply text. The API key is sent only in the Authorization header and is never
-// logged or echoed. The HTTP client is shared per call (request-scoped).
-func openrouterChat(ctx context.Context, baseURL, apiKey, model string, messages []chatMessage) (string, error) {
+// chatCompletions posts the messages to the provider's /chat/completions
+// endpoint and returns the assistant's reply text. When apiKey is non-empty it
+// is sent only in the Authorization header and never logged or echoed; the
+// local LM Studio provider needs no key and none is sent. The HTTP client is
+// shared per call (request-scoped).
+func chatCompletions(ctx context.Context, baseURL, apiKey, model string, messages []chatMessage) (string, error) {
 	body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Temperature: 0})
 	if err != nil {
 		return "", fmt.Errorf("encoding request: %w", err)
@@ -276,33 +292,76 @@ func openrouterChat(ctx context.Context, baseURL, apiKey, model string, messages
 	if err != nil {
 		return "", fmt.Errorf("building request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: aiHTTPTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("OpenRouter request failed: %w", err)
+		return "", fmt.Errorf("chat request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, aiMaxResponseBytes))
 	if err != nil {
-		return "", fmt.Errorf("reading OpenRouter response: %w", err)
+		return "", fmt.Errorf("reading chat response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("OpenRouter returned HTTP %d: %s", resp.StatusCode, truncate(string(data), 300))
+		return "", fmt.Errorf("provider returned HTTP %d: %s", resp.StatusCode, truncate(string(data), 300))
 	}
 	var cr chatResponse
 	if err := json.Unmarshal(data, &cr); err != nil {
-		return "", fmt.Errorf("decoding OpenRouter response: %w", err)
+		return "", fmt.Errorf("decoding chat response: %w", err)
 	}
 	if cr.Error != nil && cr.Error.Message != "" {
-		return "", fmt.Errorf("OpenRouter error: %s", cr.Error.Message)
+		return "", fmt.Errorf("provider error: %s", cr.Error.Message)
 	}
 	if len(cr.Choices) == 0 || cr.Choices[0].Message.Content == "" {
-		return "", fmt.Errorf("OpenRouter returned no content")
+		return "", fmt.Errorf("provider returned no content")
 	}
 	return cr.Choices[0].Message.Content, nil
+}
+
+// lmStudioModels is the subset of the LM Studio /models response we consume.
+type lmStudioModels struct {
+	Data []struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+// lmStudioModelID discovers the id of the model currently served by the local
+// LM Studio server. The OpenAI-compatible /chat/completions endpoint rejects a
+// model field that does not exactly match a loaded model id, so the real id
+// must be queried from GET /models (the sentinel --model "lmstudio" value is
+// not sent as-is). Errors are descriptive: the server may be down, or running
+// with no model loaded.
+func lmStudioModelID(ctx context.Context, baseURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return "", fmt.Errorf("building LM Studio model request: %w", err)
+	}
+	client := &http.Client{Timeout: aiModelTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("LM Studio not reachable at %s (start its local server and load a model): %w", baseURL, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, aiMaxResponseBytes))
+	if err != nil {
+		return "", fmt.Errorf("reading LM Studio model list: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("LM Studio /models returned HTTP %d: %s", resp.StatusCode, truncate(string(data), 300))
+	}
+	var ms lmStudioModels
+	if err := json.Unmarshal(data, &ms); err != nil {
+		return "", fmt.Errorf("decoding LM Studio model list: %w", err)
+	}
+	if len(ms.Data) == 0 {
+		return "", fmt.Errorf("LM Studio has no model loaded; load one in its Server tab first")
+	}
+	return ms.Data[0].ID, nil
 }
 
 var (
@@ -424,7 +483,7 @@ func mergeValue(dst, src *yaml.Node, key string) error {
 // identity and is replaced wholesale (e.g. page widgets).
 func identityKeys(key string) []string {
 	switch key {
-	case "resources", "pages", "fields", "actions":
+	case "resources", "pages", "fields", "actions", "columns":
 		return []string{"name"}
 	case "navigation":
 		return []string{"group"}
@@ -603,11 +662,15 @@ func splitLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
-// changedSections returns the top-level YAML sections that differ between
-// current and proposed, rendered from proposed as a standalone fragment. Only
-// the sections that actually changed are included, so terminal output stays
-// small instead of echoing the whole config.
-func changedSections(current, proposed []byte) ([]byte, error) {
+// changedPaths returns one line per leaf that differs between current and
+// proposed, e.g. "panel/name -> 'Order management'". Keyed-list items
+// (resources/pages/fields/actions by name, navigation groups by group, nav
+// items by resource/page/url) contribute their identity value to the path, so
+// a column-label change reads "resources/User/list/columns/email/label".
+// String values render single-quoted; numbers/bools/null render bare. New
+// subtrees emit every changed leaf; removed leaves (only possible via a whole
+// list replacement) render "-> (removed)".
+func changedPaths(current, proposed []byte) ([]string, error) {
 	var cur, prop yaml.Node
 	if err := yaml.Unmarshal(current, &cur); err != nil {
 		return nil, err
@@ -623,36 +686,160 @@ func changedSections(current, proposed []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out yaml.Node
-	out.Kind = yaml.MappingNode
-	for i := 0; i < len(propRoot.Content); i += 2 {
-		key := propRoot.Content[i]
-		j := mappingIndex(curRoot, key.Value)
-		if j == -1 || !nodeEqual(curRoot.Content[j+1], propRoot.Content[i+1]) {
-			out.Content = append(out.Content, cloneNode(key), cloneNode(propRoot.Content[i+1]))
-		}
-	}
-	return yaml.Marshal(&out)
+	var out []string
+	diffValue(curRoot, propRoot, "", &out)
+	return out, nil
 }
 
-// nodeEqual reports whether two YAML nodes render the same content, ignoring
-// style and comments.
-func nodeEqual(a, b *yaml.Node) bool {
-	if a == nil || b == nil {
-		return a == b
+// diffValue records every leaf difference between two nodes as a "path ->
+// value" line. path is the accumulated key path ("" at the root).
+func diffValue(cur, prop *yaml.Node, path string, out *[]string) {
+	// Both scalars: report when the value differs.
+	if cur.Kind == yaml.ScalarNode && prop.Kind == yaml.ScalarNode {
+		if cur.Tag == prop.Tag && cur.Value == prop.Value {
+			return
+		}
+		*out = append(*out, path+" -> "+scalarValue(prop))
+		return
 	}
-	if a.Kind != b.Kind || a.Tag != b.Tag || a.Value != b.Value {
-		return false
+	// Both mappings: recurse per key.
+	if cur.Kind == yaml.MappingNode && prop.Kind == yaml.MappingNode {
+		diffMapping(cur, prop, path, out)
+		return
 	}
-	if len(a.Content) != len(b.Content) {
-		return false
+	// Both sequences: keyed items merge by identity, keyless ones by index.
+	if cur.Kind == yaml.SequenceNode && prop.Kind == yaml.SequenceNode {
+		diffSequence(cur, prop, path, out)
+		return
 	}
-	for i := range a.Content {
-		if !nodeEqual(a.Content[i], b.Content[i]) {
-			return false
+	// Type change or structural replacement: report the whole subtree.
+	*out = append(*out, path+" -> "+nodeValue(prop))
+}
+
+// diffMapping records leaf differences between two mapping nodes.
+func diffMapping(cur, prop *yaml.Node, path string, out *[]string) {
+	for i := 0; i < len(prop.Content); i += 2 {
+		key := prop.Content[i].Value
+		child := joinPath(path, key)
+		j := mappingIndex(cur, key)
+		if j < 0 {
+			emitNew(prop.Content[i+1], child, out)
+			continue
+		}
+		diffValue(cur.Content[j+1], prop.Content[i+1], child, out)
+	}
+	for i := 0; i < len(cur.Content); i += 2 {
+		key := cur.Content[i].Value
+		if mappingIndex(prop, key) < 0 {
+			*out = append(*out, joinPath(path, key)+" -> (removed)")
 		}
 	}
-	return true
+}
+
+// diffSequence records leaf differences between two sequence nodes. Keyed
+// sequences (identityKeys returns a non-empty set AND the items are mappings)
+// align items by their identity value; keyless and non-mapping sequences (e.g.
+// auth login fields, which are plain strings) align by index.
+func diffSequence(cur, prop *yaml.Node, path string, out *[]string) {
+	keys := identityKeys(lastPathSegment(path))
+	if len(keys) == 0 || !allMappings(cur.Content) || !allMappings(prop.Content) {
+		n := len(cur.Content)
+		if len(prop.Content) > n {
+			n = len(prop.Content)
+		}
+		for i := 0; i < n; i++ {
+			idx := joinPath(path, strconv.Itoa(i))
+			switch {
+			case i >= len(cur.Content):
+				emitNew(prop.Content[i], idx, out)
+			case i >= len(prop.Content):
+				*out = append(*out, idx+" -> (removed)")
+			default:
+				diffValue(cur.Content[i], prop.Content[i], idx, out)
+			}
+		}
+		return
+	}
+	for _, s := range prop.Content {
+		child := joinPath(path, identityValue(s, keys))
+		if j := sequenceIndex(cur.Content, s, keys); j < 0 {
+			emitNew(s, child, out)
+		} else {
+			diffValue(cur.Content[j], s, child, out)
+		}
+	}
+	for _, s := range cur.Content {
+		if sequenceIndex(prop.Content, s, keys) < 0 {
+			*out = append(*out, joinPath(path, identityValue(s, keys))+" -> (removed)")
+		}
+	}
+}
+
+// emitNew records every leaf of a newly introduced subtree as a change line.
+func emitNew(node *yaml.Node, path string, out *[]string) {
+	switch node.Kind {
+	case yaml.MappingNode:
+		for i := 0; i < len(node.Content); i += 2 {
+			emitNew(node.Content[i+1], joinPath(path, node.Content[i].Value), out)
+		}
+	case yaml.SequenceNode:
+		for i := 0; i < len(node.Content); i++ {
+			emitNew(node.Content[i], joinPath(path, strconv.Itoa(i)), out)
+		}
+	default:
+		*out = append(*out, path+" -> "+scalarValue(node))
+	}
+}
+
+// identityValue returns the value of the first present identity key of a
+// keyed-list item, used to build the path segment for that item.
+func identityValue(item *yaml.Node, keys []string) string {
+	for _, k := range keys {
+		if v := mappingValue(item, k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// lastPathSegment returns the key after the final "/" of a path (the mapping
+// key a sequence sits under), used to look up the sequence's identity keys.
+func lastPathSegment(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
+// joinPath appends a segment to a key path without producing a leading slash.
+func joinPath(path, seg string) string {
+	if path == "" {
+		return seg
+	}
+	return path + "/" + seg
+}
+
+// scalarValue renders a scalar node for the diff output: strings are wrapped
+// in single quotes (an empty string renders as two adjacent quotes), everything
+// else stays bare.
+func scalarValue(n *yaml.Node) string {
+	if n.Tag == "!!str" {
+		return "'" + strings.ReplaceAll(n.Value, "'", "''") + "'"
+	}
+	if n.Tag == "!!null" {
+		return "null"
+	}
+	return n.Value
+}
+
+// nodeValue renders a non-scalar node as a single-line value for a
+// structural-replacement diff line.
+func nodeValue(n *yaml.Node) string {
+	data, err := yaml.Marshal(n)
+	if err != nil {
+		return "..."
+	}
+	return strings.Join(splitLines(string(data)), "; ")
 }
 
 // truncate shortens a string to at most max runes, appending "…" when cut.
@@ -713,13 +900,19 @@ func (s *spinner) stop() {
 	})
 }
 
-// editAI runs the full AI edit flow against baseURL (the OpenRouter root; tests
+// editAI runs the full AI edit flow against baseURL (the provider root; tests
 // inject an httptest server). It reads the current config, asks the model for
 // the new YAML, validates the reply (retrying once on invalid output), and —
 // unless dryRun — writes configPath. The proposed YAML is normalized through
-// yaml.Marshal after validation so the written bytes always round-trip.
+// yaml.Marshal after validation so the written bytes always round-trip. The
+// model "lmstudio" selects the local LM Studio provider, which needs no API
+// key; every other model value uses OpenRouter.
 func editAI(baseURL, configPath, apiKey, model, prompt string, dryRun bool) error {
-	if apiKey == "" {
+	if model == lmStudioModel {
+		// LM Studio needs no credentials; drop any stale key so it is neither
+		// sent to the local server nor persisted into .ENV.
+		apiKey = ""
+	} else if apiKey == "" {
 		return fmt.Errorf("missing API key: pass --apikey, set OPENROUTER_API_KEY, or populate .ENV")
 	}
 	prompt, err := resolvePrompt(prompt)
@@ -747,12 +940,12 @@ func editAI(baseURL, configPath, apiKey, model, prompt string, dryRun bool) erro
 	// Remember the credentials that worked so the next run can omit the flags.
 	persistEnv(apiKey, model)
 
-	// Show only the YAML sections that actually changed, never the whole file.
-	changed, err := changedSections(current, proposed)
+	// Show the changed keys and their new values, never the whole file.
+	changes, err := changedPaths(current, proposed)
 	if err != nil {
-		return fmt.Errorf("computing changed sections: %w", err)
+		return fmt.Errorf("computing changed paths: %w", err)
 	}
-	if len(changed) == 0 {
+	if len(changes) == 0 {
 		fmt.Println("No changes.")
 		return nil
 	}
@@ -764,8 +957,10 @@ func editAI(baseURL, configPath, apiKey, model, prompt string, dryRun bool) erro
 		fmt.Printf("Saved %s\n", configPath)
 	}
 
-	// Print the same compact section preview in both dry-run and write mode.
-	fmt.Printf("%s\n", changed)
+	// Print the same compact change list in both dry-run and write mode.
+	for _, line := range changes {
+		fmt.Println(line)
+	}
 	if dryRun {
 		fmt.Printf("\ndry run — not written\n")
 	}
@@ -775,13 +970,25 @@ func editAI(baseURL, configPath, apiKey, model, prompt string, dryRun bool) erro
 // proposeEdit runs the chat + extract + merge + validation loop, retrying once
 // when the model fragment fails to merge or the merged config fails to
 // validate (the error is fed back to the model on the second attempt). Network
-// and API errors are not retried, and the original file stays untouched.
+// and API errors are not retried, and the original file stays untouched. For
+// the LM Studio provider the real model id is discovered from the local server
+// once, up front, since the sentinel "lmstudio" is not a valid model id.
 func proposeEdit(baseURL, apiKey, model, prompt string, current []byte) ([]byte, error) {
+	provider := "OpenRouter"
+	chatModel := model
+	if model == lmStudioModel {
+		provider = "LM Studio"
+		id, err := lmStudioModelID(context.Background(), baseURL)
+		if err != nil {
+			return nil, err
+		}
+		chatModel = id
+	}
 	messages := buildEditPrompt(aiSpec, string(current), prompt)
 
-	sp := newSpinner(os.Stderr, fmt.Sprintf("Contacting OpenRouter (model %s)", model))
+	sp := newSpinner(os.Stderr, fmt.Sprintf("Contacting %s (model %s)", provider, chatModel))
 	sp.start()
-	content, err := openrouterChat(context.Background(), baseURL, apiKey, model, messages)
+	content, err := chatCompletions(context.Background(), baseURL, apiKey, chatModel, messages)
 	sp.stop()
 	if err != nil {
 		return nil, err
@@ -795,7 +1002,7 @@ func proposeEdit(baseURL, apiKey, model, prompt string, current []byte) ([]byte,
 	// First attempt failed merge/validation: retry once, feeding the error back.
 	sp = newSpinner(os.Stderr, "First reply invalid — retrying once")
 	sp.start()
-	content, err = openrouterChat(context.Background(), baseURL, apiKey, model, buildRetryPrompt(aiSpec, string(current), prompt, mergeErr))
+	content, err = chatCompletions(context.Background(), baseURL, apiKey, chatModel, buildRetryPrompt(aiSpec, string(current), prompt, mergeErr))
 	sp.stop()
 	if err != nil {
 		return nil, err

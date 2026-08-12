@@ -49,20 +49,30 @@ func writeTestConfig(t *testing.T, dir string) string {
 
 const validReply = "```yaml\npanel:\n  name: Order management\n```"
 
-// stubCall records what one request sent to the fake OpenRouter.
+// defaultModelsBody is what the stub returns for GET /models, standing in for
+// a loaded LM Studio model.
+const defaultModelsBody = `{"object":"list","data":[{"id":"local-model-xyz"}]}`
+
+// stubCall records what one request sent to the fake provider.
 type stubCall struct {
 	authHeader string
 	req        chatRequest
 }
 
-// stubOpenRouter spins up an httptest server standing in for OpenRouter. The
-// respond callback receives the call index and the decoded request and returns
-// the response body + HTTP status. Returns the server URL and the recorded
-// calls (also closed via t.Cleanup).
-func stubOpenRouter(t *testing.T, respond func(i int, r chatRequest) (string, int)) (string, *[]stubCall) {
+// stubProvider spins up an httptest server standing in for the chat provider.
+// GET /models answers with modelsBody (used by the LM Studio provider to
+// discover the loaded model id); every other request is a /chat/completions
+// POST answered by respond(i, r) with a response body + HTTP status. Returns
+// the server URL and the recorded chat calls (also closed via t.Cleanup).
+func stubProvider(t *testing.T, modelsBody string, respond func(i int, r chatRequest) (string, int)) (string, *[]stubCall) {
 	t.Helper()
 	var calls []stubCall
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/models") {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, modelsBody)
+			return
+		}
 		var cr chatRequest
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&cr)
@@ -75,6 +85,15 @@ func stubOpenRouter(t *testing.T, respond func(i int, r chatRequest) (string, in
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL, &calls
+}
+
+// stubOpenRouter spins up an httptest server standing in for OpenRouter. The
+// respond callback receives the call index and the decoded request and returns
+// the response body + HTTP status. Returns the server URL and the recorded
+// calls (also closed via t.Cleanup).
+func stubOpenRouter(t *testing.T, respond func(i int, r chatRequest) (string, int)) (string, *[]stubCall) {
+	t.Helper()
+	return stubProvider(t, defaultModelsBody, respond)
 }
 
 // chatReply wraps content into a /chat/completions-style success response.
@@ -535,6 +554,109 @@ func TestMergeYAMLNonMappingFragment(t *testing.T) {
 	}
 }
 
+// TestChangedPaths checks the compact path+value diff output: one line per
+// changed leaf, keyed-list items identified by their name in the path, strings
+// single-quoted, numbers/bools bare.
+func TestChangedPaths(t *testing.T) {
+	cases := []struct {
+		name, cur, prop string
+		want            []string
+	}{
+		{
+			name: "panel scalar",
+			cur:  "panel:\n  name: Admin\n  path: /admin\n",
+			prop: "panel:\n  name: Order management\n  path: /admin\n",
+			want: []string{"panel/name -> 'Order management'"},
+		},
+		{
+			name: "resource label",
+			cur:  "resources:\n  - name: User\n    label: Users\n",
+			prop: "resources:\n  - name: User\n    label: Members\n",
+			want: []string{"resources/User/label -> 'Members'"},
+		},
+		{
+			name: "nested column label",
+			cur:  "resources:\n  - name: User\n    list:\n      columns:\n        - name: email\n          label: Email\n",
+			prop: "resources:\n  - name: User\n    list:\n      columns:\n        - name: email\n          label: Primary email\n",
+			want: []string{"resources/User/list/columns/email/label -> 'Primary email'"},
+		},
+		{
+			name: "added resource emits its leaves",
+			cur:  "resources:\n  - name: User\n    label: Users\n",
+			prop: "resources:\n  - name: User\n    label: Users\n  - name: Product\n    label: Products\n",
+			want: []string{"resources/Product/name -> 'Product'", "resources/Product/label -> 'Products'"},
+		},
+		{
+			name: "keyless widget index",
+			cur:  "pages:\n  - name: Dashboard\n    widgets:\n      - type: stat\n        label: Total\n",
+			prop: "pages:\n  - name: Dashboard\n    widgets:\n      - type: stat\n        label: New\n",
+			want: []string{"pages/Dashboard/widgets/0/label -> 'New'"},
+		},
+		{
+			name: "navigation group item",
+			cur:  "navigation:\n  - group: Management\n    items:\n      - resource: User\n        label: Users\n",
+			prop: "navigation:\n  - group: Management\n    items:\n      - resource: User\n        label: Accounts\n",
+			want: []string{"navigation/Management/items/User/label -> 'Accounts'"},
+		},
+		{
+			name: "empty string value",
+			cur:  "panel:\n  name: Admin\n",
+			prop: "panel:\n  name: \"\"\n",
+			want: []string{"panel/name -> ''"},
+		},
+		{
+			name: "bare scalars",
+			cur:  "panel:\n  id: 5\n  on: true\n",
+			prop: "panel:\n  id: 6\n  on: true\n",
+			want: []string{"panel/id -> 6"},
+		},
+		{
+			name: "no changes",
+			cur:  "panel:\n  name: Admin\n",
+			prop: "panel:\n  name: Admin\n",
+			want: nil,
+		},
+		{
+			name: "scalar login fields unchanged",
+			cur:  "auth:\n  login:\n    fields:\n      - email\n      - password\n",
+			prop: "auth:\n  login:\n    fields:\n      - email\n      - password\n",
+			want: nil,
+		},
+		{
+			name: "scalar login fields changed by index",
+			cur:  "auth:\n  login:\n    fields:\n      - email\n      - password\n",
+			prop: "auth:\n  login:\n    fields:\n      - email\n      - pin\n",
+			want: []string{"auth/login/fields/1 -> 'pin'"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := changedPaths([]byte(c.cur), []byte(c.prop))
+			if err != nil {
+				t.Fatalf("changedPaths: %v", err)
+			}
+			if len(got) != len(c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Errorf("line %d = %q, want %q (full %v)", i, got[i], c.want[i], got)
+				}
+			}
+		})
+	}
+}
+
+// TestChangedPathsMalformedInput verifies changedPaths errors on bad YAML.
+func TestChangedPathsMalformedInput(t *testing.T) {
+	if _, err := changedPaths([]byte("panel: [unclosed"), []byte("panel:\n  name: Admin\n")); err == nil {
+		t.Fatal("expected malformed-current error")
+	}
+	if _, err := changedPaths([]byte("panel:\n  name: Admin\n"), []byte("panel: [unclosed")); err == nil {
+		t.Fatal("expected malformed-proposed error")
+	}
+}
+
 func TestDiffLines(t *testing.T) {
 	got := diffLines("a\nb\nc\n", "a\nb\nx\n")
 	want := []string{"  a", "  b", "- c", "+ x"}
@@ -611,11 +733,11 @@ func TestEditAIHappyPath(t *testing.T) {
 		}
 	}
 	s := out()
-	if !strings.Contains(s, "Saved") || !strings.Contains(s, "Order management") {
-		t.Errorf("stdout should print the save message and the changed section, got:\n%s", s)
+	if !strings.Contains(s, "Saved") || !strings.Contains(s, "panel/name -> 'Order management'") {
+		t.Errorf("stdout should print the save message and the changed path+value, got:\n%s", s)
 	}
 	if strings.Contains(s, "resources") {
-		t.Errorf("stdout should print only the changed section, not the whole file, got:\n%s", s)
+		t.Errorf("stdout should print only the changed path, not the whole file, got:\n%s", s)
 	}
 }
 
@@ -684,11 +806,11 @@ func TestEditAIDryRunNeverWrites(t *testing.T) {
 		t.Errorf("dry-run must not write; file has:\n%s", data)
 	}
 	s := out()
-	if !strings.Contains(s, "dry run") || !strings.Contains(s, "Order management") {
-		t.Errorf("dry-run stdout should preview the proposed change, got:\n%s", s)
+	if !strings.Contains(s, "dry run") || !strings.Contains(s, "panel/name -> 'Order management'") {
+		t.Errorf("dry-run stdout should preview the changed path+value, got:\n%s", s)
 	}
 	if strings.Contains(s, "resources") {
-		t.Errorf("dry-run stdout should print only the changed section, not the whole file, got:\n%s", s)
+		t.Errorf("dry-run stdout should print only the changed path, not the whole file, got:\n%s", s)
 	}
 }
 
@@ -723,6 +845,105 @@ func TestOpenRouterHTTPError(t *testing.T) {
 	data, _ := os.ReadFile(path)
 	if !strings.Contains(string(data), "Admin") {
 		t.Error("original file must be untouched on HTTP error")
+	}
+}
+
+// TestEditAILMStudio verifies the --model "lmstudio" path: no API key is
+// required (a stale one is ignored and not sent), the real model id is
+// discovered from the local server's /models endpoint, and the diff prints as
+// path+value lines.
+func TestEditAILMStudio(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestConfig(t, dir)
+	url, calls := stubOpenRouter(t, func(i int, r chatRequest) (string, int) {
+		if r.Model != "local-model-xyz" {
+			t.Errorf("model = %q, want discovered local-model-xyz", r.Model)
+		}
+		if r.Temperature != 0 {
+			t.Errorf("temperature = %v, want 0", r.Temperature)
+		}
+		return chatReply(validReply), http.StatusOK
+	})
+	out := captureStdout(t)
+
+	if err := editAI(url, path, "stale-key", lmStudioModel, "Change the title", false); err != nil {
+		t.Fatalf("editAI: %v", err)
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("expected exactly 1 chat request, got %d", len(*calls))
+	}
+	if (*calls)[0].authHeader != "" {
+		t.Errorf("auth header = %q, want empty (LM Studio needs no key)", (*calls)[0].authHeader)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Order management") {
+		t.Errorf("config file should contain the change, got:\n%s", data)
+	}
+	s := out()
+	if !strings.Contains(s, "panel/name -> 'Order management'") {
+		t.Errorf("stdout should print the changed path+value, got:\n%s", s)
+	}
+}
+
+// TestEditAILMStudioDryRun verifies --dry-run with the LM Studio provider
+// previews without writing.
+func TestEditAILMStudioDryRun(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestConfig(t, dir)
+	url, _ := stubOpenRouter(t, func(i int, r chatRequest) (string, int) {
+		return chatReply(validReply), http.StatusOK
+	})
+	out := captureStdout(t)
+
+	if err := editAI(url, path, "", lmStudioModel, "Change the title", true); err != nil {
+		t.Fatalf("editAI dry-run: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "Order management") {
+		t.Errorf("dry-run must not write; file has:\n%s", data)
+	}
+	if s := out(); !strings.Contains(s, "dry run") || !strings.Contains(s, "panel/name -> 'Order management'") {
+		t.Errorf("dry-run stdout should preview the path+value change, got:\n%s", s)
+	}
+}
+
+// TestEditAILMStudioNoModel verifies a clear error when the local server
+// reports no loaded model, leaving the config untouched.
+func TestEditAILMStudioNoModel(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestConfig(t, dir)
+	url, _ := stubProvider(t, `{"object":"list","data":[]}`, func(i int, r chatRequest) (string, int) {
+		return chatReply(validReply), http.StatusOK
+	})
+	err := editAI(url, path, "", lmStudioModel, "change", false)
+	if err == nil || !strings.Contains(err.Error(), "no model loaded") {
+		t.Fatalf("expected no-model-loaded error, got %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "Admin") {
+		t.Error("original file must be untouched")
+	}
+}
+
+// TestLmStudioModelID verifies the /models response is parsed for the first
+// loaded model id.
+func TestLmStudioModelID(t *testing.T) {
+	url, _ := stubOpenRouter(t, func(i int, r chatRequest) (string, int) {
+		t.Fatal("no chat request expected")
+		return "", http.StatusOK
+	})
+	id, err := lmStudioModelID(t.Context(), url)
+	if err != nil {
+		t.Fatalf("lmStudioModelID: %v", err)
+	}
+	if id != "local-model-xyz" {
+		t.Errorf("id = %q, want local-model-xyz", id)
 	}
 }
 

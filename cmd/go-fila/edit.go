@@ -15,9 +15,14 @@ func cmdEdit() {
 
 	// D7: AI-assisted editing (opt-in). When --prompt is set, the AI path runs
 	// instead of the TUI; the config is sent to OpenRouter (consent is the user
-	// supplying the key + prompt). --dry-run previews without writing.
+	// supplying the key + prompt) or, with --model "lmstudio", to a local LM
+	// Studio server (no key). --dry-run previews without writing.
 	if prompt != "" {
-		if err := editAI(openRouterBaseURL, configPath, apiKey, model, prompt, dryRun); err != nil {
+		baseURL := openRouterBaseURL
+		if model == lmStudioModel {
+			baseURL = lmStudioBaseURL
+		}
+		if err := editAI(baseURL, configPath, apiKey, model, prompt, dryRun); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
 		}

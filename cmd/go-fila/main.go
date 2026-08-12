@@ -95,11 +95,12 @@ Flags:
                  (a random one is generated and printed when omitted)
 
 AI-assisted edit (edit only):
-  --prompt TEXT  Edit go-fila.yaml via OpenRouter instead of the TUI
-                 (the full config is sent to OpenRouter)
+  --prompt TEXT  Edit go-fila.yaml via AI instead of the TUI
+                 (the full config is sent to the AI provider)
                  file://PATH reads the prompt from a file (~ expands to home)
   --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env, then .ENV)
-  --model MODEL  Model id (fallback: .ENV, then openrouter/auto)
+  --model MODEL  Model id (fallback: .ENV, then openrouter/auto);
+                 "lmstudio" uses a local LM Studio server (127.0.0.1:1234, no key)
   --dry-run      Print proposed YAML + diff without writing`)
 }
 

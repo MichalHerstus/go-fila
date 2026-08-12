@@ -173,7 +173,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Audit log resource | Greenfield (strong existing infra: `hooks.Scope`, `RETURNING id`, `auth.UserName`) |
 | CSV import + export column selection | Export exists (all list cols); import + selection new |
 | SQLite stored procedures (batch-in-table) | Greenfield |
-| AI-assisted `go-fila edit` (OpenRouter) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, changed-section-only output, httptest stub + `mergeYAML` suite) |
+| AI-assisted `go-fila edit` (OpenRouter / LM Studio) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, path+value diff output (`changedPaths`), local LM Studio provider via `--model "lmstudio"`, httptest stub (OpenRouter + LM Studio) + `mergeYAML`/`changedPaths` suites) |
 | Drop Node.js/npm from the dashboard build | **Done (D8)** |
 | Editor Validate (main menu → results list → jump-to-fix) | **Done (D9)** |
 | Rename project to YAGA (binary, module path, repo, docs) | Planned (D10) |
@@ -311,16 +311,20 @@ missing proc → clean `httperr` page.
 
 ---
 
-### D7 — AI-assisted config editing (`go-fila edit` via OpenRouter)
+### D7 — AI-assisted config editing (`go-fila edit` via OpenRouter / LM Studio)
 
 **Status: done (2026-08-10).** Non-interactive and opt-in: AI flags live on `edit`
-only; without `--prompt` the current TUI runs unchanged. Provider locked to OpenRouter
-(base URL hardcoded — the only supported provider). Decisions taken (2026-08-10):
+only; without `--prompt` the current TUI runs unchanged. Provider is OpenRouter by
+default (`openRouterBaseURL`), with an opt-in local LM Studio provider selected by
+the `--model "lmstudio"` sentinel (`lmStudioBaseURL` = `http://127.0.0.1:1234/v1`,
+no API key; the loaded model id is discovered via GET `/models`). Decisions taken
+(2026-08-10):
 one-shot write + `--dry-run` preview; `--model` flag defaulting to `openrouter/auto`;
 API key via `--apikey` with `OPENROUTER_API_KEY` env fallback; after a successful run
 the effective key/model are persisted to `.ENV` in the current folder so later runs can
 omit the flags (`--apikey` > `OPENROUTER_API_KEY` env > `.ENV`; `--model` > `.ENV` > default);
-terminal output prints only the changed top-level YAML sections, never the whole file.
+terminal output prints only the changed keys and their new values as `path -> 'value'` lines
+(`changedPaths`), never the whole file.
 
 **Command shape:**
 ```
@@ -340,38 +344,42 @@ go-fila edit --prompt "…"                               # uses key + model per
   the embedded compact schema cheat-sheet (`//go:embed ai_spec.md`, ~7 KB — the 33 KB
   `SPEC.md` stays out of the prompt to keep tokens low) + the current YAML + the user's
   instruction.
-- POST `https://openrouter.ai/api/v1/chat/completions` (stdlib `net/http`,
-  `Authorization: Bearer`; the key is never logged/echoed), `temperature: 0`, 300 s HTTP
-  client timeout; a `spinner` on stderr gives live progress while waiting. On
-  merge/validate failure, retry **once** feeding the validator error back; on failure exit 1
-  with the original file untouched.
+- POST `{provider}/chat/completions` (stdlib `net/http`, `Authorization: Bearer`
+  only when a key is set — the local LM Studio provider sends none; the key is
+  never logged/echoed), `temperature: 0`, 300 s HTTP client timeout; a `spinner` on
+  stderr gives live progress while waiting. On merge/validate failure, retry **once**
+  feeding the validator error back; on failure exit 1 with the original file untouched.
 - `extractYAMLBlock` (```yaml``` fence with fallback heuristics) → `mergeYAML` (yaml.v3
   Node merge: mappings recurse, sequences merge item-by-item by identity key, keyless lists
   replace wholesale, null fragment values leave targets untouched, no deletion support) →
   `yaml.Unmarshal` into `types.Config` → `parser.Validate`. After the run `persistEnv`
   writes the effective `OPENROUTER_API_KEY`/`MODEL` into `.ENV` (0600, unrelated lines
-  preserved); both write and `--dry-run` then print only the changed top-level sections
-  (`changedSections`/`nodeEqual` render the differing keys from the proposed doc) and exit 0
-  without echoing the whole file. Fragment-only output keeps responses small, so slow
-  free-tier models finish instead of timing out.
+  preserved); both write and `--dry-run` then print the changed keys as `path -> 'value'`
+  lines (`changedPaths` walks both docs and emits one line per differing leaf, keyed-list
+  identity values inline, strings single-quoted) and exit 0 without echoing the whole file.
+  Fragment-only output keeps responses small, so slow free-tier models finish instead of
+  timing out.
 - Config-only scope: SQL/`sql/queries` files are not edited by the AI path. Full
   `go-fila.yaml` is transmitted to OpenRouter (documented in usage text — consent is the
   user supplying the key + prompt).
 
-**Files:** `cmd/go-fila/ai.go` (`parseEditFlags`+`.ENV` fallback, `openrouterChat`,
-`buildEditPrompt`, `extractYAMLBlock`, `mergeYAML` + identity-key merge helpers, `proposeEdit`
-with single retry, `spinner`, `changedSections`/`nodeEqual`, `readEnvFile`/`writeEnvFile`/
-`persistEnv`, `envPathFunc`, `diffLines`) + `ai_spec.md` (embedded schema reference incl. § AI edit
+**Files:** `cmd/go-fila/ai.go` (`parseEditFlags`+`.ENV` fallback, `chatCompletions`,
+`lmStudioModelID`, `buildEditPrompt`, `extractYAMLBlock`, `mergeYAML` + identity-key merge
+helpers, `proposeEdit` with single retry, `spinner`, `changedPaths` leaf diff, `readEnvFile`/
+`writeEnvFile`/`persistEnv`, `envPathFunc`) + `ai_spec.md` (embedded schema reference incl. § AI edit
 output); `edit.go` branch; `main.go` usage text.
 
-**Tests / exit criteria:** httptest OpenRouter stub — happy path writes the file + prints only the
-changed sections and preserves unrelated sections; retry-on-invalid yields a valid second attempt;
-`--dry-run` never writes (but still persists `.ENV`); fence extraction; a `mergeYAML` unit suite
-(mapping deep-merge, keyed-item resource/fields/navigation merge, item append, wholesale widgets
-replace, null leaves untouched, unknown-key/malformed/empty/non-mapping fragment errors); flag/env/
-`.ENV` key resolution (missing key → clear error, `.ENV` persisted + reused, precedence flag > env >
-`.ENV`, model flag > `.ENV` > default, unrelated `.ENV` lines preserved). Docs: AGENTS.md CLI section
-+ `SPEC.md` usage line (config is sent to OpenRouter).
+**Tests / exit criteria:** httptest provider stub (serves GET `/models` so the same stub covers
+OpenRouter and LM Studio) — happy path writes the file + prints path/value diff lines and preserves
+unrelated sections; retry-on-invalid yields a valid second attempt; `--dry-run` never writes (but
+still persists `.ENV`); fence extraction; a `mergeYAML` unit suite (mapping deep-merge, keyed-item
+resource/fields/navigation merge, item append, wholesale widgets replace, null leaves untouched,
+unknown-key/malformed/empty/non-mapping fragment errors); a `changedPaths` suite (scalar/resource/
+column/navigation/index paths, added-resource leaves, value quoting, no-changes); LM Studio happy
+path (discovered model id sent, no auth header, stale key ignored) and no-model-loaded error;
+flag/env/`.ENV` key resolution (missing key → clear error, `.ENV` persisted + reused, precedence
+flag > env > `.ENV`, model flag > `.ENV` > default, unrelated `.ENV` lines preserved). Docs:
+AGENTS.md CLI section + `SPEC.md` usage lines (config is sent to the provider; `lmstudio` model).
 
 ---
 
