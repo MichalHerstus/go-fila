@@ -1,7 +1,7 @@
-module github.com/go-fila/plugin-audit
+module github.com/MichalHerstus/plugin-audit
 
 go 1.26.3
 
-require github.com/go-fila/go-fila v0.0.0
+require github.com/MichalHerstus/yaga v0.0.0
 
-replace github.com/go-fila/go-fila => ../../..
+replace github.com/MichalHerstus/yaga => ../../..

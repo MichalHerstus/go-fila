@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // generateHooks writes internal/hooks/hooks.go into the output directory when

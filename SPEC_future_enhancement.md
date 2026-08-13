@@ -2,7 +2,7 @@
 
 Review date: 2026-08-07. Status: in progress. Phase A (security hardening) is
 implemented; the remaining items are proposed. File references point at the
-go-fila generator sources that emit the affected generated-app code.
+yaga generator sources that emit the affected generated-app code.
 
 ## 1. Security findings
 
@@ -10,7 +10,7 @@ go-fila generator sources that emit the affected generated-app code.
 
 - **Hardcoded session secret → auth bypass** ✅ implemented (Phase A)
   Generated `internal/panel/auth/session.go` uses
-  `sessions.NewCookieStore([]byte("go-fila-secret-key-change-in-production"))`.
+  `sessions.NewCookieStore([]byte("yaga-secret-key-change-in-production"))`.
   The secret is public in every generated app, so an attacker can forge a signed
   session cookie claiming any `user_id` and log in as any user.
   Fix: read `SESSION_SECRET` env var; generate a random one and fail fast when
@@ -50,7 +50,7 @@ go-fila generator sources that emit the affected generated-app code.
   `init --db` ships `admin@admin.test / admin`;
   `init --demo` ships `admin@demo.test / admin`.
   Fix: `--admin-password` flag or generate + print a random one-time password.
-  Source: `cmd/go-fila/introspect.go:725-767`, `cmd/go-fila/demo.go:1278-1296`
+  Source: `cmd/yaga/introspect.go:725-767`, `cmd/yaga/demo.go:1278-1296`
 
 ### Medium
 
@@ -171,7 +171,7 @@ logging with request-id + timing.
    hack is gone. Source: `internal/generator/handler.go` (list/card).
 2. **Configurable `per_page`** ✅ — `ListConfig.PerPage` (default 20 applied in
    `internal/parser/validator.go:95`), an editor "Per page" field
-   (`cmd/go-fila/editor/resource.go:166`), and the handler reads `r.List.PerPage` for
+   (`cmd/yaga/editor/resource.go:166`), and the handler reads `r.List.PerPage` for
    `LIMIT/OFFSET` (`handler.go:326`). Sources: `internal/types/resource.go:33`.
 3. **Pool settings wiring** ✅ — `connections.*.pool` (`max_open_conns`/`max_idle_conns`/
    `conn_max_lifetime`) is emitted as `db.SetMaxOpenConns`/`SetMaxIdleConns`/
@@ -213,7 +213,7 @@ gain `"time"`. This is a global emitter change (all configs), so the byte-identi
 regression guard does not apply — assert via `assertGeneratedGoParses` + snippet tests.
 
 **C.3 — Cross-cutting (done 2026-08-13):** version 0.9.0 → 0.10.0
-(`cmd/go-fila/main.go`); AGENTS.md hardening notes; gates `go build ./...`,
+(`cmd/yaga/main.go`); AGENTS.md hardening notes; gates `go build ./...`,
 `go vet ./...`, `go test ./...`, `gofmt -l .`.
 
 **Phase D — Feature roadmap**
@@ -231,10 +231,10 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Audit log resource | **Done (D2)** — config `audit` block, generator-implicit INSERTs on create/update/delete/action in one tx, augmented list-only AuditLog resource + nav, driver-aware DDL/queries, demo-enabled |
 | CSV import + export column selection | **Done (D3)** — `list.export` subset (Label headers) + `import_csv` (import.go, shared `buildCreateParams`, transactional, ?flash topbar, modal) |
 | SQLite stored procedures (batch-in-table) | **Done (D6)** — YAML `procedures:` block, `sql_procedures` DDL + `INSERT OR IGNORE` seeds, `internal/panel/procs` package (`Exec(db,name,id)` + tokenizer statement split), sqlite proc emission flips (actions/hooks/bulk/create RETURNING), validator rejects undeclared sqlite proc refs |
-| AI-assisted `go-fila edit` (OpenRouter / LM Studio) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, path+value diff output (`changedPaths`), local LM Studio provider via `--model "lmstudio"`, httptest stub (OpenRouter + LM Studio) + `mergeYAML`/`changedPaths` suites) |
+| AI-assisted `yaga edit` (OpenRouter / LM Studio) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/yaga/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, path+value diff output (`changedPaths`), local LM Studio provider via `--model "lmstudio"`, httptest stub (OpenRouter + LM Studio) + `mergeYAML`/`changedPaths` suites) |
 | Drop Node.js/npm from the dashboard build | **Done (D8)** |
 | Editor Validate (main menu → results list → jump-to-fix) | **Done (D9)** |
-| Rename project to YAGA (binary, module path, repo, docs) | Planned (D10) |
+| Rename project to YAGA (binary, module path, repo, docs) | Done |
 | List/Card filter section (`list.filter` / `card.filter`, collapsible, `$N` params) | Planned (D11) |
 
 ---
@@ -455,7 +455,7 @@ missing proc → clean `httperr` page.
 
 ---
 
-### D7 — AI-assisted config editing (`go-fila edit` via OpenRouter / LM Studio)
+### D7 — AI-assisted config editing (`yaga edit` via OpenRouter / LM Studio)
 
 **Status: done (2026-08-10).** Non-interactive and opt-in: AI flags live on `edit`
 only; without `--prompt` the current TUI runs unchanged. Provider is OpenRouter by
@@ -472,14 +472,14 @@ terminal output prints only the changed keys and their new values as `path -> 'v
 
 **Command shape:**
 ```
-go-fila edit --apikey KEY [--model MODEL] --prompt "Change dashboard title to: Order management"
-go-fila edit [--apikey KEY] --prompt "…" --dry-run      # preview changed sections, no write
-go-fila edit --prompt "…"                               # uses key + model persisted in .ENV
+yaga edit --apikey KEY [--model MODEL] --prompt "Change dashboard title to: Order management"
+yaga edit [--apikey KEY] --prompt "…" --dry-run      # preview changed sections, no write
+yaga edit --prompt "…"                               # uses key + model persisted in .ENV
 ```
 
 **Design:**
 - `cmdEdit` branches to an AI path when `--prompt` is set; a second flag pass
-  (`parseEditFlags` in a new `cmd/go-fila/ai.go`) picks out `--apikey/--prompt/--model/
+  (`parseEditFlags` in a new `cmd/yaga/ai.go`) picks out `--apikey/--prompt/--model/
   --dry-run`, leaving `parseGlobalFlags`'s tuple untouched (only `edit` understands them).
 - Load via `parser.ParseFile(configPath)`, marshal current YAML. Build messages: a system
   role with the output contract ("return ONLY the changed sections of the config as a YAML
@@ -504,10 +504,10 @@ go-fila edit --prompt "…"                               # uses key + model per
   Fragment-only output keeps responses small, so slow free-tier models finish instead of
   timing out.
 - Config-only scope: SQL/`sql/queries` files are not edited by the AI path. Full
-  `go-fila.yaml` is transmitted to OpenRouter (documented in usage text — consent is the
+  `yaga.yaml` is transmitted to OpenRouter (documented in usage text — consent is the
   user supplying the key + prompt).
 
-**Files:** `cmd/go-fila/ai.go` (`parseEditFlags`+`.ENV` fallback, `chatCompletions`,
+**Files:** `cmd/yaga/ai.go` (`parseEditFlags`+`.ENV` fallback, `chatCompletions`,
 `lmStudioModelID`, `buildEditPrompt`, `extractYAMLBlock`, `mergeYAML` + identity-key merge
 helpers, `proposeEdit` with single retry, `spinner`, `changedPaths` leaf diff, `readEnvFile`/
 `writeEnvFile`/`persistEnv`, `envPathFunc`) + `ai_spec.md` (embedded schema reference incl. § AI edit
@@ -527,7 +527,7 @@ AGENTS.md CLI section + `SPEC.md` usage lines (config is sent to the provider; `
 
 ---
 
-### D9 — Editor validation with jump-to-fix (`go-fila edit` → Validate)
+### D9 — Editor validation with jump-to-fix (`yaga edit` → Validate)
 
 **Status: done (2026-08-11).** Adds a "Validate" entry to the editor's left
 nav that runs a full health check (structural + field-name + missing table/query)
@@ -549,10 +549,10 @@ missing-query findings are errors.
    `card.fields`, `detail.fields`, `form.create/update/delete.fields`, plus
    `list/card.default_sort`, `card.kanban_field`, `card.searchable` (leading `-`
    stripped via a `sortColumn` helper).
-3. **`cmd/go-fila/editor/sync.go`** — `syncReport.missingCols` becomes
+3. **`cmd/yaga/editor/sync.go`** — `syncReport.missingCols` becomes
    `[]colMissing{resource string; ref schema.ColumnRef}`; the Sync screen renders
    `resource.section.column` (more precise than today's `resource.column`).
-4. **`cmd/go-fila/editor/validate.go` (new)** — `finding{kind, label, detail;
+4. **`cmd/yaga/editor/validate.go` (new)** — `finding{kind, label, detail;
    goTo}` + `runValidation()`:
    - structural: validate a YAML copy via `parser.ValidateAll` (same copy
      technique as `validateCopy`); a `goTo` is attached when the message parses
@@ -569,7 +569,7 @@ missing-query findings are errors.
    - `validatePage()`: tview.List of findings (red errors / yellow warnings),
      "No problems found" empty state, Refresh (Ctrl+R) + Back (Ctrl+B) buttons —
      mirrors the Sync screen layout.
-5. **`cmd/go-fila/editor/editor.go`** — `buildNav` gains
+5. **`cmd/yaga/editor/editor.go`** — `buildNav` gains
    `e.navItem("Validate (Ctrl+V)", "validate", e.validatePage)` between "Sync SQL
    & YAML" and "Preview", plus a global `tcell.KeyCtrlV` case in `capture`.
 
@@ -588,19 +588,19 @@ editor section.
 
 ### D8 — Drop Node.js/npm from the generated dashboard build
 
-**Status: implemented (2026-08-11).** Goal: `make` (and `go-fila generate`) must not require
+**Status: implemented (2026-08-11).** Goal: `make` (and `yaga generate`) must not require
 node/npm; generated-app output stays byte-identical and runtime stays offline. The only
 npm consumers are Tailwind CSS compilation (`npx tailwindcss`) and Chart.js vendoring
 (`cp node_modules/...`). Decisions taken (2026-08-10): Tailwind via the **standalone
 binary** (PATH + optional `make get-tailwind` download, sqlc-style toolchain model);
-Chart.js **embedded** into go-fila via `//go:embed`.
+Chart.js **embedded** into yaga via `//go:embed`.
 
 **Design:**
 - **Chart.js**: commit `chart.umd.min.js` @ **4.4.1** (MIT, license banner intact) at
   `internal/generator/assets/chart.umd.min.js`; `//go:embed` it and copy to
   `OutDir/static/js/chart.js` during `generateAssets` (mkdir `static/js`). Charts then work
-  after `go-fila generate` alone — a bare `go build` in `admin/` serves them, zero network.
-  go-fila binary grows ~180 KB. `/static/js/chart.js` reference in `templ.go` unchanged.
+  after `yaga generate` alone — a bare `go build` in `admin/` serves them, zero network.
+  yaga binary grows ~180 KB. `/static/js/chart.js` reference in `templ.go` unchanged.
 - **Tailwind**: `RunTailwind` in `tailwind.go` swaps `npx tailwindcss` for the
   `tailwindcss` binary (PATH, honoring a `TAILWIND` env override; still non-fatal from
   `cmdGenerate`). `generateStaticAssets` **stops emitting `package.json`** (keeps
@@ -617,7 +617,7 @@ Chart.js **embedded** into go-fila via `//go:embed`.
 
 **Tests / exit criteria:** generator unit — `generateAssets` emits `static/js/chart.js`
 equal to the embedded bytes and **no** `package.json`; the generated `Makefile` contains no
-`npm` and its `css` target invokes `$(TAILWIND)`. E2E — `go-fila init --demo` + `make css`
+`npm` and its `css` target invokes `$(TAILWIND)`. E2E — `yaga init --demo` + `make css`
 with the standalone binary produces `static/css/styles.css` and `static/js/chart.js`; a bare
 `go build` serves chart.js.
 
@@ -625,22 +625,22 @@ with the standalone binary produces `static/css/styles.css` and `static/js/chart
 
 ### D10 — Rename project to YAGA
 
-**Status: decided (2026-08-11), not started.** Rename the project/brand from "go-fila" to
+**Status: done (2026-08-13).** Renamed the project/brand from "go-fila" to
 **YAGA** (**YA**ml-based **G**enerator of **A**pplications) across code, generated output,
 binary, module path, GitHub repository and documentation. Decisions taken (2026-08-11): new
 module path `github.com/MichalHerstus/yaga` (matches the real remote owner — the current
 `github.com/go-fila/go-fila` never matched the remote `github.com/MichalHerstus/go-fila`);
-default config file `go-fila.yaml` → `yaga.yaml`; version bumped 0.9.0 → 1.0.0; generated-app
+default config file `go-fila.yaml` → `yaga.yaml`; version bumped 0.14.0 → 1.0.0; generated-app
 runtime identifiers renamed (`go-fila-session` cookie → `yaga-session`, `gf-theme` storage key
 → `yaga-theme` — sessions invalidate + theme resets on redeploy, acceptable at 1.0.0); GitHub
 repo renamed to `MichalHerstus/yaga`; `session-ses_*.md` transcripts left untouched (historical).
 
 **Design:**
 1. **Repo restructure** — `git mv cmd/go-fila cmd/yaga` (embedded `ai_spec.md` +
-   `AGENTS_for_generated_dashboard.md` move with it); repo `Makefile` `BINARY := yaga` and
+   `AGENTS_for_generated_dashboard.md` moved with it); repo `Makefile` `BINARY := yaga` and
    `build` target `go build -o $(BINARY) ./cmd/yaga`; `.gitignore` `/go-fila` → `/yaga`.
-2. **Module path** — `go.mod` → `module github.com/MichalHerstus/yaga`; replace
-   `github.com/go-fila/go-fila` → `github.com/MichalHerstus/yaga` across ~51 imports,
+2. **Module path** — `go.mod` → `module github.com/MichalHerstus/yaga`; replaced
+   `github.com/go-fila/go-fila` → `github.com/MichalHerstus/yaga` across the imports,
    `internal/generator/plugin.go` `gofilaModule` const (→ `yagaModule`, plus
    `gofilaCheckout`/`findGoFilaCheckout` → `yaga*`), and `examples/plugins/audit/go.mod`
    (require + `replace ... => ../../..`).
@@ -655,10 +655,10 @@ repo renamed to `MichalHerstus/yaga`; `session-ses_*.md` transcripts left untouc
    (`plugin.go:65`).
 5. **Docs & embedded content** — `README.md` (incl. `go install
    github.com/MichalHerstus/yaga/cmd/yaga@latest`), `AGENTS.md`, `SPEC.md`,
-   `SPECv05plus.md`, `SPEC_yaml_editor.md`, `cmd/go-fila/ai_spec.md`,
-   `cmd/go-fila/AGENTS_for_generated_dashboard.md` (lands inside generated apps:
+   `SPECv05plus.md`, `SPEC_yaml_editor.md`, `cmd/yaga/ai_spec.md`,
+   `cmd/yaga/AGENTS_for_generated_dashboard.md` (lands inside generated apps:
    `./yaga generate --config yaga.yaml ...`). Prose brand = "YAGA", CLI word = `yaga`.
-6. **GitHub** — after the commit: `gh repo rename yaga --repo MichalHerstus/go-fila`,
+6. **GitHub** — `gh repo rename yaga --repo MichalHerstus/go-fila`,
    `git remote set-url origin https://github.com/MichalHerstus/yaga.git`, push.
 
 **Tests / exit criteria:** new generator unit test asserting generated output contains no
@@ -744,10 +744,10 @@ only columns/literals from the trusted YAML and bound param values reach the SQL
    `params` present; param names non-empty + unique.
 7. `internal/schema/references.go` — record columns referenced by
    `list.filter`/`card.filter` (Section `"list.filter"`, `"card.filter"`) so the editor
-   Validate screen flags missing columns; `cmd/go-fila/editor/validate.go` goTo mapping.
-8. `cmd/go-fila/editor/` — list/card sub-editor gains a "Filter" page (label/where
+   Validate screen flags missing columns; `cmd/yaga/editor/validate.go` goTo mapping.
+8. `cmd/yaga/editor/` — list/card sub-editor gains a "Filter" page (label/where
    text inputs + name/label params list, reusing `listSpec`).
-9. `cmd/go-fila/ai_spec.md` (cheat-sheet example), `cmd/go-fila/demo.go` (one demo
+9. `cmd/yaga/ai_spec.md` (cheat-sheet example), `cmd/yaga/demo.go` (one demo
    resource, e.g. orders `status = $1`, to exercise the feature end-to-end).
 10. Docs — `SPEC.md` (schema + DSL), `README.md`, `TESTs.md`, `AGENTS.md`.
 

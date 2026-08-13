@@ -18,14 +18,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
-	pluginapi "github.com/go-fila/go-fila/pkg/plugin"
+	"github.com/MichalHerstus/yaga/internal/types"
+	pluginapi "github.com/MichalHerstus/yaga/pkg/plugin"
 )
 
-// gofilaModule is the module path of go-fila itself, used to locate a local
+// yagaModule is the module path of YAGA itself, used to locate a local
 // checkout to `replace` into the shim (so the plugin compiles against the
 // exact local sources without publishing to a proxy).
-const gofilaModule = "github.com/go-fila/go-fila"
+const yagaModule = "github.com/MichalHerstus/yaga"
 
 // loadPlugins runs every declared plugin in config order and merges its
 // manifest into the config. It is a no-op when plugins are skipped or none are
@@ -62,14 +62,14 @@ func (g *Generator) loadPlugin(p types.PluginConfig) error {
 	}
 	config["driver"] = g.driver()
 
-	shimDir, err := os.MkdirTemp("", "go-fila-plugin-shim")
+	shimDir, err := os.MkdirTemp("", "yaga-plugin-shim")
 	if err != nil {
 		return fmt.Errorf("creating shim dir: %w", err)
 	}
 	defer os.RemoveAll(shimDir)
 
-	gofilaCheckout := findGoFilaCheckout(localDir)
-	if err := writeShim(shimDir, modPath, localDir, gofilaCheckout, config); err != nil {
+	yagaCheckout := findYagaCheckout(localDir)
+	if err := writeShim(shimDir, modPath, localDir, yagaCheckout, config); err != nil {
 		return err
 	}
 
@@ -140,12 +140,12 @@ func modulePathFromGoMod(path string) string {
 	return ""
 }
 
-// findGoFilaCheckout walks up from the given starting directories looking for
-// a go.mod declaring module github.com/go-fila/go-fila, so the shim can
+// findYagaCheckout walks up from the given starting directories looking for
+// a go.mod declaring module github.com/MichalHerstus/yaga, so the shim can
 // `replace` it with the local checkout (plugins then compile against the exact
 // local sources). Returns the checkout directory or "" when not found.
 // Params: startDirs (additional starting points, e.g. the plugin source dir).
-func findGoFilaCheckout(startDirs ...string) string {
+func findYagaCheckout(startDirs ...string) string {
 	var starts []string
 	if exe, err := os.Executable(); err == nil {
 		starts = append(starts, filepath.Dir(exe))
@@ -159,7 +159,7 @@ func findGoFilaCheckout(startDirs ...string) string {
 			continue
 		}
 		for dir := start; dir != "" && dir != "/"; dir = filepath.Dir(dir) {
-			if modulePathFromGoMod(filepath.Join(dir, "go.mod")) == gofilaModule {
+			if modulePathFromGoMod(filepath.Join(dir, "go.mod")) == yagaModule {
 				return dir
 			}
 		}
@@ -173,18 +173,18 @@ func findGoFilaCheckout(startDirs ...string) string {
 // imported under the fixed alias "plug" so the actual package name does not
 // matter; the plugin's `New` must be exported.
 // Params: dir (shim directory), modPath (plugin module path), localDir
-// (absolute plugin dir when local, else ""), gofilaCheckout (local go-fila
+// (absolute plugin dir when local, else ""), yagaCheckout (local YAGA
 // checkout dir when found, else ""), config (the YAML config map, including
 // the injected "driver" key).
 // Returns: an error on write failure.
-func writeShim(dir, modPath, localDir, gofilaCheckout string, config map[string]any) error {
+func writeShim(dir, modPath, localDir, yagaCheckout string, config map[string]any) error {
 	var b strings.Builder
-	b.WriteString("module go-fila-plugin-shim\n\ngo 1.26.3\n\nrequire (\n")
-	b.WriteString("\t" + gofilaModule + " v0.0.0\n")
+	b.WriteString("module yaga-plugin-shim\n\ngo 1.26.3\n\nrequire (\n")
+	b.WriteString("\t" + yagaModule + " v0.0.0\n")
 	b.WriteString("\t" + modPath + " v0.0.0\n")
 	b.WriteString(")\n")
-	if gofilaCheckout != "" {
-		b.WriteString("\nreplace " + gofilaModule + " => " + gofilaCheckout + "\n")
+	if yagaCheckout != "" {
+		b.WriteString("\nreplace " + yagaModule + " => " + yagaCheckout + "\n")
 	}
 	if localDir != "" {
 		b.WriteString("replace " + modPath + " => " + localDir + "\n")
@@ -242,7 +242,7 @@ func main() {
         os.Exit(1)
     }
 }
-`, "github.com/go-fila/go-fila/pkg/plugin", modPath, string(configJSON))
+`, "github.com/MichalHerstus/yaga/pkg/plugin", modPath, string(configJSON))
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(main), 0644); err != nil {
 		return fmt.Errorf("writing shim main.go: %w", err)
 	}

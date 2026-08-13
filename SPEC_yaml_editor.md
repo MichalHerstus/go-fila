@@ -1,4 +1,4 @@
-# Spec & Implementation Plan: `go-fila edit` — tview-based TUI Editor
+# Spec & Implementation Plan: `yaga edit` — tview-based TUI Editor
 
 ## 1. Goal
 
@@ -7,7 +7,7 @@ Replace the `charmbracelet/huh` + Bubble Tea editor with a `rivo/tview` TUI that
 1. **Comfortable persistent UI** — left navigation menu + right content pane + status bar (no full-screen form swaps).
 2. **Full YAML spec coverage** — every key in the `internal/types` schema (see §5).
 3. **TUI dashboard preview** — sidebar + pages/widgets, plus per-resource list/form/detail preview.
-4. **SQL ↔ YAML sync tool** — file-level consistency checks between `go-fila.yaml`, `sql/queries/*.sql`, and `sql/migrations/schema.sql`, with apply actions.
+4. **SQL ↔ YAML sync tool** — file-level consistency checks between `yaga.yaml`, `sql/queries/*.sql`, and `sql/migrations/schema.sql`, with apply actions.
 
 Decisions:
 - **Sync tool**: file-level only — no DB connection, no introspection refactor.
@@ -26,7 +26,7 @@ Decisions:
 **Persistent 3-pane layout** (lazygit-style):
 
 ```
-┌ Title bar: go-fila editor — go-fila.yaml ───────── [modified] ─┐
+┌ Title bar: yaga editor — yaga.yaml ───────── [modified] ─┐
 ├─────────────┬──────────────────────────────────────────────────┤
 │  Panel      │  <right pane = tview.Pages stack>               │
 │  Connections│   section forms / lists / sync table / preview   │
@@ -55,7 +55,7 @@ Decisions:
 - **Home** (Ctrl+O / Ctrl+/ alias): jump back to the overview screen (closes the dialog if open).
 - tview Forms have no page-groups: sections separated with `AddTextView`. Type-dependent widget/field forms rebuild via `form.Clear(true)` + re-add on type change.
 
-**Files** (`cmd/go-fila/editor/`, old bubbletea/huh files deleted):
+**Files** (`cmd/yaga/editor/`, old bubbletea/huh files deleted):
 
 ```
 editor.go   (Editor struct, shell, save/quit, home page, key capture)
@@ -158,7 +158,7 @@ The per-resource editor pages already show the live SQL bodies of a single resou
 8. Preview screen.
 9. `go mod tidy` (drop charmbracelet).
 10. Update AGENTS.md + SPEC.md CLI section.
-11. Verify: `go build ./...`, `go vet ./cmd/go-fila/...`, `go test ./...`, manual E2E on `init --demo`.
+11. Verify: `go build ./...`, `go vet ./cmd/yaga/...`, `go test ./...`, manual E2E on `init --demo`.
 
 ## 9. Risks
 

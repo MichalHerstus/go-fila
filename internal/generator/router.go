@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // generateRouter writes internal/panel/router.go. It builds the import list

@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // procPackageSrc is the full source of the generated internal/panel/procs

@@ -1,12 +1,12 @@
 // plugin.go
 //
-// Authoring API for go-fila plugins. A plugin is a separate Go module that
+// Authoring API for yaga plugins. A plugin is a separate Go module that
 // imports this package, implements the Plugin interface (and optionally
-// Configurer), and is loaded by go-fila at generation time: go-fila runs the
+// Configurer), and is loaded by yaga at generation time: yaga runs the
 // plugin's Register/Boot against a Panel builder, then merges the JSON
 // manifest of contributed resources/pages/navigation/SQL files/hook
 // attachments into the config before code generation. The generated app keeps
-// its zero runtime dependency on go-fila.
+// its zero runtime dependency on yaga.
 //
 // The public types are aliases of the internal config types (which carry only
 // yaml tags), so the manifest JSON round-trips via Go field names and the
@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // Plugin is the interface a plugin module exposes via `func New() Plugin`.
@@ -30,7 +30,7 @@ type Plugin interface {
 }
 
 // Configurer is an optional interface implemented by plugins that want the
-// YAML `config:` map from go-fila.yaml. It is detected via type assertion by
+// YAML `config:` map from yaga.yaml. It is detected via type assertion by
 // the loader, which passes the config as a map[string]any (JSON-decoded).
 // The loader injects the database driver under the reserved "driver" key
 // (e.g. "postgres", "sqlite", "mssql") so plugins can emit driver-appropriate
@@ -40,7 +40,7 @@ type Configurer interface {
 }
 
 // Public config-type aliases so plugins (a separate module) can use the same
-// struct shapes as go-fila.yaml without importing internal packages.
+// struct shapes as yaga.yaml without importing internal packages.
 type (
 	Resource        = types.Resource
 	Page            = types.Page
@@ -73,7 +73,7 @@ type HookAttachment struct {
 }
 
 // Manifest is the JSON-serializable snapshot of everything a plugin
-// contributes to the panel. go-fila's loader decodes it and merges the
+// contributes to the panel. yaga's loader decodes it and merges the
 // contributions into the config.
 type Manifest struct {
 	Resources       []Resource
@@ -144,7 +144,7 @@ func (p *Panel) AddNavigationGroup(g NavigationGroup) {
 
 // AddSQLFile contributes a SQL file into the generated project's sql/ tree.
 // name must be either "queries/<file>.sql" or "migrations/<file>.sql"; the
-// file is only written by go-fila when it does not already exist.
+// file is only written by yaga when it does not already exist.
 func (p *Panel) AddSQLFile(name, content string) {
 	p.manifest.SQLFiles[name] = content
 }

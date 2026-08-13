@@ -1,13 +1,13 @@
 // audit.go
 //
-// Example go-fila plugin: an audit trail. At generation time it contributes an
+// Example yaga plugin: an audit trail. At generation time it contributes an
 // AuditLog resource, an AuditOverview page with two stat widgets, an "Audit"
 // navigation group, the audit_log schema + queries SQL files, and attaches two
 // hooks to the existing "Customer" resource: an after-create fn hook
 // (LogCustomerCreated, implemented by the plugin's hook source file) and an
 // after-delete SQL hook, so every customer create/delete is recorded.
 //
-// The plugin is driver-aware: go-fila injects the database driver into the
+// The plugin is driver-aware: yaga injects the database driver into the
 // config map under the reserved "driver" key, and the emitted SQL uses the
 // matching dialect (sqlc placeholders and DDL differ per driver).
 package audit
@@ -15,7 +15,7 @@ package audit
 import (
 	"fmt"
 
-	plugin "github.com/go-fila/go-fila/pkg/plugin"
+	plugin "github.com/MichalHerstus/yaga/pkg/plugin"
 )
 
 // tableName is the SQL table the audit entries are written to.
@@ -54,7 +54,7 @@ func (p *auditPlugin) Configure(cfg map[string]any) error {
 // Customer delete hook to the panel.
 func (p *auditPlugin) Register(pb *plugin.Panel) error {
 	if p.driver == "" {
-		return fmt.Errorf("audit plugin: no database driver injected by go-fila")
+		return fmt.Errorf("audit plugin: no database driver injected by yaga")
 	}
 
 	if err := pb.AddResource(plugin.Resource{

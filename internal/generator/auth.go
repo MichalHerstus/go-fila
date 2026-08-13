@@ -202,7 +202,7 @@ func ActionRBACMiddleware(resource string) func(http.Handler) http.Handler {
         // Store.New always returns a usable fresh session; its error only
         // reports that the incoming (possibly stale) cookie failed to decode,
         // which is irrelevant here because the new session is saved anyway.
-        session, _ := Store.New(r, "go-fila-session")
+        session, _ := Store.New(r, "yaga-session")
 
         session.Values["user_id"] = userID
         session.Values["role"] = userRole
@@ -390,14 +390,14 @@ func GetSession(r *http.Request) (*sessions.Session, error) {
     if Store == nil {
         Init()
     }
-    return Store.Get(r, "go-fila-session")
+    return Store.Get(r, "yaga-session")
 }
 
 // clearSessionCookie deletes the session cookie on the response, used when the
 // stored cookie can no longer be decoded.
 func clearSessionCookie(w http.ResponseWriter) {
     http.SetCookie(w, &http.Cookie{
-        Name:     "go-fila-session",
+        Name:     "yaga-session",
         Value:    "",
         Path:     "/",
         MaxAge:   -1,
@@ -415,12 +415,12 @@ func getOrNewSession(r *http.Request, w http.ResponseWriter) (*sessions.Session,
     if Store == nil {
         Init()
     }
-    session, err := Store.Get(r, "go-fila-session")
+    session, err := Store.Get(r, "yaga-session")
     if err == nil {
         return session, false, true
     }
     clearSessionCookie(w)
-    fresh := sessions.NewSession(Store, "go-fila-session")
+    fresh := sessions.NewSession(Store, "yaga-session")
     opts := *Store.Options
     fresh.Options = &opts
     return fresh, true, true
@@ -717,7 +717,7 @@ templ LoginPage(data LoginPageData) {
         <script>
             (function() {
                 var html = document.documentElement;
-                var saved = localStorage.getItem('gf-theme');
+                var saved = localStorage.getItem('yaga-theme');
                 if (saved === 'dark') { html.classList.add('dark'); }
                 else if (saved === 'light') { html.classList.remove('dark'); }
             })();

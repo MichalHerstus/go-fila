@@ -2,7 +2,7 @@
 //
 // SQL/YAML emitters used by the editor's sync tool to generate missing SQLC
 // query stubs and resource YAML blocks from parsed schema tables. These are
-// file-level ports of the string builders in cmd/go-fila/introspect.go
+// file-level ports of the string builders in cmd/yaga/introspect.go
 // (no database connection involved).
 package schema
 
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// MapDBTypeToFieldType converts a column type string to a go-fila field type.
+// MapDBTypeToFieldType converts a column type string to a yaga field type.
 func MapDBTypeToFieldType(dbType string) string {
 	t := strings.ToLower(dbType)
 	if idx := strings.Index(t, "("); idx != -1 {
@@ -361,7 +361,7 @@ func GenerateQueries(tables []Table, driver string) map[string]string {
 	return queries
 }
 
-// GenerateResourceYAML produces a go-fila resource block for one table.
+// GenerateResourceYAML produces a yaga resource block for one table.
 func GenerateResourceYAML(ti Table, allTables []Table, driver string) string {
 	var b strings.Builder
 	resourceName := ToSingularPascal(ti.Name)

@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // generateMain writes main.go for the generated app: it imports the driver

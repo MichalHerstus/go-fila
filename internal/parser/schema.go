@@ -1,6 +1,6 @@
 // schema.go
 //
-// Parses go-fila.yaml into the typed config schema. ParseFile reads the file
+// Parses yaga.yaml into the typed config schema. ParseFile reads the file
 // from disk and Parse decodes raw YAML bytes; both run the validator so only
 // valid configurations are returned.
 package parser
@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 	"gopkg.in/yaml.v3"
 )
 
 // ParseFile reads the YAML config at the given path and parses/validates it.
-// Params: path (filesystem path of the go-fila.yaml file).
+// Params: path (filesystem path of the yaga.yaml file).
 // Returns: the parsed *types.Config, or an error if reading, decoding or
 // validation fails.
 func ParseFile(path string) (*types.Config, error) {

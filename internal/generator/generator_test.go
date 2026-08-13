@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-fila/go-fila/internal/types"
-	pluginapi "github.com/go-fila/go-fila/pkg/plugin"
+	"github.com/MichalHerstus/yaga/internal/types"
+	pluginapi "github.com/MichalHerstus/yaga/pkg/plugin"
 )
 
 // hookConfig returns a minimal config exercising hooks on create, delete and a
@@ -88,6 +88,39 @@ func auditConfig() *types.Config {
 				},
 			},
 		},
+	}
+}
+
+// TestGenerateNoGoFilaReferences guards D10: generated output must never
+// contain the old "go-fila" brand or module-path tokens anywhere in the tree.
+func TestGenerateNoGoFilaReferences(t *testing.T) {
+	dir := t.TempDir()
+	g := New(auditConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	var bad []string
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(b), "go-fila") || strings.Contains(string(b), "go_fila") || strings.Contains(string(b), "gf-theme") {
+			bad = append(bad, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("generated output still references the old brand: %v", bad)
 	}
 }
 
@@ -1042,7 +1075,7 @@ func TestGenerateSessionSecret(t *testing.T) {
 			t.Errorf("session.go missing %q", want)
 		}
 	}
-	if strings.Contains(sessStr, "go-fila-secret-key-change-in-production") {
+	if strings.Contains(sessStr, "yaga-secret-key-change-in-production") {
 		t.Error("session.go must not hardcode the default secret")
 	}
 }

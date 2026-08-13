@@ -1,7 +1,7 @@
 # MSSQL Support Plan
 
 Status: implemented & verified against a live MSSQL instance (connection details in local-only `mssql.txt`, gitignored)
-Goal: add `mssql` as a supported database driver for `go-fila init --db`, config `connections.default.driver`, and the generated admin app.
+Goal: add `mssql` as a supported database driver for `yaga init --db`, config `connections.default.driver`, and the generated admin app.
 
 ## Context / findings
 
@@ -27,7 +27,7 @@ Goal: add `mssql` as a supported database driver for `go-fila init --db`, config
 
 ## Changes
 
-### 1. `cmd/go-fila/introspect.go`
+### 1. `cmd/yaga/introspect.go`
 
 - `detectDriver`: `sqlserver://` / `mssql://` prefix → `"mssql"`.
 - `openDB`: `sql.Open("mssql", dsn)` + blank-import `github.com/microsoft/go-mssqldb`.
@@ -52,14 +52,14 @@ Goal: add `mssql` as a supported database driver for `go-fila init --db`, config
 ### 3. Other
 
 - Root `go.mod`: add go-mssqldb v1.10.0 (for introspect.go).
-- `cmd/go-fila/main.go`: update `--db` help to mention `sqlserver://...`.
+- `cmd/yaga/main.go`: update `--db` help to mention `sqlserver://...`.
 - AGENTS.md / README: driver matrix row for mssql; document the `mssql`-driver-name/loose-`$N` decision, the derived-table ORDER BY rule, and full-schema emission.
 
 ## Verification
 
 1. `go build ./...`, `go vet ./...`, `go test ./...` — all pass.
-2. `go-fila init --db "sqlserver://user:pass@host:port?database=..."` → all user tables + users/roles; YAML emits `table:`/`id_column: ID`/`id_type: int64` for identity-keyed tables; queries + full postgres-dialect `schema.sql` written.
-3. `go-fila generate` → `sqlc generate`, `go tool templ generate`, `go build` — all succeed.
+2. `yaga init --db "sqlserver://user:pass@host:port?database=..."` → all user tables + users/roles; YAML emits `table:`/`id_column: ID`/`id_type: int64` for identity-keyed tables; queries + full postgres-dialect `schema.sql` written.
+3. `yaga generate` → `sqlc generate`, `go tool templ generate`, `go build` — all succeed.
 4. Ran the generated binary against the live DB (ports 9311–9315): login 302, list 200, **search 200** (after count-clause fix), detail/edit GET 200, create POST 302 (row created), update POST 302 (row updated). Delete returns 404 (no `form.delete` in introspection output — matches demo behavior).
 
 ## Known limitations

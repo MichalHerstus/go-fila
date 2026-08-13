@@ -9,7 +9,7 @@ package schema
 import (
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // QueryRef is a single query name referenced from the YAML config.

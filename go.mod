@@ -1,4 +1,4 @@
-module github.com/go-fila/go-fila
+module github.com/MichalHerstus/yaga
 
 go 1.26.3
 

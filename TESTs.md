@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add automated end-to-end tests that run the full go-fila pipeline against real databases (SQLite, PostgreSQL, MSSQL) using Testcontainers, verifying the generated admin panel works correctly.
+Add automated end-to-end tests that run the full yaga pipeline against real databases (SQLite, PostgreSQL, MSSQL) using Testcontainers, verifying the generated admin panel works correctly.
 
 ---
 
@@ -23,7 +23,7 @@ github.com/stretchr/testify v1.9.0
 ```
 internal/testutil/
 ├── database.go          # Testcontainers setup per driver
-├── generated_app.go     # go-fila generate + sqlc + go build helpers
+├── generated_app.go     # yaga generate + sqlc + go build helpers
 ├── http_client.go       # Authenticated HTTP client for admin panel
 ├── fixtures.go          # Minimal YAML configs for testing
 └── e2e_test.go          # Main e2e test suite
@@ -57,12 +57,12 @@ func TestE2E_Driver(t *testing.T) {
     // 2. Create temp dir for project
     tmpDir := t.TempDir()
 
-    // 3. Write minimal go-fila.yaml + schema + queries to tmpDir
+    // 3. Write minimal yaga.yaml + schema + queries to tmpDir
     //    (or use demoYAML for full feature coverage)
 
     // 4. Update connections.default.dsn = dsn in config
 
-    // 5. Run: go-fila generate --config tmpDir/go-fila.yaml --out tmpDir/admin
+    // 5. Run: yaga generate --config tmpDir/yaga.yaml --out tmpDir/admin
 
     // 6. Run: cd tmpDir/admin && sqlc generate
 
@@ -125,14 +125,14 @@ func TestE2E_Driver(t *testing.T) {
 ## 6. Directory Structure
 
 ```
-go-fila/
+yaga/
 ├── internal/testutil/
 │   ├── database.go          # Testcontainers setup per driver
 │   ├── generated_app.go     # Generate + build helpers
 │   ├── http_client.go       # Authenticated HTTP client
 │   ├── fixtures.go          # Minimal YAML configs
 │   └── e2e_test.go          # Main e2e test suite
-├── cmd/go-fila/
+├── cmd/yaga/
 │   └── e2e_test.go          # Integration test entry
 └── TESTs.md                 # This file
 ```
@@ -316,7 +316,7 @@ SQL schema (driver-aware):
 
 ## 12. Related Files
 
-- `cmd/go-fila/demo.go` - demoYAML(), demoSchema(), demoQueries(), seedDemoDB()
+- `cmd/yaga/demo.go` - demoYAML(), demoSchema(), demoQueries(), seedDemoDB()
 - `internal/generator/generator_test.go` - existing unit tests for generated code
 - `internal/generator/plugin_test.go` - plugin integration tests (uses go toolchain)
 - `SPECv05plus.md` - lines 315-316 (verification strategy)

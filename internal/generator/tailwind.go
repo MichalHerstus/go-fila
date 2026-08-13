@@ -3,7 +3,7 @@
 // Generates the Tailwind CSS source and static assets (tailwind.config.js and
 // the vendored Chart.js bundle) for the admin panel application, and runs the
 // Tailwind CSS build. The build is non-fatal: it is invoked after generation
-// and may be re-run manually by the user. Chart.js is embedded into the go-fila
+// and may be re-run manually by the user. Chart.js is embedded into the yaga
 // binary (internal/generator/assets/chart.umd.js) so the generated dashboard
 // needs no npm/node and stays offline at runtime.
 package generator

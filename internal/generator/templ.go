@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // prefixImports rewrites bare "internal/..." import paths in generated source
@@ -1362,11 +1362,11 @@ templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userNam
             function toggleTheme() {
                 var html = document.documentElement;
                 html.classList.toggle('dark');
-                localStorage.setItem('gf-theme', html.classList.contains('dark') ? 'dark' : 'light');
+                localStorage.setItem('yaga-theme', html.classList.contains('dark') ? 'dark' : 'light');
             }
             (function() {
                 var html = document.documentElement;
-                var saved = localStorage.getItem('gf-theme');
+                var saved = localStorage.getItem('yaga-theme');
                 if (saved === 'dark') { html.classList.add('dark'); }
                 else if (saved === 'light') { html.classList.remove('dark'); }
                 else if (%s) { html.classList.add('dark'); }

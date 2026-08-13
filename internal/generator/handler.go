@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // generateResource writes all handler files for a single resource into its

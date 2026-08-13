@@ -1,6 +1,6 @@
-# go-fila — Software Specification
+# yaga — Software Specification
 
-**go-fila** is a YAML-driven admin dashboard generator for Go, inspired by FilamentPHP. It reads a declarative YAML specification and generates a fully functional admin panel with CRUD resources, pages, widgets, authentication, navigation, and theming — all without writing boilerplate Go code.
+**yaga** is a YAML-driven admin dashboard generator for Go, inspired by FilamentPHP. It reads a declarative YAML specification and generates a fully functional admin panel with CRUD resources, pages, widgets, authentication, navigation, and theming — all without writing boilerplate Go code.
 
 ---
 
@@ -8,13 +8,13 @@
 
 ```
 User writes:
-  ├── go-fila.yaml         (panel config, resources, pages, navigation, auth)
+  ├── yaga.yaml         (panel config, resources, pages, navigation, auth)
   ├── sql/schema.sql       (DDL — CREATE TABLE)
   └── sql/queries/*.sql    (annotated SQLC queries)
 
   OR uses `init --db` to auto-generate all of the above from an existing database.
 
-go-fila generate:
+yaga generate:
   ├── runs sqlc generate              → internal/data/ (Go structs + query fns)
   ├── generates internal/panel/       → handlers calling SQLC functions
   ├── generates internal/views/       → .templ components (type-safe UI)
@@ -38,7 +38,7 @@ go-fila generate:
 | Icons | Heroicons (inline SVG) |
 | Router | chi |
 | Auth | `gorilla/sessions` + bcrypt |
-| Runtime model | **Pure code-gen** — zero runtime dep on go-fila |
+| Runtime model | **Pure code-gen** — zero runtime dep on yaga |
 
 ---
 
@@ -47,7 +47,7 @@ go-fila generate:
 ### Top-Level Structure
 
 ```yaml
-# go-fila.yaml
+# yaga.yaml
 version: "1.0"
 
 panel:
@@ -459,14 +459,14 @@ SELECT COUNT(*) FROM users;
 SELECT * FROM roles ORDER BY name;
 ```
 
-YAML `query` values reference the **SQLC function name** (e.g., `ListUsers`, `GetUser`, `CreateUser`). During generation, go-fila parses SQLC output to resolve parameter structs, return types, and function signatures for type-safe code generation.
+YAML `query` values reference the **SQLC function name** (e.g., `ListUsers`, `GetUser`, `CreateUser`). During generation, yaga parses SQLC output to resolve parameter structs, return types, and function signatures for type-safe code generation.
 
 ---
 
 ## Code Generation Pipeline
 
 ```
-go-fila generate --config go-fila.yaml --out ./output
+yaga generate --config yaga.yaml --out ./output
 ```
 
 1. **Parse YAML** — validate structure, cross-reference references
@@ -550,7 +550,7 @@ output/
     ├── css/
     │   └── styles.css          # compiled Tailwind (produced by the standalone binary)
     └── js/
-        └── chart.js            # bundled Chart.js (embedded in go-fila, copied at generate time)
+        └── chart.js            # bundled Chart.js (embedded in yaga, copied at generate time)
 ```
 
 ---
@@ -558,19 +558,19 @@ output/
 ## CLI Commands
 
 ```
-go-fila — YAML-driven admin panel generator
+yaga — YAML-driven admin panel generator
 
 Usage:
-  go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
-  go-fila init --demo    Scaffold + seed sqlite demo DB (roles/users/customers/products/orders/orderlines)
-  go-fila init --db DSN  Introspect existing DB, generate config + SQL from discovered tables
-  go-fila edit           Interactive YAML config editor (TUI)
-  go-fila generate       Run SQLC + generate admin panel Go application
-  go-fila validate       Validate YAML + verify SQLC function references resolve
-  go-fila version        Print version information
+  yaga init           Scaffold yaga.yaml + sqlc.yaml + sql/ + working example
+  yaga init --demo    Scaffold + seed sqlite demo DB (roles/users/customers/products/orders/orderlines)
+  yaga init --db DSN  Introspect existing DB, generate config + SQL from discovered tables
+  yaga edit           Interactive YAML config editor (TUI)
+  yaga generate       Run SQLC + generate admin panel Go application
+  yaga validate       Validate YAML + verify SQLC function references resolve
+  yaga version        Print version information
 
 Flags:
-  --config, -c   Path to YAML config file (default: go-fila.yaml)
+  --config, -c   Path to YAML config file (default: yaga.yaml)
   --out, -o      Output directory (default: ./admin)
   --db, -d DSN   Introspect database (postgres://... or sqlite file path)
   --force, -f    Overwrite existing files
@@ -583,7 +583,7 @@ Flags:
                  Skip loading declared plugins (generate cannot use them)
 
 AI-assisted edit (edit only):
-  --prompt TEXT  Edit go-fila.yaml via AI instead of the TUI
+  --prompt TEXT  Edit yaga.yaml via AI instead of the TUI
                  (the full config is sent to the AI provider)
                  file://PATH reads the prompt from a file (~ expands to home)
   --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env, then .ENV)
@@ -609,14 +609,14 @@ Example: `./admin --port 9090 --log err` or `./admin -p 9090 -l err`
 
 ### Database Introspection (`--db`)
 
-`go-fila init --db {dsn}` connects to an existing database, introspects its schema, and generates everything needed to build an admin panel:
+`yaga init --db {dsn}` connects to an existing database, introspects its schema, and generates everything needed to build an admin panel:
 
 1. **Driver detection:** `postgres://`/`postgresql://` DSN → postgres driver (via `pgx/v5`); everything else → sqlite (via `modernc.org/sqlite`)
 2. **Schema introspection:** discovers tables, columns (types, nullability, defaults), primary keys, and foreign keys
 3. **Auth table management:** if `users`/`roles` tables are missing, creates them with driver-appropriate DDL and seeds default roles + admin user. The admin password is set from `--admin-password` or a random one-time password (generated + printed to the console, not stored) when omitted. If the tables already exist with data, they are left untouched.
 4. **YAML generation:** one `Resource` per discovered table (excluding `users`/`roles`) with list/detail/form sections
 5. **SQL generation:** SQLC-annotated queries per table — List (with LEFT JOINs for FK labels), Count, Get, Create, Update, Delete — plus options queries for FK relation fields
-6. **Type mapping:** database column types are mapped to go-fila field types (e.g. `varchar` → `string`, `int` → `integer`, `timestamp` → `datetime`)
+6. **Type mapping:** database column types are mapped to yaga field types (e.g. `varchar` → `string`, `int` → `integer`, `timestamp` → `datetime`)
 
 **Foreign key handling:** FK columns become `relation` fields in forms with `options_query`. In list views, FK columns are replaced with LEFT JOINs showing the foreign table's label column (auto-detected: prefers `name`, then `title`, then `label`, then first non-PK text column).
 
@@ -636,7 +636,7 @@ Example: `./admin --port 9090 --log err` or `./admin -p 9090 -l err`
 
 ## Plugin System (v0.5+)
 
-Plugins extend go-fila at **generation time** by contributing resources, pages, navigation groups, SQL files, and hook attachments. A plugin is a separate Go module that implements the `github.com/go-fila/go-fila/pkg/plugin.Plugin` interface. When plugins are declared in `go-fila.yaml`, go-fila runs each plugin in a throwaway module (a "shim"), collects a JSON manifest of its contributions, and merges it into the config before code generation. The generated app keeps the core design decision of **zero runtime dependency on go-fila**.
+Plugins extend yaga at **generation time** by contributing resources, pages, navigation groups, SQL files, and hook attachments. A plugin is a separate Go module that implements the `github.com/MichalHerstus/yaga/pkg/plugin.Plugin` interface. When plugins are declared in `yaga.yaml`, yaga runs each plugin in a throwaway module (a "shim"), collects a JSON manifest of its contributions, and merges it into the config before code generation. The generated app keeps the core design decision of **zero runtime dependency on yaga**.
 
 ### YAML Configuration
 
@@ -655,7 +655,7 @@ plugins:
 
 - `source` as a **local directory** (starts with `.`, `/`, or `~`) is resolved to an absolute path; its `go.mod` `module` directive is read to get the module path. The shim adds a `replace <mod> => <abs>` directive so the plugin compiles against the exact local sources.
 - `source` as a **module import path** (e.g., `github.com/user/plugin`) is fetched from the Go module proxy during `go mod tidy` in the shim.
-- The `config` map is JSON-encoded and passed to the plugin's `Configure(cfg map[string]any)` method if it implements `Configurer` (detected via type assertion). go-fila **injects the database driver** under the reserved `"driver"` key (`"postgres"`, `"sqlite"`, or `"mssql"`) so plugins can emit driver-appropriate SQL (placeholders, DDL).
+- The `config` map is JSON-encoded and passed to the plugin's `Configure(cfg map[string]any)` method if it implements `Configurer` (detected via type assertion). yaga **injects the database driver** under the reserved `"driver"` key (`"postgres"`, `"sqlite"`, or `"mssql"`) so plugins can emit driver-appropriate SQL (placeholders, DDL).
 - **Plugin load failure is fatal** — an explicitly declared plugin that fails to load is a config error. Use `--skip-plugins` to disable all plugins (escape hatch for CI or broken plugins).
 
 ### Plugin Go Interface (Authoring API)
@@ -689,7 +689,7 @@ func (p *Panel) AddNavigationGroup(g NavigationGroup)
 
 func (p *Panel) AddSQLFile(name, content string)
     // name must be "queries/<file>.sql" or "migrations/<file>.sql".
-    // go-fila writes it only if the destination file does not already exist.
+    // yaga writes it only if the destination file does not already exist.
 
 func (p *Panel) AddHookToResource(resource, action, when string, h Hook) error
     // resource: existing resource name in merged config (e.g., "Customer")
@@ -726,7 +726,7 @@ The `examples/plugins/audit/` directory contains a complete, driver-aware plugin
 ```go
 package audit
 
-import plugin "github.com/go-fila/go-fila/pkg/plugin"
+import plugin "github.com/MichalHerstus/yaga/pkg/plugin"
 
 func New() plugin.Plugin { return &auditPlugin{} }
 
@@ -751,15 +751,15 @@ To use it in your project:
 ```yaml
 plugins:
   - name: audit
-    source: ./plugins/audit      # or github.com/go-fila/plugin-audit when published
+    source: ./plugins/audit      # or github.com/yaga/plugin-audit when published
     config:
       table: audit_log
       retention_days: 90
 ```
 
-### Implementation Notes (for go-fila maintainers)
+### Implementation Notes (for yaga maintainers)
 
-- **Loader** (`internal/generator/plugin.go`): `loadPlugins()` runs after `copySQLFiles()` (so plugin SQL lands before sqlc) and before resource/page generation. It writes a shim module, runs `go mod tidy && go run .`, reads `manifest.json`, and merges it. Local go-fila checkout is found by walking up from `os.Executable()` / cwd for a `go.mod` declaring `module github.com/go-fila/go-fila` and `replace`d into the shim.
+- **Loader** (`internal/generator/plugin.go`): `loadPlugins()` runs after `copySQLFiles()` (so plugin SQL lands before sqlc) and before resource/page generation. It writes a shim module, runs `go mod tidy && go run .`, reads `manifest.json`, and merges it. Local yaga checkout is found by walking up from `os.Executable()` / cwd for a `go.mod` declaring `module github.com/MichalHerstus/yaga` and `replace`d into the shim.
 - **Shim** (`writeShim`): Generates `go.mod` + `main.go` that imports the plugin, builds a `Panel`, calls `Configure/Register/Boot`, and writes `manifest.json`.
 - **Merge** (`mergeManifest`): Appends resources/pages/navigation; resolves hook attachments; writes SQL files (no overwrite); rejects fn hooks; validates duplicates.
 - **Generated hooks.go fix** (M4 prerequisite): `generateHooks()` now writes `internal/hooks/hooks.go` whenever **any** hook block exists (fn or sql), not just when fn hooks exist. This ensures the `hooks.Scope` type is available for sql-only hooks (including plugin-contributed ones). Only fn hooks emit stubs; sql-only configs get a minimal file with just `Scope` and no `context`/`database/sql` imports.
@@ -862,12 +862,12 @@ navigation:
 ## Project Repository Structure
 
 ```
-go-fila/
+yaga/
 ├── SPEC.md                    # This specification
 ├── README.md
 ├── go.mod
 ├── cmd/
-│   └── go-fila/
+│   └── yaga/
 │       ├── main.go            # CLI entry point (init/generate/validate/version)
 │       ├── demo.go            # init --demo — full sqlite demo scaffolding + seeding
 │       ├── introspect.go      # init --db — DB introspection, auth table creation, YAML/SQL generation
@@ -904,9 +904,9 @@ go-fila/
 │   └── auth/                  # Reusable auth helpers
 ├── examples/
 │   ├── minimal/
-│   │   └── go-fila.yaml
+│   │   └── yaga.yaml
 │   └── full/
-│       └── go-fila.yaml
+│       └── yaga.yaml
 └── testdata/
 ```
 

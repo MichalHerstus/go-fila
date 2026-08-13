@@ -8,7 +8,7 @@ package parser
 import (
 	"fmt"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // Validate checks a parsed config for required fields and applies defaults. It

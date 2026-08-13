@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-fila/go-fila/internal/types"
-	pluginapi "github.com/go-fila/go-fila/pkg/plugin"
+	"github.com/MichalHerstus/yaga/internal/types"
+	pluginapi "github.com/MichalHerstus/yaga/pkg/plugin"
 )
 
 // pluginBaseConfig returns a minimal config with a Customer resource that has
@@ -194,7 +194,7 @@ func writeTinyPlugin(t *testing.T, dir string) string {
 	pluginDir := filepath.Join(dir, "plug")
 	os.MkdirAll(pluginDir, 0755)
 
-	gomod := "module github.com/example/testplugin\n\ngo 1.26.3\n\nrequire github.com/go-fila/go-fila v0.0.0\n"
+	gomod := "module github.com/example/testplugin\n\ngo 1.26.3\n\nrequire github.com/MichalHerstus/yaga v0.0.0\n"
 	if err := os.WriteFile(filepath.Join(pluginDir, "go.mod"), []byte(gomod), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func writeTinyPlugin(t *testing.T, dir string) string {
 	src := `package plug
 
 import (
-    plugin "github.com/go-fila/go-fila/pkg/plugin"
+    plugin "github.com/MichalHerstus/yaga/pkg/plugin"
 )
 
 type p struct{}
@@ -339,11 +339,11 @@ func TestResolvePluginSource(t *testing.T) {
 		t.Fatal("expected a local dir for a relative source")
 	}
 
-	mod2, local2, err := resolvePluginSource("github.com/go-fila/plugin-audit")
+	mod2, local2, err := resolvePluginSource("github.com/MichalHerstus/plugin-audit")
 	if err != nil {
 		t.Fatalf("resolvePluginSource: %v", err)
 	}
-	if mod2 != "github.com/go-fila/plugin-audit" || local2 != "" {
+	if mod2 != "github.com/MichalHerstus/plugin-audit" || local2 != "" {
 		t.Fatalf("expected module-path resolution, got %q %q", mod2, local2)
 	}
 

@@ -1,4 +1,4 @@
-# go-fila — Phase v0.5+ Specification & Implementation Plan
+# yaga — Phase v0.5+ Specification & Implementation Plan
 
 **Status:** Milestones 1, 2 & 3 implemented (see `session-ses_04c7.md`); M4 (plugins) planned with finalized design in §6; M5+ planned.
 **Audience:** contributors implementing phase v0.5+
@@ -29,7 +29,7 @@ Latent bugs folded into this phase (both fixed in M1):
 
 ## 2. Design decisions (agreed)
 
-1. **Plugins are generator-time.** Plugins extend go-fila at *generation* time: go-fila resolves the plugin's source, runs its `Register`/`Boot` against a `Panel` builder, and merges the contributed resources/pages/widgets/navigation/hooks into the config before code generation. Generated apps keep the core design decision of **zero runtime dependency on go-fila**. The SPEC's `Plugin` interface shape is honored via a `pkg/plugin` authoring API.
+1. **Plugins are generator-time.** Plugins extend yaga at *generation* time: yaga resolves the plugin's source, runs its `Register`/`Boot` against a `Panel` builder, and merges the contributed resources/pages/widgets/navigation/hooks into the config before code generation. Generated apps keep the core design decision of **zero runtime dependency on yaga**. The SPEC's `Plugin` interface shape is honored via a `pkg/plugin` authoring API.
 2. **Multi-panel schema is additive.** `panel:` plus top-level `resources`/`pages`/`navigation`/`auth` remain the primary panel (non-breaking). A new optional top-level `panels:` list defines additional panels, each owning its own identity, theme, auth, resources, pages, and navigation. Existing configs keep working unchanged.
 3. **Scope includes v0.5 polish.** The plan also wires the remaining parsed-but-unused v0.5+ fields (action `requires_confirmation`/`bulk`/`icon`), fixes the broken `list`/`html` page widgets (required for plugins to contribute widgets), and dark mode's sibling theming (brand colors, fonts, layout widths).
 
@@ -77,7 +77,7 @@ Apply `dark:` variants to all shared surfaces: `bg-white` → `bg-white dark:bg-
 
 ### 4.3 Toggle + persistence (`base.templ`)
 - `<html class="dark">` served by default when `panel.theme.dark_mode: true`.
-- Topbar toggle button + inline JS: read `localStorage['gf-theme']`, toggle `.dark` on `<html>`, persist. When `dark_mode: false` the toggle still works (dark classes stay compiled; dark mode is opt-in per panel).
+- Topbar toggle button + inline JS: read `localStorage['yaga-theme']`, toggle `.dark` on `<html>`, persist. When `dark_mode: false` the toggle still works (dark classes stay compiled; dark mode is opt-in per panel).
 - Chart.js auto-render picks its line color from the `--brand-primary` CSS variable (or a `.dark` class check) instead of hardcoded `#6366f1`.
 
 ### 4.4 Layout wiring
@@ -162,7 +162,7 @@ Stubs compile out of the box; the user fills them in. The generated handlers imp
 
 ## 6. Milestone 4 — Plugins (generator-time)
 
-**Model:** generator-time subprocess. go-fila runs each plugin in a throwaway module, collects a JSON *manifest* of contributions, and merges it into the config before code generation. The generated app keeps its zero runtime dependency on go-fila. Plugin load failure is **fatal** (an explicitly declared plugin that fails to load is a config error), unlike the non-fatal sqlc/tailwind steps.
+**Model:** generator-time subprocess. yaga runs each plugin in a throwaway module, collects a JSON *manifest* of contributions, and merges it into the config before code generation. The generated app keeps its zero runtime dependency on yaga. Plugin load failure is **fatal** (an explicitly declared plugin that fails to load is a config error), unlike the non-fatal sqlc/tailwind steps.
 
 ### 6.1 Prerequisite fix — hooks.go for SQL-only hooks
 `generateHooks()` currently writes `internal/hooks/hooks.go` **only when fn hooks exist**, but handlers emit `hooks.Scope{...}` + `import hooks` for *any* hook block (sql-only included). A config with only SQL hooks — and plugin-added SQL hooks — would generate an app that does not compile. **Fix:** `generateHooks` writes `hooks.go` whenever any hook is declared (fn or sql); stubs are emitted only for fn hook names.
@@ -208,7 +208,7 @@ type HookAttachment struct {
     Hook     Hook   // SQL/proc hooks and fn hooks (fn backed by AddHookSource, M5)
 }
 ```
-`pkg/plugin` re-exports `internal/types` under public aliases (`type Resource = types.Resource`, plus `Page`, `Widget`, `NavigationGroup`, `NavigationItem`, `Column`, `Field`, `Hook`, `Hooks`, `ListConfig`, `DetailConfig`, `FormConfig`, `FormAction`, `CardConfig`, `Action`, `Policy`, `ChartConfig`, `Validation`, `HookAttachment`) — plugins are a separate module and cannot import `internal/*`. Structs carry only `yaml:` tags, so JSON round-trips via Go field names; the loader decodes back into the same types. Plugin authors import `github.com/go-fila/go-fila/pkg/plugin`.
+`pkg/plugin` re-exports `internal/types` under public aliases (`type Resource = types.Resource`, plus `Page`, `Widget`, `NavigationGroup`, `NavigationItem`, `Column`, `Field`, `Hook`, `Hooks`, `ListConfig`, `DetailConfig`, `FormConfig`, `FormAction`, `CardConfig`, `Action`, `Policy`, `ChartConfig`, `Validation`, `HookAttachment`) — plugins are a separate module and cannot import `internal/*`. Structs carry only `yaml:` tags, so JSON round-trips via Go field names; the loader decodes back into the same types. Plugin authors import `github.com/MichalHerstus/yaga/pkg/plugin`.
 
 **`AddHookToResource` semantics:** appends the hook to the target resource's `Before`/`After` list at merge time (same data the existing generator already emits hooks from). The SQL/proc string binds the current record id as `$1` (parity with the existing `hookCallsStr`, which passes `scope.ID`): `0` for before-create, the new row id after-create, the parsed path id otherwise. Only `$1` (the id) is bound for SQL/proc hooks; `Scope.Values` is available to fn hooks. **fn hooks are merged when the fn name is backed by a plugin hook source** (M5); an fn hook without a matching source is a fatal merge error. `proc` hooks are emitted as `CALL/EXEC` and ignored on sqlite.
 
@@ -227,8 +227,8 @@ Validate `name`/`source` non-empty; reject duplicate plugin names.
 ### 6.4 Loader (new `internal/generator/plugin.go`)
 `Generator` gains `SkipPlugins bool`; insert `g.loadPlugins()` in `Generate()` **after** `copySQLFiles()` (plugin SQL must land in the out dir before sqlc runs) and **before** resource/page generation. Per plugin:
 1. Resolve `source`: local directory (starts with `.`/`/`, read its `go.mod` `module` line) or module import path.
-2. Write a shim into a temp dir (`go-fila-plugin-shim/`):
-   - `go.mod` requiring `github.com/go-fila/go-fila` (resolved via local checkout when found by walking up from `os.Executable()` for a `go.mod` declaring `module github.com/go-fila/go-fila`, else from the proxy) and the plugin module; local dirs get a `replace <mod> => <abs>`.
+2. Write a shim into a temp dir (`yaga-plugin-shim/`):
+   - `go.mod` requiring `github.com/MichalHerstus/yaga` (resolved via local checkout when found by walking up from `os.Executable()` for a `go.mod` declaring `module github.com/MichalHerstus/yaga`, else from the proxy) and the plugin module; local dirs get a `replace <mod> => <abs>`.
    - `main.go`: `p := pluginapi.NewPanel()`; if `New()` returns a `Configurer`, call `Configure` with the YAML `config` embedded as JSON; then `Register(p)`, `Boot(p)`, `json.NewEncoder(os.Stdout).Encode(p.Manifest())`. Any error → non-zero exit.
 3. `go mod tidy` + `go run .` (network needed for module-path sources).
 4. Decode the manifest → append to `cfg.Resources`, `cfg.Pages`, `cfg.Navigation`; resolve each `HookAttachment` against the merged resource set (missing resource/action → fatal; append to the target `Before`/`After` list in plugin order); write `SQLFiles` into `OutDir/sql/<name>` (never overwrite existing files); print a summary under `--verbose`.
@@ -236,7 +236,7 @@ Validate `name`/`source` non-empty; reject duplicate plugin names.
 6. Convention: a plugin module exposes `func New() plugin.Plugin` at its root package; the package name must equal the last element of the module path.
 
 ### 6.5 Deliverable
-- Example plugin under `examples/plugins/audit/` (`go.mod` module `github.com/go-fila/plugin-audit` + `audit.go`): `New()` → `Configure(table, retention_days)` → `Register` adds an `AuditLog` resource, an `AuditOverview` page with two stat widgets, an "Audit" nav group, `AddSQLFile("migrations/audit_schema.sql")` + `AddSQLFile("queries/audit.sql")`, and an `AddHookToResource("Customer", "delete", "after", …)` demonstrating SQL-hook attachment.
+- Example plugin under `examples/plugins/audit/` (`go.mod` module `github.com/yaga/plugin-audit` + `audit.go`): `New()` → `Configure(table, retention_days)` → `Register` adds an `AuditLog` resource, an `AuditOverview` page with two stat widgets, an "Audit" nav group, `AddSQLFile("migrations/audit_schema.sql")` + `AddSQLFile("queries/audit.sql")`, and an `AddHookToResource("Customer", "delete", "after", …)` demonstrating SQL-hook attachment.
 - README + SPEC documentation.
 
 ### 6.6 Tests
@@ -245,10 +245,10 @@ Validate `name`/`source` non-empty; reject duplicate plugin names.
 - Regression: no plugins → output unchanged (existing generator tests keep passing).
 - New: SQL-only hooks now emit a compiling `internal/hooks/hooks.go` (prerequisite fix).
 
-**Exit criteria:** a sample `audit` plugin loads, contributes an `audit_log` resource + stat widget + nav group, and a Customer delete inserts an `audit_log` row via the plugin's SQL hook; `go-fila generate` with no plugins produces output byte-identical to the end of M3 (regression).
+**Exit criteria:** a sample `audit` plugin loads, contributes an `audit_log` resource + stat widget + nav group, and a Customer delete inserts an `audit_log` row via the plugin's SQL hook; `yaga generate` with no plugins produces output byte-identical to the end of M3 (regression).
 
 ### 6.7 M5 (implemented 2026-08-13)
-Plugin **fn hooks**: `Panel.AddHookSource(name, content)` writes a `package hooks` Go file into `OutDir/internal/hooks/` (compiles inside the generated app, so it may reference `hooks.Scope`); the loader tracks plugin-provided fn names and `generateHooks` skips stub generation for them; fn `HookAttachment`s are merged instead of rejected, and an fn hook without a matching hook source is fatal at merge time. A bug in plugin hook source surfaces as a generated-app build error, not a go-fila error (same as hand-written user hooks). `generateHooks` also emits `hooks.go` (Scope only) when plugin hook sources exist even if no YAML hook block is declared, so the plugin files compile. Verified e2e: the audit example's `LogCustomerCreated` fn hook fires on customer create and inserts an `audit_log` row; no-plugin output unchanged.
+Plugin **fn hooks**: `Panel.AddHookSource(name, content)` writes a `package hooks` Go file into `OutDir/internal/hooks/` (compiles inside the generated app, so it may reference `hooks.Scope`); the loader tracks plugin-provided fn names and `generateHooks` skips stub generation for them; fn `HookAttachment`s are merged instead of rejected, and an fn hook without a matching hook source is fatal at merge time. A bug in plugin hook source surfaces as a generated-app build error, not a yaga error (same as hand-written user hooks). `generateHooks` also emits `hooks.go` (Scope only) when plugin hook sources exist even if no YAML hook block is declared, so the plugin files compile. Verified e2e: the audit example's `LogCustomerCreated` fn hook fires on customer create and inserts an `audit_log` row; no-plugin output unchanged.
 
 ---
 
@@ -286,7 +286,7 @@ Validate: `id`/`path`/`name` required, `path` starts with `/`, panel paths uniqu
   - `internal/panel/{id}/pages/`
   - `internal/views/{id}/...` (layout, resources, pages, widgets, components)
 - Shared: `internal/data/` (sqlc), `internal/viewmodels/`, static assets.
-- Each panel's `NewRouter(db)` is self-contained with its own SessionMiddleware/AuthMiddleware and a **namespaced session cookie** `go-fila-session-{panelID}` so auth is isolated per panel. Routers register routes at the root and are mounted by main.go.
+- Each panel's `NewRouter(db)` is self-contained with its own SessionMiddleware/AuthMiddleware and a **namespaced session cookie** `yaga-session-{panelID}` so auth is isolated per panel. Routers register routes at the root and are mounted by main.go.
 
 ### 7.3 main.go (`generateMain`)
 ```go
@@ -312,7 +312,7 @@ Capture a golden output of a single-panel config **before** the refactor; assert
   - parser/validator tests for new YAML (plugins, panels, hooks, theme, action flags).
   - generator golden tests: run `Generate()` into `t.TempDir()` for fixture configs; assert key snippets (`RETURNING id`, `hooks.` calls, `dark:` classes, `Mount(`) and that generated `.templ` + `.go` are syntactically sane.
   - plugin loader test: feed a canned manifest JSON and assert the merge into the config.
-- **E2E smoke** (sqlite, per milestone): `go-fila init` → extend YAML → `go-fila generate` → `go tool templ generate` → `go build ./...` → run → curl login/list/create/action/bulk/delete/hook/export.
+- **E2E smoke** (sqlite, per milestone): `yaga init` → extend YAML → `yaga generate` → `go tool templ generate` → `go build ./...` → run → curl login/list/create/action/bulk/delete/hook/export.
 - Every milestone ends with `go build ./...`, `go vet ./...`, `gofmt -l .`, plus a templ + tailwind compile of a generated project.
 
 ---

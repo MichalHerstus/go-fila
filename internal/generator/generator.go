@@ -13,13 +13,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 // Generator drives the code generation of one admin panel application.
-// Config is the parsed go-fila configuration; OutDir is where the generated
+// Config is the parsed yaga configuration; OutDir is where the generated
 // project is written; ConfigDir is the directory containing the source
-// go-fila.yaml (used to locate the user's sql/ tree to copy into the output).
+// yaga.yaml (used to locate the user's sql/ tree to copy into the output).
 type Generator struct {
 	Config    *types.Config
 	OutDir    string

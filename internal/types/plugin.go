@@ -1,7 +1,7 @@
 // plugin.go
 //
-// YAML-tagged struct describing a plugin declaration in go-fila.yaml. A plugin
-// extends the panel at generation time: go-fila runs the plugin's source in a
+// YAML-tagged struct describing a plugin declaration in yaga.yaml. A plugin
+// extends the panel at generation time: yaga runs the plugin's source in a
 // throwaway module, collects a JSON manifest of contributed resources, pages,
 // navigation groups, SQL files and hook attachments, and merges it into the
 // config before code generation.

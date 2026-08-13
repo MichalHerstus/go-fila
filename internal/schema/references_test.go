@@ -3,7 +3,7 @@ package schema
 import (
 	"testing"
 
-	"github.com/go-fila/go-fila/internal/types"
+	"github.com/MichalHerstus/yaga/internal/types"
 )
 
 func TestIsInlineSQL(t *testing.T) {

@@ -1,12 +1,12 @@
-# go-fila
+# yaga
 
-**go-fila** is a YAML-driven admin dashboard generator for Go. Write a declarative YAML config + SQL queries, and it generates a fully functional admin panel with CRUD resources, custom pages, widgets, authentication, RBAC — no boilerplate.
+**yaga** is a YAML-driven admin dashboard generator for Go. Write a declarative YAML config + SQL queries, and it generates a fully functional admin panel with CRUD resources, custom pages, widgets, authentication, RBAC — no boilerplate.
 
 ## Prerequisites
 
 | Tool | Required for | Notes |
 |---|---|---|
-| [Go](https://go.dev/dl/) 1.26+ | Running go-fila + building generated app | |
+| [Go](https://go.dev/dl/) 1.26+ | Running yaga + building generated app | |
 | [SQLC](https://docs.sqlc.dev/en/latest/overview/install.html) | Generating the data layer (`internal/data/`) | Generator runs it, failure is non-fatal |
 | [Tailwind CSS standalone binary](https://github.com/tailwindlabs/tailwindcss/releases) | Building the dashboard CSS | `make get-tailwind` downloads the pinned `v3.4.19` binary to `.tools/`; or point `TAILWIND` at any `tailwindcss` on PATH — **no Node.js/npm required** |
 | [Templ](https://templ.dev/) | Compiling `.templ` files in the generated app | Optional — the generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` is handled by the Go toolchain |
@@ -14,27 +14,27 @@
 ## Quick start
 
 ```sh
-# Install go-fila
-go install github.com/go-fila/go-fila/cmd/go-fila@latest
+# Install yaga
+go install github.com/MichalHerstus/yaga/cmd/yaga@latest
 
 # Option A: Scaffold from scratch
 mkdir my-admin && cd my-admin
-go-fila init                  # writes go-fila.yaml + sql/{migrations,queries}/
+yaga init                  # writes yaga.yaml + sql/{migrations,queries}/
 
 # Option B: Introspect an existing database
-go-fila init --db "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
-go-fila init --db "./mydata.db"                                          # SQLite
-go-fila init --db "sqlserver://user:pass@localhost:1433?database=mydb"   # MSSQL
+yaga init --db "postgres://user:pass@localhost:5432/mydb?sslmode=disable"
+yaga init --db "./mydata.db"                                          # SQLite
+yaga init --db "sqlserver://user:pass@localhost:1433?database=mydb"   # MSSQL
 
 # Write your SQL schema and queries in sql/
-# Edit go-fila.yaml to configure panel, resources, pages, auth
-# (interactive TUI: go-fila edit — or AI-assisted: go-fila edit --prompt "…"
+# Edit yaga.yaml to configure panel, resources, pages, auth
+# (interactive TUI: yaga edit — or AI-assisted: yaga edit --prompt "…"
 # which edits the config via OpenRouter, or via a local LM Studio server with
 # --model "lmstudio"; --apikey KEY, --model, --dry-run flags, and file://PATH
 # prompts supported)
 
 # Generate the admin panel
-go-fila generate              # produces ./admin/
+yaga generate              # produces ./admin/
 
 # Build and run the generated app
 cd admin
@@ -51,9 +51,9 @@ make run                    # make run PORT=9090 LOG=err for custom port / error
 # the target machine and run the binary from the extracted dir.
 ```
 
-The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `css` (Tailwind via the standalone binary) → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. **No Node.js/npm is required** — Chart.js is embedded into go-fila and vendored into `static/js/chart.js` at generation time, and Tailwind CSS builds with the `tailwindcss` standalone binary (`make TAILWIND=$(CURDIR)/.tools/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` binary for linux/macos × x64/arm64). The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `make css`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
+The generated `Makefile` runs every step needed to build the dashboard binary (the `--out` basename becomes both the module name and the binary name): `css` (Tailwind via the standalone binary) → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .`. **No Node.js/npm is required** — Chart.js is embedded into yaga and vendored into `static/js/chart.js` at generation time, and Tailwind CSS builds with the `tailwindcss` standalone binary (`make TAILWIND=$(CURDIR)/.tools/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` binary for linux/macos × x64/arm64). The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` works via the Go toolchain (no templ install needed). Equivalent manual steps: `make css`, `sqlc generate`, `go tool templ generate`, `go mod tidy`, `go build -o admin .`.
 
-Chart.js is vendored into `static/js/chart.js` at **generation time** (the go-fila binary embeds the pinned Chart.js 4.4.1 UMD bundle, MIT license banner intact), so the running dashboard serves charts locally and needs **no internet at runtime**. A bare `go build` in `admin/` serves chart.js immediately — no npm step to forget.
+Chart.js is vendored into `static/js/chart.js` at **generation time** (the yaga binary embeds the pinned Chart.js 4.4.1 UMD bundle, MIT license banner intact), so the running dashboard serves charts locally and needs **no internet at runtime**. A bare `go build` in `admin/` serves chart.js immediately — no npm step to forget.
 
 ## Deployment
 
@@ -86,17 +86,17 @@ The generated dashboard ships with security defaults. Keep them in mind when dep
 ## CLI
 
 ```
-go-fila init           Scaffold go-fila.yaml + sqlc.yaml + sql/ + working example
+yaga init           Scaffold yaga.yaml + sqlc.yaml + sql/ + working example
                        with --demo flag it generates fully functional demo dashboard including data 
                        with --db flag it introspects an existing DB and generates config + SQL
-go-fila edit           Interactive YAML config editor (TUI)
-                       with --prompt it edits go-fila.yaml via OpenRouter instead (AI-assisted)
-go-fila generate       Generate admin panel Go application
-go-fila validate       Validate YAML + verify SQLC references
-go-fila version        Print version
+yaga edit           Interactive YAML config editor (TUI)
+                       with --prompt it edits yaga.yaml via OpenRouter instead (AI-assisted)
+yaga generate       Generate admin panel Go application
+yaga validate       Validate YAML + verify SQLC references
+yaga version        Print version
 
 Flags:
-  --config, -c   Config file path (default: go-fila.yaml)
+  --config, -c   Config file path (default: yaga.yaml)
   --out, -o      Output directory (default: ./admin)
   --db, -d DSN   Introspect database (postgres://..., sqlserver://... or sqlite file path)
   --force, -f    Overwrite existing files
@@ -109,7 +109,7 @@ Flags:
   --demo, -D     With init: seed sqlite demo DB (login admin@demo.test, password generated)
 
 AI-assisted edit (edit only):
-  --prompt TEXT  Edit go-fila.yaml via AI instead of the TUI
+  --prompt TEXT  Edit yaga.yaml via AI instead of the TUI
                  (the full config is sent to the AI provider)
                  file://PATH reads the prompt from a file (~ expands to home)
   --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env, then .ENV)
@@ -118,13 +118,13 @@ AI-assisted edit (edit only):
   --dry-run      Print proposed YAML + diff without writing
 ```
 
-`sqlc generate` and the Tailwind build failures during `go-fila generate` are non-fatal. Re-run them manually in the output directory (`make css` with the standalone binary).
+`sqlc generate` and the Tailwind build failures during `yaga generate` are non-fatal. Re-run them manually in the output directory (`make css` with the standalone binary).
 
 ## Project structure
 
 ```
-go-fila/
-├── cmd/go-fila/main.go         # CLI entry point
+yaga/
+├── cmd/yaga/main.go         # CLI entry point
 ├── internal/
 │   ├── types/                  # YAML-tagged config structs
 │   │   ├── config.go           # Top-level config, panel, connection, auth
@@ -198,7 +198,7 @@ output/
 
 ## YAML config reference
 
-The config file (`go-fila.yaml`) is the single source of truth for your admin panel. This reference documents every attribute, its possible values, and its meaning. See `SPEC.md` for the authoritative schema.
+The config file (`yaga.yaml`) is the single source of truth for your admin panel. This reference documents every attribute, its possible values, and its meaning. See `SPEC.md` for the authoritative schema.
 
 ### Top-level keys
 
@@ -616,11 +616,11 @@ Handlers use a consistent SQL approach:
 
 ## Plugins
 
-Plugins extend go-fila at generation time by contributing resources, pages, navigation, SQL files, and hook attachments. A plugin is a separate Go module that implements the `github.com/go-fila/go-fila/pkg/plugin.Plugin` interface. When you declare plugins in `go-fila.yaml`, go-fila runs each plugin in a throwaway module, collects its manifest, and merges it into the config before generating the admin panel. The generated app has **zero runtime dependency** on go-fila or its plugins.
+Plugins extend yaga at generation time by contributing resources, pages, navigation, SQL files, and hook attachments. A plugin is a separate Go module that implements the `github.com/MichalHerstus/yaga/pkg/plugin.Plugin` interface. When you declare plugins in `yaga.yaml`, yaga runs each plugin in a throwaway module, collects its manifest, and merges it into the config before generating the admin panel. The generated app has **zero runtime dependency** on yaga or its plugins.
 
 ### Using plugins
 
-Add a `plugins` list to your `go-fila.yaml`:
+Add a `plugins` list to your `yaga.yaml`:
 
 ```yaml
 plugins:
@@ -637,7 +637,7 @@ plugins:
 
 - `source` can be a local directory (starts with `.`, `/`, or `~`) or a Go module import path.
 - Local directories use a `replace` directive in the shim so they compile against the exact local sources.
-- The `config` map is passed to the plugin's `Configure` method (optional). go-fila injects the database driver under the reserved `"driver"` key (`"postgres"`, `"sqlite"`, or `"mssql"`) so plugins can emit driver-appropriate SQL.
+- The `config` map is passed to the plugin's `Configure` method (optional). yaga injects the database driver under the reserved `"driver"` key (`"postgres"`, `"sqlite"`, or `"mssql"`) so plugins can emit driver-appropriate SQL.
 
 ### Plugin authoring API
 
@@ -673,21 +673,21 @@ The `examples/plugins/audit/` directory contains a complete plugin that:
 - Contributes `migrations/audit_schema.sql` + `queries/audit.sql`
 - Attaches an `after-delete` SQL hook to the `Customer` resource
 
-To use it, add to `go-fila.yaml`:
+To use it, add to `yaga.yaml`:
 ```yaml
 plugins:
   - name: audit
-    source: ./plugins/audit   # or github.com/go-fila/plugin-audit if published
+    source: ./plugins/audit   # or github.com/yaga/plugin-audit if published
     config:
       table: audit_log
       retention_days: 90
 ```
 
-Run `go-fila generate` and the audit contributions will be merged into your panel.
+Run `yaga generate` and the audit contributions will be merged into your panel.
 
 ### Escape hatch
 
-Pass `--skip-plugins` to `go-fila generate` to skip all plugin loading (useful for CI or when a plugin is temporarily broken).
+Pass `--skip-plugins` to `yaga generate` to skip all plugin loading (useful for CI or when a plugin is temporarily broken).
 
 ## Tech stack
 
@@ -701,4 +701,4 @@ Pass `--skip-plugins` to `go-fila generate` to skip all plugin loading (useful f
 | Auth | gorilla/sessions + bcrypt |
 | Charts | Chart.js (bundled) |
 | Icons | Heroicons (inline SVG) |
-| Runtime | **Zero runtime dependency on go-fila** — pure code-gen |
+| Runtime | **Zero runtime dependency on yaga** — pure code-gen |

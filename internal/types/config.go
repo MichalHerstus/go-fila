@@ -1,12 +1,12 @@
 // config.go
 //
-// YAML-tagged structs for the top-level go-fila.yaml configuration: the
+// YAML-tagged structs for the top-level yaga.yaml configuration: the
 // version, panel settings (brand/layout/theme), database connections, sqlc
 // settings, auth configuration and the sidebar navigation. These types are
 // shared by the parser and the generator.
 package types
 
-// Config is the root of the go-fila.yaml document.
+// Config is the root of the yaga.yaml document.
 type Config struct {
 	Version     string                `yaml:"version"`
 	Panel       Panel                 `yaml:"panel"`
