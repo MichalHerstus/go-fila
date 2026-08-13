@@ -32,6 +32,10 @@ type Editor struct {
 	modalOpen bool
 	saved     bool
 
+	navOpen  bool // the cd-navigation dialog is showing
+	navInput *tview.InputField
+	navHint  *tview.TextView
+
 	pending    map[tcell.Key]func()            // Ctrl+key handlers collected while building the current page/modal
 	shortcuts  map[string]map[tcell.Key]func() // screen context ("modal" or page name) -> Ctrl+key -> handler
 	pendingSQL map[string]string               // staged query-file rewrites (abs path -> new content)
@@ -106,17 +110,17 @@ func (e *Editor) navItem(label string, page string, build func() tview.Primitive
 
 // buildNav populates the left navigation menu.
 func (e *Editor) buildNav() {
-	e.navItem("Panel", "panel", e.panelPage)
-	e.navItem("Connections", "connections", e.connectionsPage)
-	e.navItem("SQLC", "sqlc", e.sqlcPage)
-	e.navItem("Auth", "auth", e.authPage)
-	e.navItem("Navigation", "navigation", e.navGroupsPage)
-	e.navItem("Resources", "resources", e.resourcesPage)
-	e.navItem("Pages", "pages", e.pagesPage)
+	e.navItem("Panel", "Panel", e.panelPage)
+	e.navItem("Connections", "Connections", e.connectionsPage)
+	e.navItem("SQLC", "SQLC", e.sqlcPage)
+	e.navItem("Auth", "Auth", e.authPage)
+	e.navItem("Navigation", "Navigation", e.navGroupsPage)
+	e.navItem("Resources", "Resources", e.resourcesPage)
+	e.navItem("Pages", "Pages", e.pagesPage)
 	e.nav.AddItem("", "", 0, nil)
-	e.navItem("Validate (Ctrl+V)", "validate", e.validatePage)
-	e.navItem("Sync SQL & YAML", "sync", e.syncPage)
-	e.navItem("Preview", "preview", e.previewPage)
+	e.navItem("Validate (Ctrl+V)", "Validate", e.validatePage)
+	e.navItem("Sync SQL & YAML", "Sync", e.syncPage)
+	e.navItem("Preview", "Preview", e.previewPage)
 	e.nav.AddItem("", "", 0, nil)
 	e.navItem("Save (Ctrl+S)", "save", nil)
 	e.nav.AddItem("Quit (Ctrl+Q)", "", 0, e.quitConfirm)
@@ -124,17 +128,43 @@ func (e *Editor) buildNav() {
 
 // capture handles global keys before any widget sees them.
 func (e *Editor) capture(event *tcell.EventKey) *tcell.EventKey {
+	// Ctrl+> (Ctrl+Shift+.) alias for Ctrl+P; Ctrl+/ alias for Ctrl+O.
+	if event.Modifiers()&tcell.ModCtrl != 0 {
+		switch event.Rune() {
+		case '>':
+			e.openNav()
+			return nil
+		case '/':
+			e.goHome()
+			return nil
+		}
+	}
 	switch event.Key() {
 	case tcell.KeyCtrlS:
 		e.save()
+		return nil
+	case tcell.KeyCtrlP:
+		e.openNav()
+		return nil
+	case tcell.KeyCtrlO:
+		e.goHome()
 		return nil
 	case tcell.KeyF10, tcell.KeyCtrlQ:
 		e.quitConfirm()
 		return nil
 	case tcell.KeyCtrlV:
-		e.showPage("validate", e.validatePage())
+		e.showPage("Validate", e.validatePage())
 		return nil
 	case tcell.KeyEsc:
+		if e.navOpen {
+			if e.navInput != nil && e.navInput.GetText() != "" {
+				e.navInput.SetText("")
+				e.navShowHint()
+			} else {
+				e.navClose()
+			}
+			return nil
+		}
 		if e.modalOpen {
 			e.closeModal()
 			return nil
@@ -149,9 +179,11 @@ func (e *Editor) capture(event *tcell.EventKey) *tcell.EventKey {
 	return event
 }
 
-// home pushes the overview page.
+// home pushes the overview page and returns focus to the left navigation so
+// the menu stays navigable with the arrow keys.
 func (e *Editor) home() {
 	e.showPage("home", e.homePage())
+	e.app.SetFocus(e.nav)
 }
 
 // homePage renders a summary of the loaded configuration.
@@ -185,7 +217,7 @@ func (e *Editor) homePage() tview.Primitive {
 		fmt.Fprintf(tv, "  %s %s%s\n", p.Name, p.Path, mark)
 	}
 	fmt.Fprintf(tv, "\n[::b]Connections[::-]:\n%s\n", strings.Join(conns, "\n"))
-	fmt.Fprintf(tv, "\n[::d]Use the left menu to edit. Ctrl+S saves, Ctrl+V validates, Ctrl+Q quits.[::-]")
+	fmt.Fprintf(tv, "\n[::d]Use the left menu to edit. Ctrl+S saves, Ctrl+V validates, Ctrl+P goes to a path, Ctrl+O returns here, Ctrl+Q quits.[::-]")
 	return tv
 }
 
@@ -203,6 +235,11 @@ func (e *Editor) refreshTitle() {
 	if len(e.history) > 0 {
 		crumb = e.history[len(e.history)-1]
 	}
+	if crumb != "home" {
+		crumb = "~/" + crumb
+	} else {
+		crumb = "~"
+	}
 	base := filepath.Base(e.configPath)
 	e.titleBar.SetText(fmt.Sprintf(" go-fila editor — [::b]%s[::-]%s  [::d]%s[::-]", base, badge, crumb))
 }
@@ -212,7 +249,7 @@ func (e *Editor) renderStatus() {
 	if e.status == nil {
 		return
 	}
-	e.status.SetText(" [::d]↑↓/j/k navigate   Enter edit   a add   d delete   Esc back   Ctrl+S save   Ctrl+V validate   Ctrl+Q quit[::-]")
+	e.status.SetText(" [::d]↑↓/j/k navigate   Enter edit   a add   d delete   Esc back   Ctrl+S save   Ctrl+V validate   Ctrl+P go to   Ctrl+O home   Ctrl+Q quit[::-]")
 }
 
 // save marshals the config and writes it back to configPath, flushing any

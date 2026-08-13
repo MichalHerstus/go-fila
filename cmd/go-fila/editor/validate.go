@@ -90,7 +90,7 @@ func (e *Editor) runValidation() []finding {
 			kind:   "warning",
 			label:  "missing FK target query " + fk,
 			detail: "Add it from the Sync screen (Generate missing queries)",
-			goTo: func() { e.showPage("sync", e.syncPage()) },
+			goTo:   func() { e.showPage("Sync", e.syncPage()) },
 		})
 	}
 	return out
@@ -112,14 +112,14 @@ func (e *Editor) structuralGoTo(msg string) func() {
 	}
 	if m := pageIdxRe.FindStringSubmatch(msg); m != nil {
 		if idx, err := strconv.Atoi(m[1]); err == nil && idx >= 0 && idx < len(e.cfg.Pages) {
-			return func() { e.showPage(fmt.Sprintf("pages/%d", idx), e.pagePage(idx)) }
+			return func() { e.showPage(e.pagePath(idx), e.pagePage(idx)) }
 		}
 	}
 	if strings.HasPrefix(msg, "panel.") {
-		return func() { e.showPage("panel", e.panelPage()) }
+		return func() { e.showPage("Panel", e.panelPage()) }
 	}
 	if strings.HasPrefix(msg, "at least one resource or page") {
-		return func() { e.showPage("resources", e.resourcesPage()) }
+		return func() { e.showPage("Resources", e.resourcesPage()) }
 	}
 	return nil
 }
@@ -141,7 +141,7 @@ func (e *Editor) resourceGoTo(name string) func() {
 		if idx < 0 {
 			return
 		}
-		e.showPage(fmt.Sprintf("resources/%d", idx), e.resourcePage(idx))
+		e.showPage(e.resPath(idx), e.resourcePage(idx))
 	}
 }
 
@@ -166,29 +166,29 @@ func (e *Editor) sectionJump(resource string, ref schema.ColumnRef) (string, tvi
 	if idx < 0 {
 		return "", nil
 	}
-	name := fmt.Sprintf("resources/%d", idx)
+	name := e.resPath(idx)
 	var prim tview.Primitive
 	switch ref.Section {
 	case "list.columns":
-		name += "/columns"
+		name = e.resColumnsPath(idx)
 		prim = e.columnsPage(idx)
 	case "card.fields":
-		name += "/card-fields"
+		name = e.resCardFieldsPath(idx)
 		prim = e.cardFieldsPage(idx)
 	case "detail.fields":
-		name += "/detail-fields"
+		name = e.resDetailFieldsPath(idx)
 		prim = e.detailFieldsPage(idx)
 	case "list.default_sort":
-		name += "/list"
+		name = e.resListPath(idx)
 		prim = e.listPage(idx)
 	case "card.searchable", "card.kanban_field", "card.default_sort":
-		name += "/card"
+		name = e.resCardPath(idx)
 		prim = e.cardPage(idx)
 	default:
 		if strings.HasPrefix(ref.Section, "form.") {
 			which := strings.TrimPrefix(ref.Section, "form.")
 			which = strings.TrimSuffix(which, ".fields")
-			name += "/" + which + "-fields"
+			name = e.resFormWhichPath(idx, which) + "/Fields"
 			prim = e.formFieldsPage(idx, which)
 		}
 	}
@@ -206,7 +206,7 @@ func (e *Editor) sectionJump(resource string, ref schema.ColumnRef) (string, tvi
 func (e *Editor) queryGoTo(idx int, qname string) func() {
 	return func() {
 		prim := e.sqlQueriesPage(idx)
-		e.showPage(fmt.Sprintf("resources/%d/sql", idx), prim)
+		e.showPage(e.resSQLPath(idx), prim)
 		if list, ok := prim.(*tview.List); ok {
 			for i := 0; i < list.GetItemCount(); i++ {
 				if main, _ := list.GetItemText(i); main == qname {
@@ -262,9 +262,9 @@ func (e *Editor) validatePage() tview.Primitive {
 	buttons.SetButtonBackgroundColor(colAccent)
 	buttons.SetButtonTextColor(tcell.ColorWhite)
 	e.addButton(buttons, "Refresh", func() {
-		e.refreshPage("validate", e.validatePage())
+		e.refreshPage("Validate", e.validatePage())
 	})
-	e.addButton(buttons, "Back", e.back)
+	e.backButton(buttons)
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
 	flex.AddItem(list, 0, 1, true)

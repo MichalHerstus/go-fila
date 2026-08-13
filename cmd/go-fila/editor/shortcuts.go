@@ -19,6 +19,8 @@ var globalKeys = map[tcell.Key]bool{
 	tcell.KeyCtrlS: true,
 	tcell.KeyCtrlQ: true,
 	tcell.KeyCtrlV: true, // Validate
+	tcell.KeyCtrlP: true, // Go to (cd navigation)
+	tcell.KeyCtrlO: true, // Home (overview)
 }
 
 // ctrlKey returns the tcell key for Ctrl+<letter>, or 0 for non-letters.
@@ -43,22 +45,37 @@ func ctrlHint(key tcell.Key) string {
 	return "Ctrl"
 }
 
-// takeShortcut claims the first unused letter of label as a Ctrl+key shortcut
-// in the current build context (e.pending). Reserved and already-taken keys are
-// skipped; key 0 is returned when no letter is available.
-func (e *Editor) takeShortcut(label string) tcell.Key {
+// takeShortcut claims a Ctrl+key shortcut for a button in the current build
+// context (e.pending). The letter 'B' is reserved for Back buttons: regular
+// buttons skip it so "Back" can always take Ctrl+B (pref='B' tries it first,
+// then falls back to the label's free letters). Reserved and already-taken
+// keys are skipped; key 0 is returned when no letter is available.
+func (e *Editor) takeShortcut(label string, pref rune) tcell.Key {
 	if e.pending == nil {
 		e.pending = map[tcell.Key]func(){}
 	}
-	for _, r := range label {
+	try := func(r rune) tcell.Key {
 		key := ctrlKey(r)
 		if key == 0 || globalKeys[key] {
-			continue
+			return 0
 		}
 		if _, taken := e.pending[key]; taken {
-			continue
+			return 0
 		}
 		return key
+	}
+	if pref != 0 {
+		if key := try(pref); key != 0 {
+			return key
+		}
+	}
+	for _, r := range label {
+		if pref == 0 && (r == 'B' || r == 'b') {
+			continue // reserved for the Back button
+		}
+		if key := try(r); key != 0 {
+			return key
+		}
 	}
 	return 0
 }
@@ -66,7 +83,13 @@ func (e *Editor) takeShortcut(label string) tcell.Key {
 // addButton adds a labeled button to a form together with its Ctrl+key
 // shortcut, shown as a hint in the label.
 func (e *Editor) addButton(form *tview.Form, label string, fn func()) {
-	if key := e.takeShortcut(label); key != 0 {
+	e.addButtonPref(form, label, 0, fn)
+}
+
+// addButtonPref is like addButton but tries a preferred Ctrl+letter first
+// (used to keep "Back" on Ctrl+B on every screen).
+func (e *Editor) addButtonPref(form *tview.Form, label string, pref rune, fn func()) {
+	if key := e.takeShortcut(label, pref); key != 0 {
 		e.pending[key] = fn
 		label += " (" + ctrlHint(key) + ")"
 	}
@@ -79,7 +102,7 @@ func (e *Editor) addButton(form *tview.Form, label string, fn func()) {
 func (e *Editor) addModalButtons(labels []string, done func(index int, label string)) []string {
 	out := make([]string, len(labels))
 	for i, label := range labels {
-		if key := e.takeShortcut(label); key != 0 {
+		if key := e.takeShortcut(label, 0); key != 0 {
 			idx, lbl := i, label
 			e.pending[key] = func() { done(idx, lbl) }
 			out[i] = label + " (" + ctrlHint(key) + ")"

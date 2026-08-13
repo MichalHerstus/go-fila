@@ -1,14 +1,13 @@
 package editor
 
 import (
-	"fmt"
-
 	"github.com/go-fila/go-fila/internal/types"
 	"github.com/rivo/tview"
 )
 
 // fieldsListPage manages a []types.Field collection (form, card or detail
-// fields) with a shared editor.
+// fields) with a shared editor. name is the canonical path of the fields list
+// screen; field sub-pages extend it.
 func (e *Editor) fieldsListPage(name, title string, get func() *[]types.Field) tview.Primitive {
 	spec := listSpec{
 		title: title,
@@ -30,7 +29,8 @@ func (e *Editor) fieldsListPage(name, title string, get func() *[]types.Field) t
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage(name+"/"+fmt.Sprint(i), e.fieldPage(name, get, i))
+			fs := *get()
+			e.showPage(name+"/"+segName(fs[i].Name, i), e.fieldPage(name, get, i))
 		},
 		remove: func(i int) {
 			fs := *get()
@@ -42,11 +42,14 @@ func (e *Editor) fieldsListPage(name, title string, get func() *[]types.Field) t
 	return e.recordList(name, spec)
 }
 
-// fieldPage edits a single field definition.
+// fieldPage edits a single field definition. name is the canonical fields-list
+// path; the field's own path (with /Validation, /Options, /Visible children) is
+// derived from it.
 func (e *Editor) fieldPage(name string, get func() *[]types.Field, idx int) tview.Primitive {
 	fs := *get()
 	fld := &fs[idx]
 	qc := e.newSQLViewer()
+	fieldPath := name + "/" + segName(fld.Name, idx)
 	return e.formShell("Field: "+fld.Name, func(f *tview.Form) {
 		e.str(f, "Name", fld.Name, func(v string) { fld.Name = v })
 		e.str(f, "Label", fld.Label, func(v string) { fld.Label = v })
@@ -62,15 +65,17 @@ func (e *Editor) fieldPage(name string, get func() *[]types.Field, idx int) tvie
 			if fld.Validation == nil {
 				fld.Validation = &types.Validation{}
 			}
-			e.showPage(name+"/val/"+fmt.Sprint(idx), e.validationPage(name, get, idx))
+			e.showPage(fieldPath+"/Validation", e.validationPage(fieldPath, fld.Validation))
 		})
 		e.addButton(f, "Options", func() {
-			e.showPage(name+"/opts/"+fmt.Sprint(idx), e.stringMapPage(name+"/opts/"+fmt.Sprint(idx), "Field options", func() map[string]string {
+			optsPath := fieldPath + "/Options"
+			e.showPage(optsPath, e.stringMapPage(optsPath, "Field options", func() map[string]string {
 				return fld.Options
 			}, func(v map[string]string) { fld.Options = v }))
 		})
 		e.addButton(f, "Visible", func() {
-			e.showPage(name+"/vis/"+fmt.Sprint(idx), e.tagsPage(name+"/vis/"+fmt.Sprint(idx), "Field visible in", visibleOptions, func() []string {
+			visPath := fieldPath + "/Visible"
+			e.showPage(visPath, e.tagsPage(visPath, "Field visible in", visibleOptions, func() []string {
 				return fld.Visible
 			}, func(v []string) { fld.Visible = v }))
 		})
@@ -78,9 +83,7 @@ func (e *Editor) fieldPage(name string, get func() *[]types.Field, idx int) tvie
 }
 
 // validationPage edits a field's min/max validation.
-func (e *Editor) validationPage(name string, get func() *[]types.Field, idx int) tview.Primitive {
-	fs := *get()
-	v := fs[idx].Validation
+func (e *Editor) validationPage(fieldPath string, v *types.Validation) tview.Primitive {
 	return e.formShell("Validation", func(f *tview.Form) {
 		e.num(f, "Min", v.Min, func(x int) { v.Min = x })
 		e.num(f, "Max", v.Max, func(x int) { v.Max = x })
@@ -90,7 +93,7 @@ func (e *Editor) validationPage(name string, get func() *[]types.Field, idx int)
 // cardFieldsPage edits the card view fields of a resource.
 func (e *Editor) cardFieldsPage(idx int) tview.Primitive {
 	c := e.cfg.Resources[idx].Card
-	return e.fieldsListPage("resources/"+fmt.Sprint(idx)+"/card-fields", "Card fields", func() *[]types.Field {
+	return e.fieldsListPage(e.resCardFieldsPath(idx), "Card fields", func() *[]types.Field {
 		return &c.Fields
 	})
 }
@@ -98,7 +101,7 @@ func (e *Editor) cardFieldsPage(idx int) tview.Primitive {
 // detailFieldsPage edits the detail view fields of a resource.
 func (e *Editor) detailFieldsPage(idx int) tview.Primitive {
 	d := e.cfg.Resources[idx].Detail
-	return e.fieldsListPage("resources/"+fmt.Sprint(idx)+"/detail-fields", "Detail fields", func() *[]types.Field {
+	return e.fieldsListPage(e.resDetailFieldsPath(idx), "Detail fields", func() *[]types.Field {
 		return &d.Fields
 	})
 }
@@ -121,7 +124,7 @@ func (e *Editor) formFieldsPage(idx int, which string) tview.Primitive {
 	} else if which == "delete" {
 		title = "Delete fields"
 	}
-	return e.fieldsListPage("resources/"+fmt.Sprint(idx)+"/"+which+"-fields", title, func() *[]types.Field {
+	return e.fieldsListPage(e.resFormWhichPath(idx, which)+"/Fields", title, func() *[]types.Field {
 		return &fa.Fields
 	})
 }

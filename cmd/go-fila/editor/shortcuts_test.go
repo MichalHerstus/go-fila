@@ -30,13 +30,13 @@ func hasLabel(labels []string, want string) bool {
 }
 
 // TestFormButtonShortcuts verifies buttons carry a " (Ctrl+X)" hint built from
-// the first free letter of their label, and that reserved/taken keys are
-// skipped (Back falls back to the next free key when B is taken by Brand).
+// the first free letter of their label. Ctrl+B is reserved for Back: Brand
+// falls through to its next free letter (Ctrl+R) while Back always takes B.
 func TestFormButtonShortcuts(t *testing.T) {
 	e := New(testConfig(), "testdata/go-fila.yaml")
 	labels := buttonLabels(e.panelPage().(*tview.Form))
-	if !hasLabel(labels, "Brand (Ctrl+B)") {
-		t.Errorf("expected Brand (Ctrl+B), got %v", labels)
+	if !hasLabel(labels, "Brand (Ctrl+R)") {
+		t.Errorf("expected Brand (Ctrl+R) (B is reserved for Back), got %v", labels)
 	}
 	if !hasLabel(labels, "Layout (Ctrl+L)") {
 		t.Errorf("expected Layout (Ctrl+L), got %v", labels)
@@ -44,17 +44,8 @@ func TestFormButtonShortcuts(t *testing.T) {
 	if !hasLabel(labels, "Theme (Ctrl+T)") {
 		t.Errorf("expected Theme (Ctrl+T), got %v", labels)
 	}
-	if hasLabel(labels, "Back (Ctrl+B)") {
-		t.Errorf("Back must not reuse Brand's Ctrl+B, got %v", labels)
-	}
-	foundBack := false
-	for _, l := range labels {
-		if strings.HasPrefix(l, "Back (") {
-			foundBack = true
-		}
-	}
-	if !foundBack {
-		t.Errorf("Back should keep a Ctrl hint (first free letter), got %v", labels)
+	if !hasLabel(labels, "Back (Ctrl+B)") {
+		t.Errorf("Back must always get Ctrl+B, got %v", labels)
 	}
 }
 
@@ -96,21 +87,30 @@ func findFormIn(p tview.Primitive) *tview.Form {
 }
 
 // TestShortcutDispatch verifies a Ctrl+letter keypress drives the matching
-// button: on the Panel page Ctrl+B opens the Brand sub-page.
+// button. Ctrl+B is reserved for "Back" on every screen, so the Panel page's
+// Brand button falls through to its next free letter (Ctrl+R) instead.
 func TestShortcutDispatch(t *testing.T) {
 	e := New(testConfig(), "testdata/go-fila.yaml")
 	e.pages = tview.NewPages()
 	e.app = tview.NewApplication()
+	e.buildShell()
 
 	e.history = []string{"home"}
-	e.showPage("panel", e.panelPage())
+	e.showPage("Panel", e.panelPage())
 
 	out := e.capture(tcell.NewEventKey(tcell.KeyCtrlB, 'B', tcell.ModCtrl))
 	if out != nil {
 		t.Errorf("capture should consume Ctrl+B, got %v", out)
 	}
-	if len(e.history) != 3 || e.history[2] != "panel/brand" {
-		t.Errorf("Ctrl+B should open panel/brand, history = %v", e.history)
+	if len(e.history) != 1 || e.history[0] != "home" {
+		t.Errorf("Ctrl+B should go back to home, history = %v", e.history)
+	}
+
+	e.history = []string{"home"}
+	e.showPage("Panel", e.panelPage())
+	e.capture(tcell.NewEventKey(tcell.KeyCtrlR, 'R', tcell.ModCtrl))
+	if len(e.history) != 3 || e.history[2] != "Panel/Brand" {
+		t.Errorf("Ctrl+R should open Panel/Brand (B is reserved for Back), history = %v", e.history)
 	}
 }
 
@@ -123,15 +123,15 @@ func TestShortcutsWorkInTextFields(t *testing.T) {
 	e.app = tview.NewApplication()
 
 	e.history = []string{"home"}
-	e.showPage("panel", e.panelPage())
+	e.showPage("Panel", e.panelPage())
 	if _, ok := e.app.GetFocus().(*tview.InputField); !ok {
 		t.Fatalf("expected focus on the panel form's first text input, got %T", e.app.GetFocus())
 	}
 
 	// Ctrl+L (Layout) fires from the text field.
 	e.capture(tcell.NewEventKey(tcell.KeyCtrlL, 'L', tcell.ModCtrl))
-	if len(e.history) != 3 || e.history[2] != "panel/layout" {
-		t.Errorf("Ctrl+L should open panel/layout, history = %v", e.history)
+	if len(e.history) != 3 || e.history[2] != "Panel/Layout" {
+		t.Errorf("Ctrl+L should open Panel/Layout, history = %v", e.history)
 	}
 }
 
@@ -204,7 +204,7 @@ func TestShortcutGenerateQueries(t *testing.T) {
 	e.app = tview.NewApplication()
 
 	e.history = []string{"home"}
-	e.showPage("sync", e.syncPage())
+	e.showPage("Sync", e.syncPage())
 
 	// Locate the Generate missing queries button's shortcut from its caption
 	// and press it.

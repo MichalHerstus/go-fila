@@ -29,14 +29,14 @@ func (e *Editor) columnsPage(idx int) tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("columns/"+fmt.Sprint(i), e.columnPage(idx, i))
+			e.showPage(e.resColumnPath(idx, i), e.columnPage(idx, i))
 		},
 		remove: func(i int) {
 			l.Columns = append(l.Columns[:i], l.Columns[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("columns", spec)
+	return e.recordList(e.resColumnsPath(idx), spec)
 }
 
 // columnPage edits a single list column.
@@ -49,7 +49,8 @@ func (e *Editor) columnPage(idx, cidx int) tview.Primitive {
 		e.yesno(f, "Sortable", c.Sortable, func(v bool) { c.Sortable = v })
 		e.yesno(f, "Searchable", c.Searchable, func(v bool) { c.Searchable = v })
 		e.addButton(f, "Options", func() {
-			e.showPage("column-options/"+fmt.Sprint(cidx), e.stringMapPage("column-options/"+fmt.Sprint(cidx), "Column options", func() map[string]string {
+			optsPath := e.resColumnPath(idx, cidx) + "/Options"
+			e.showPage(optsPath, e.stringMapPage(optsPath, "Column options", func() map[string]string {
 				return c.Options
 			}, func(v map[string]string) { c.Options = v }))
 		})

@@ -108,7 +108,7 @@ func (e *Editor) sqlEditPage(name string) tview.Primitive {
 		tv := tview.NewTextView().SetDynamicColors(true)
 		tv.SetBorder(true).SetBorderColor(colBorder).SetTitle("SQL: " + name)
 		fmt.Fprintf(tv, "[yellow]query %q not found in %s[-:-:-]\n\n[::d]Use Sync > Generate missing queries to create missing query files.[-:-:-]", name, qdir)
-		e.addButton(actions, "Back", e.back)
+		e.backButton(actions)
 		flex := tview.NewFlex().SetDirection(tview.FlexRow)
 		flex.AddItem(tv, 0, 1, true)
 		flex.AddItem(actions, 3, 0, false)
@@ -131,7 +131,7 @@ func (e *Editor) sqlEditPage(name string) tview.Primitive {
 		e.stageQueryEdit(path, name, base, ta.GetText())
 	})
 	e.addButton(actions, "Save", e.save)
-	e.addButton(actions, "Back", e.back)
+	e.backButton(actions)
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
 	flex.AddItem(ta, 0, 1, true)

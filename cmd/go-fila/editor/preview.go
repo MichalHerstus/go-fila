@@ -31,7 +31,7 @@ func (e *Editor) previewPage() tview.Primitive {
 		for _, p := range e.cfg.Pages {
 			name := p.Name
 			e.addButton(f, "Page: "+name, func() {
-				e.showPage("preview/page", e.pagePreview(name))
+				e.showPage("Preview/Page/"+name, e.pagePreview(name))
 			})
 		}
 	}
@@ -40,14 +40,14 @@ func (e *Editor) previewPage() tview.Primitive {
 		for _, r := range e.cfg.Resources {
 			name := r.Name
 			e.addButton(f, "Resource: "+name, func() {
-				e.showPage("preview/resource", e.resourcePreview(name))
+				e.showPage("Preview/Resource/"+name, e.resourcePreview(name))
 			})
 		}
 	}
 	if len(e.cfg.Pages) == 0 && len(e.cfg.Resources) == 0 {
 		f.AddTextView("", "No pages or resources configured yet.", 0, 1, true, false)
 	}
-	e.addButton(f, "Back", e.back)
+	e.backButton(f)
 	return f
 }
 

@@ -100,9 +100,9 @@ func (e *Editor) head(form *tview.Form, title string) {
 	form.AddTextView("", title, 0, 1, true, false)
 }
 
-// back adds a "Back" button that pops to the previous page.
+// backButton adds a "Back" button pinned to Ctrl+B (never a different combo).
 func (e *Editor) backButton(form *tview.Form) {
-	e.addButton(form, "Back", e.back)
+	e.addButtonPref(form, "Back", 'B', e.back)
 }
 
 // showPage pushes a named page and focuses it.

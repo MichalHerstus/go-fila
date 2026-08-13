@@ -28,14 +28,14 @@ func (e *Editor) actionsPage(idx int) tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("actions/"+fmt.Sprint(i), e.actionPage(idx, i))
+			e.showPage(e.resActionPath(idx, i), e.actionPage(idx, i))
 		},
 		remove: func(i int) {
 			r.Actions = append(r.Actions[:i], r.Actions[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("actions", spec)
+	return e.recordList(e.resActionsPath(idx), spec)
 }
 
 // actionPage edits a single custom action.
@@ -54,7 +54,8 @@ func (e *Editor) actionPage(idx, aidx int) tview.Primitive {
 			if a.Hooks == nil {
 				a.Hooks = &types.Hooks{}
 			}
-			e.showPage("actions/"+fmt.Sprint(aidx)+"/hooks", e.hooksPage(&a.Hooks, a.Name))
+			base := e.resActionPath(idx, aidx) + "/Hooks"
+			e.showPage(base, e.hooksPage(base, &a.Hooks, a.Name))
 		})
 	})
 }

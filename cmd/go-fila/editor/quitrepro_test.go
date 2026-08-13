@@ -24,7 +24,7 @@ func TestQuitConfirmClearsModified(t *testing.T) {
 			},
 		},
 		{
-			name: "input",
+			name:  "input",
 			build: func(e *Editor) *tview.Form { return e.panelPage().(*tview.Form) },
 			edit: func(f *tview.Form) {
 				in := f.GetFormItem(0).(*tview.InputField)
@@ -35,9 +35,9 @@ func TestQuitConfirmClearsModified(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-		e := New(testConfig(), t.TempDir()+"/go-fila.yaml")
-		e.app = tview.NewApplication()
-		e.buildShell()
+			e := New(testConfig(), t.TempDir()+"/go-fila.yaml")
+			e.app = tview.NewApplication()
+			e.buildShell()
 
 			f := tc.build(e)
 			tc.edit(f)

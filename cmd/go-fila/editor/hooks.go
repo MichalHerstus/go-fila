@@ -5,33 +5,29 @@ import (
 	"github.com/rivo/tview"
 )
 
-// hooksPage manages the before/after hook lists of a Hooks block.
-func (e *Editor) hooksPage(hooks **types.Hooks, title string) tview.Primitive {
+// hooksPage manages the before/after hook lists of a Hooks block. base is the
+// canonical path of the hooks screen (…/Hooks), which the sub-pages extend.
+func (e *Editor) hooksPage(base string, hooks **types.Hooks, title string) tview.Primitive {
 	return e.formShell(title+" / Hooks", func(f *tview.Form) {
 		e.addButton(f, "Before hooks", func() {
-			e.showPage("hooks/before", e.hookListPage(hooks, true))
+			e.showPage(base+"/Before", e.hookListPage(base, hooks, true))
 		})
 		e.addButton(f, "After hooks", func() {
-			e.showPage("hooks/after", e.hookListPage(hooks, false))
+			e.showPage(base+"/After", e.hookListPage(base, hooks, false))
 		})
 	})
 }
 
 // hookListPage edits one of the before/after hook slices.
-func (e *Editor) hookListPage(hooks **types.Hooks, before bool) tview.Primitive {
-	get := func() *[]types.Hook {
-		if *hooks == nil {
-			*hooks = &types.Hooks{}
-		}
-		if before {
-			return &(*hooks).Before
-		}
-		return &(*hooks).After
-	}
+func (e *Editor) hookListPage(base string, hooks **types.Hooks, before bool) tview.Primitive {
+	get := hookListGet(hooks, before)
 	title := "After hooks"
+	seg := "After"
 	if before {
 		title = "Before hooks"
+		seg = "Before"
 	}
+	listPath := base + "/" + seg
 	spec := listSpec{
 		title: title,
 		labels: func() []string {
@@ -58,7 +54,8 @@ func (e *Editor) hookListPage(hooks **types.Hooks, before bool) tview.Primitive 
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("hooks/edit", e.hookPage(get, i))
+			hs := *get()
+			e.showPage(listPath+"/"+segName(hs[i].Name, i), e.hookPage(get, i))
 		},
 		remove: func(i int) {
 			hs := *get()
@@ -67,7 +64,7 @@ func (e *Editor) hookListPage(hooks **types.Hooks, before bool) tview.Primitive 
 			e.markModified()
 		},
 	}
-	return e.recordList("hooks/"+title, spec)
+	return e.recordList(listPath, spec)
 }
 
 // hookKindOptions drives the three-way hook type picker (fn/sql/proc).

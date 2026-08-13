@@ -133,7 +133,7 @@ func TestProcPages(t *testing.T) {
 
 	hs := cfg.Resources[0].Form.Create.Hooks
 	get := func() *[]types.Hook { return &hs.After }
-	if p := e.hookListPage(&cfg.Resources[0].Form.Create.Hooks, false); p == nil {
+	if p := e.hookListPage("Resources/User/Form/Create/Hooks/After", &cfg.Resources[0].Form.Create.Hooks, false); p == nil {
 		t.Error("hookListPage: nil primitive")
 	}
 	if p := e.hookPage(get, 0); p == nil {

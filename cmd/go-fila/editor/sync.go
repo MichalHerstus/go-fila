@@ -195,9 +195,9 @@ func (e *Editor) syncPage() tview.Primitive {
 		e.generateMissingQueries(rep)
 	})
 	e.addButton(actions, "Refresh", func() {
-		e.refreshPage("sync", e.syncPage())
+		e.refreshPage("Sync", e.syncPage())
 	})
-	e.addButton(actions, "Back", e.back)
+	e.backButton(actions)
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow)
 	flex.AddItem(tv, 0, 1, true)

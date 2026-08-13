@@ -42,8 +42,8 @@ Decisions:
 │  Save       │                                                  │
 │  Quit       │                                                  │
 ├─────────────┴──────────────────────────────────────────────────┤
-│  ↑↓ Enter    Ctrl+S save   Ctrl+V validate   Esc back   F10 quit   toast area │
-└────────────────────────────────────────────────────────────────┘
+│  ↑↓ Enter    Ctrl+S save  Ctrl+V validate  Ctrl+P go-to  Ctrl+O home  Esc back  F10 quit │
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - `Editor` struct owns `*tview.Application`, `*tview.Pages` (right pane), left `*tview.List`, status `*tview.TextView`, `cfg`, `configPath`, `modified`, and a `history []string` of page names for Esc-back.
@@ -51,6 +51,8 @@ Decisions:
 - **Save** (Ctrl+S / Save menu item): `yaml.Marshal(cfg)` → write → toast "Saved". Runs `parser.Validate` first; errors shown in a modal, file not written.
 - **Quit** (F10 / Quit item / Esc at root): if `modified`, modal confirm *Save & quit / Discard / Cancel*.
 - **Validate** (Ctrl+V / Validate nav item): full health check listing every structural + schema finding; Enter on a row jumps to the exact editor page and highlights the offending column/field.
+- **Go to** (Ctrl+P / Ctrl+> alias / Ctrl+P): cd-style navigation dialog. Every screen has a canonical path (`Panel/Brand`, `Resources/<res>/List/Columns/<col>/Options`, `Pages/<page>/Widgets/<widget>`, `Navigation/<group>/Items/<item>`, `Preview/Page/<p>`, …). Enter navigates, Tab completes to the longest common prefix, Esc clears-then-closes, unknown paths keep the dialog open. Absolute (`~/…`, `/…`) and relative (`../…`, `<child>`) paths both resolve against the current screen; matching is case/space-insensitive and unnamed/duplicate items use `#<idx>`.
+- **Home** (Ctrl+O / Ctrl+/ alias): jump back to the overview screen (closes the dialog if open).
 - tview Forms have no page-groups: sections separated with `AddTextView`. Type-dependent widget/field forms rebuild via `form.Clear(true)` + re-add on type change.
 
 **Files** (`cmd/go-fila/editor/`, old bubbletea/huh files deleted):
@@ -72,7 +74,8 @@ sqledit.go  (per-resource SQLC query SQL editor: staged, flushed on save)
 sync.go     (SQL<->YAML analysis: simple list of schema tables, queries, missing refs)
 validate.go (validation screen: structural + schema findings, jump-to-fix)
 preview.go  (dashboard + per-resource ASCII-frame previews)
-+ editor_test.go, run_test.go (tview sim-screen integration tests)
+nav.go      (cd navigation: canonical paths, resolvePath/completePath, go-to dialog)
++ editor_test.go, run_test.go (tview sim-screen integration tests), nav_test.go
 ```
 
 No separate `model.go`/`panel.go`/`auth.go`/`pages.go` — those sections live in `menu.go`/`resource.go`. `Editor` embeds the app; the only test seam is `SetScreen(tcell.Screen)` (simulation screen for integration tests).
@@ -136,7 +139,7 @@ Reads the project's `sql/` via `internal/schema`. Renders a **simple scrolling `
 
 The per-resource editor pages already show the live SQL bodies of a single resource's queries (List/Detail/Form/Card/Field `options_query`, with a `Reload SQL query` button); Sync complements that as the whole-project health check.
 
-**Buttons** (each with a Ctrl+letter shortcut from its first free label letter):
+**Buttons** (each with a Ctrl+letter shortcut from its first free label letter; Ctrl+B is reserved so every Back button is pinned to Ctrl+B and other buttons skip it):
 1. Generate missing queries (Ctrl+G) — writes SQLC query stubs into `sql/queries/{table}.sql` (one file per schema table; existing files are never overwritten).
 2. Refresh (Ctrl+R) — re-run the analysis.
 3. Back (Ctrl+B) — return to the previous screen.

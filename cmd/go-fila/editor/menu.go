@@ -18,7 +18,7 @@ func (e *Editor) formShell(title string, fill func(*tview.Form)) tview.Primitive
 	f.SetButtonBackgroundColor(colAccent)
 	f.SetButtonTextColor(tcell.ColorWhite)
 	fill(f)
-	e.addButton(f, "Back", e.back)
+	e.backButton(f)
 	return f
 }
 
@@ -29,9 +29,9 @@ func (e *Editor) panelPage() tview.Primitive {
 		e.str(f, "ID", p.ID, func(v string) { p.ID = v })
 		e.str(f, "Name", p.Name, func(v string) { p.Name = v })
 		e.str(f, "Path", p.Path, func(v string) { p.Path = v })
-		e.addButton(f, "Brand", func() { e.showPage("panel/brand", e.brandPage()) })
-		e.addButton(f, "Layout", func() { e.showPage("panel/layout", e.layoutPage()) })
-		e.addButton(f, "Theme", func() { e.showPage("panel/theme", e.themePage()) })
+		e.addButton(f, "Brand", func() { e.showPage("Panel/Brand", e.brandPage()) })
+		e.addButton(f, "Layout", func() { e.showPage("Panel/Layout", e.layoutPage()) })
+		e.addButton(f, "Theme", func() { e.showPage("Panel/Theme", e.themePage()) })
 	})
 }
 
@@ -94,14 +94,14 @@ func (e *Editor) connectionsPage() tview.Primitive {
 		},
 		edit: func(i int) {
 			n := names()[i]
-			e.showPage("connections/"+n, e.connectionPage(n))
+			e.showPage("Connections/"+n, e.connectionPage(n))
 		},
 		remove: func(i int) {
 			delete(e.cfg.Connections, names()[i])
 			e.markModified()
 		},
 	}
-	return e.recordList("connections", spec)
+	return e.recordList("Connections", spec)
 }
 
 // connectionPage edits a single named connection.
@@ -145,7 +145,7 @@ func (e *Editor) authPage() tview.Primitive {
 		e.yesno(f, "Password reset", a.PasswordReset, func(v bool) { a.PasswordReset = v })
 		e.yesno(f, "Remember me", a.RememberMe, func(v bool) { a.RememberMe = v })
 		e.addButton(f, "Login fields", func() {
-			e.showPage("auth/login-fields", e.tagsPage("auth/login-fields", "Auth / Login fields", loginFieldOptions, func() []string {
+			e.showPage("Auth/Login Fields", e.tagsPage("Auth/Login Fields", "Auth / Login fields", loginFieldOptions, func() []string {
 				return a.Login.Fields
 			}, func(v []string) { a.Login.Fields = v }))
 		})
@@ -176,14 +176,14 @@ func (e *Editor) navGroupsPage() tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("navigation/group/"+fmt.Sprint(i), e.navGroupPage(i))
+			e.showPage(e.navGroupPath(i), e.navGroupPage(i))
 		},
 		remove: func(i int) {
 			e.cfg.Navigation = append(e.cfg.Navigation[:i], e.cfg.Navigation[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("navigation", spec)
+	return e.recordList("Navigation", spec)
 }
 
 // navGroupPage edits a group's meta and item list.
@@ -194,7 +194,7 @@ func (e *Editor) navGroupPage(idx int) tview.Primitive {
 		e.pick(f, "Icon", iconOptions, g.Icon, func(v string) { g.Icon = v })
 		e.num(f, "Sort", g.Sort, func(v int) { g.Sort = v })
 		e.addButton(f, "Items", func() {
-			e.showPage("navigation/group/"+fmt.Sprint(idx)+"/items", e.navItemsPage(idx))
+			e.showPage(e.navGroupItemsPath(idx), e.navItemsPage(idx))
 		})
 	})
 }
@@ -224,14 +224,14 @@ func (e *Editor) navItemsPage(gidx int) tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("navigation/item/"+fmt.Sprint(i), e.navItemPage(gidx, i))
+			e.showPage(e.navItemPath(gidx, i), e.navItemPage(gidx, i))
 		},
 		remove: func(i int) {
 			g.Items = append(g.Items[:i], g.Items[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("navigation/items", spec)
+	return e.recordList(e.navGroupItemsPath(gidx), spec)
 }
 
 // navItemPage edits a single navigation item.
@@ -286,14 +286,14 @@ func (e *Editor) pagesPage() tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("pages/"+fmt.Sprint(i), e.pagePage(i))
+			e.showPage(e.pagePath(i), e.pagePage(i))
 		},
 		remove: func(i int) {
 			e.cfg.Pages = append(e.cfg.Pages[:i], e.cfg.Pages[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("pages", spec)
+	return e.recordList("Pages", spec)
 }
 
 // pagePage edits a single page and its widgets.
@@ -304,7 +304,7 @@ func (e *Editor) pagePage(idx int) tview.Primitive {
 		e.str(f, "Path", p.Path, func(v string) { p.Path = v })
 		e.yesno(f, "Default", p.Default, func(v bool) { p.Default = v })
 		e.addButton(f, "Widgets", func() {
-			e.showPage("pages/"+fmt.Sprint(idx)+"/widgets", e.widgetsPage(idx))
+			e.showPage(e.pageWidgetsPath(idx), e.widgetsPage(idx))
 		})
 	})
 }
@@ -329,14 +329,14 @@ func (e *Editor) widgetsPage(pidx int) tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("pages/"+fmt.Sprint(pidx)+"/widget/"+fmt.Sprint(i), e.widgetPage(pidx, i))
+			e.showPage(e.pageWidgetPath(pidx, i), e.widgetPage(pidx, i))
 		},
 		remove: func(i int) {
 			p.Widgets = append(p.Widgets[:i], p.Widgets[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("pages/widgets", spec)
+	return e.recordList(e.pageWidgetsPath(pidx), spec)
 }
 
 // widgetPage edits a single widget by type.
@@ -362,7 +362,7 @@ func (e *Editor) widgetPage(pidx, idx int) tview.Primitive {
 		case "stats_grid":
 			e.num(f, "Columns", w.Columns, func(v int) { w.Columns = v })
 			e.addButton(f, "Sub-widgets", func() {
-				e.showPage("widget/subs/"+fmt.Sprint(idx), e.subWidgetsPage(pidx, idx))
+				e.showPage(e.pageSubWidgetsPath(pidx, idx), e.subWidgetsPage(pidx, idx))
 			})
 		case "chart":
 			if w.Chart == nil {
@@ -376,7 +376,8 @@ func (e *Editor) widgetPage(pidx, idx int) tview.Primitive {
 			e.str(f, "Query", w.Query, func(v string) { w.Query = v })
 			e.num(f, "Limit", w.Limit, func(v int) { w.Limit = v })
 			e.addButton(f, "Data columns", func() {
-				e.showPage("widget/columns/"+fmt.Sprint(idx), e.stringListPage("widget/columns/"+fmt.Sprint(idx), "Data columns", func() []string {
+				path := e.pageWidgetPath(pidx, idx) + "/Data Columns"
+				e.showPage(path, e.stringListPage(path, "Data columns", func() []string {
 					return w.DataColumns
 				}, func(v []string) { w.DataColumns = v }))
 			})
@@ -406,14 +407,14 @@ func (e *Editor) subWidgetsPage(pidx, idx int) tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("widget/sub/"+fmt.Sprint(i), e.subWidgetPage(pidx, idx, i))
+			e.showPage(e.pageSubWidgetPath(pidx, idx, i), e.subWidgetPage(pidx, idx, i))
 		},
 		remove: func(i int) {
 			parent.Widgets = append(parent.Widgets[:i], parent.Widgets[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("widget/subs", spec)
+	return e.recordList(e.pageSubWidgetsPath(pidx, idx), spec)
 }
 
 // subWidgetPage edits one nested stat widget.

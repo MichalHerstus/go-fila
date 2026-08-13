@@ -1,7 +1,6 @@
 package editor
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
@@ -37,14 +36,14 @@ func (e *Editor) resourcesPage() tview.Primitive {
 			e.markModified()
 		},
 		edit: func(i int) {
-			e.showPage("resources/"+fmt.Sprint(i), e.resourcePage(i))
+			e.showPage(e.resPath(i), e.resourcePage(i))
 		},
 		remove: func(i int) {
 			e.cfg.Resources = append(e.cfg.Resources[:i], e.cfg.Resources[i+1:]...)
 			e.markModified()
 		},
 	}
-	return e.recordList("resources", spec)
+	return e.recordList("Resources", spec)
 }
 
 // resourcePage edits a single resource and its sections.
@@ -59,15 +58,15 @@ func (e *Editor) resourcePage(idx int) tview.Primitive {
 		e.pick(f, "ID type", idTypeOptions, r.IDType, func(v string) { r.IDType = v })
 		e.str(f, "ID column", r.IDColumn, func(v string) { r.IDColumn = v })
 		e.head(f, "Views")
-		e.addButton(f, "List", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/list", e.listPage(idx)) })
-		e.addButton(f, "Card", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/card", e.cardPage(idx)) })
-		e.addButton(f, "Detail", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/detail", e.detailPage(idx)) })
-		e.addButton(f, "Form", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/form", e.formPage(idx)) })
+		e.addButton(f, "List", func() { e.showPage(e.resListPath(idx), e.listPage(idx)) })
+		e.addButton(f, "Card", func() { e.showPage(e.resCardPath(idx), e.cardPage(idx)) })
+		e.addButton(f, "Detail", func() { e.showPage(e.resDetailPath(idx), e.detailPage(idx)) })
+		e.addButton(f, "Form", func() { e.showPage(e.resFormPath(idx), e.formPage(idx)) })
 		e.head(f, "Behavior")
-		e.addButton(f, "Actions", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/actions", e.actionsPage(idx)) })
-		e.addButton(f, "Policies", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/policies", e.policiesPage(idx)) })
+		e.addButton(f, "Actions", func() { e.showPage(e.resActionsPath(idx), e.actionsPage(idx)) })
+		e.addButton(f, "Policies", func() { e.showPage(e.resPoliciesPath(idx), e.policiesPage(idx)) })
 		e.head(f, "Queries")
-		e.addButton(f, "SQL queries", func() { e.showPage("resources/"+fmt.Sprint(idx)+"/sql", e.sqlQueriesPage(idx)) })
+		e.addButton(f, "SQL queries", func() { e.showPage(e.resSQLPath(idx), e.sqlQueriesPage(idx)) })
 	})
 }
 
@@ -136,7 +135,7 @@ func (e *Editor) sqlQueriesPage(idx int) tview.Primitive {
 			sub = q.File
 		}
 		list.AddItem(qname, sub, 0, func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/sql/"+qname, e.sqlEditPage(qname))
+			e.showPage(e.resSQLQueryPath(idx, qname), e.sqlEditPage(qname))
 		})
 	}
 	if len(names) == 0 {
@@ -168,7 +167,7 @@ func (e *Editor) listPage(idx int) tview.Primitive {
 		e.str(f, "Default sort", l.DefaultSort, func(v string) { l.DefaultSort = v })
 		qc.reloadButton(f)
 		e.addButton(f, "Columns", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/columns", e.columnsPage(idx))
+			e.showPage(e.resColumnsPath(idx), e.columnsPage(idx))
 		})
 	})
 }
@@ -202,10 +201,11 @@ func (e *Editor) cardPage(idx int) tview.Primitive {
 		})
 		qc.reloadButton(f)
 		e.addButton(f, "Fields", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/card-fields", e.cardFieldsPage(idx))
+			e.showPage(e.resCardFieldsPath(idx), e.cardFieldsPage(idx))
 		})
 		e.addButton(f, "Searchable", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/card-searchable", e.stringListPage("resources/"+fmt.Sprint(idx)+"/card-searchable", "Card searchable", func() []string {
+			path := e.resCardPath(idx) + "/Searchable"
+			e.showPage(path, e.stringListPage(path, "Card searchable", func() []string {
 				return c.Searchable
 			}, func(v []string) { c.Searchable = v }))
 		})
@@ -226,12 +226,13 @@ func (e *Editor) detailPage(idx int) tview.Primitive {
 		renderQ = qc.addRow(f, "", func() string { return d.Query })
 		qc.reloadButton(f)
 		e.addButton(f, "Params", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/detail-params", e.stringMapPage("resources/"+fmt.Sprint(idx)+"/detail-params", "Detail params", func() map[string]string {
+			path := e.resDetailPath(idx) + "/Params"
+			e.showPage(path, e.stringMapPage(path, "Detail params", func() map[string]string {
 				return d.Params
 			}, func(v map[string]string) { d.Params = v }))
 		})
 		e.addButton(f, "Fields", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/detail-fields", e.detailFieldsPage(idx))
+			e.showPage(e.resDetailFieldsPath(idx), e.detailFieldsPage(idx))
 		})
 	})
 }
@@ -245,15 +246,15 @@ func (e *Editor) formPage(idx int) tview.Primitive {
 	return e.formShell("Form: "+r.Name, func(f *tview.Form) {
 		e.addButton(f, "Create", func() {
 			e.ensureFormAction(r, "create")
-			e.showPage("resources/"+fmt.Sprint(idx)+"/form-create", e.formActionPage(idx, "create"))
+			e.showPage(e.resFormWhichPath(idx, "create"), e.formActionPage(idx, "create"))
 		})
 		e.addButton(f, "Update", func() {
 			e.ensureFormAction(r, "update")
-			e.showPage("resources/"+fmt.Sprint(idx)+"/form-update", e.formActionPage(idx, "update"))
+			e.showPage(e.resFormWhichPath(idx, "update"), e.formActionPage(idx, "update"))
 		})
 		e.addButton(f, "Delete", func() {
 			e.ensureFormAction(r, "delete")
-			e.showPage("resources/"+fmt.Sprint(idx)+"/form-delete", e.formActionPage(idx, "delete"))
+			e.showPage(e.resFormWhichPath(idx, "delete"), e.formActionPage(idx, "delete"))
 		})
 	})
 }
@@ -295,6 +296,7 @@ func (e *Editor) formActionPage(idx int, which string) tview.Primitive {
 		label = "Delete"
 	}
 	qc := e.newSQLViewer()
+	base := e.resFormWhichPath(idx, which)
 	return e.formShell(label+" form: "+r.Name, func(f *tview.Form) {
 		var renderQ, renderPQ func()
 		e.str(f, "Query", fa.Query, func(v string) { fa.Query = v; renderQ() })
@@ -303,16 +305,18 @@ func (e *Editor) formActionPage(idx int, which string) tview.Primitive {
 		renderPQ = qc.addRow(f, "", func() string { return fa.PopulateQuery })
 		qc.reloadButton(f)
 		e.addButton(f, "Populate params", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/"+which+"-params", e.stringMapPage("resources/"+fmt.Sprint(idx)+"/"+which+"-params", label+" populate params", func() map[string]string {
+			path := base + "/Params"
+			e.showPage(path, e.stringMapPage(path, label+" populate params", func() map[string]string {
 				return fa.PopulateParams
 			}, func(v map[string]string) { fa.PopulateParams = v }))
 		})
 		e.addButton(f, "Fields", func() {
-			e.showPage("resources/"+fmt.Sprint(idx)+"/"+which+"-fields", e.formFieldsPage(idx, which))
+			e.showPage(base+"/Fields", e.formFieldsPage(idx, which))
 		})
 		e.addButton(f, "Hooks", func() {
 			ensureHooks(fa)
-			e.showPage("resources/"+fmt.Sprint(idx)+"/"+which+"-hooks", e.hooksPage(&fa.Hooks, label))
+			hooksPath := base + "/Hooks"
+			e.showPage(hooksPath, e.hooksPage(hooksPath, &fa.Hooks, label))
 		})
 	})
 }

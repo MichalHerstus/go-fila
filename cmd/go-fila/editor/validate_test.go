@@ -80,11 +80,11 @@ func TestRunValidationFindsBadColumns(t *testing.T) {
 	e.app = tview.NewApplication()
 	e.buildShell()
 	listCol.goTo()
-	if got := e.history[len(e.history)-1]; got != "resources/0/columns" {
+	if got := e.history[len(e.history)-1]; got != "Resources/User/List/Columns" {
 		t.Errorf("list finding should jump to the columns page, got %q", got)
 	}
 	cardCol.goTo()
-	if got := e.history[len(e.history)-1]; got != "resources/0/card-fields" {
+	if got := e.history[len(e.history)-1]; got != "Resources/User/Card/Fields" {
 		t.Errorf("card finding should jump to the card-fields page, got %q", got)
 	}
 }
@@ -99,7 +99,7 @@ func TestSectionJumpFocusesOffendingRow(t *testing.T) {
 	e := New(cfg, "testdata/go-fila.yaml")
 
 	name, prim := e.sectionJump("User", schema.ColumnRef{Column: "role_id", Section: "list.columns", Index: 1})
-	if name != "resources/0/columns" {
+	if name != "Resources/User/List/Columns" {
 		t.Errorf("list.columns jump name = %q", name)
 	}
 	if l, ok := prim.(*tview.List); !ok || l.GetCurrentItem() != 1 {
@@ -107,7 +107,7 @@ func TestSectionJumpFocusesOffendingRow(t *testing.T) {
 	}
 
 	name, prim = e.sectionJump("User", schema.ColumnRef{Column: "b", Section: "card.fields", Index: 1})
-	if name != "resources/0/card-fields" {
+	if name != "Resources/User/Card/Fields" {
 		t.Errorf("card.fields jump name = %q", name)
 	}
 	if l, ok := prim.(*tview.List); !ok || l.GetCurrentItem() != 1 {
@@ -115,7 +115,7 @@ func TestSectionJumpFocusesOffendingRow(t *testing.T) {
 	}
 
 	name, prim = e.sectionJump("User", schema.ColumnRef{Column: "x", Section: "form.update.fields", Index: 0})
-	if name != "resources/0/update-fields" {
+	if name != "Resources/User/Form/Update/Fields" {
 		t.Errorf("form.update.fields jump name = %q", name)
 	}
 	if l, ok := prim.(*tview.List); !ok || l.GetCurrentItem() != 0 {
@@ -123,7 +123,7 @@ func TestSectionJumpFocusesOffendingRow(t *testing.T) {
 	}
 
 	name, prim = e.sectionJump("User", schema.ColumnRef{Column: "created_at", Section: "card.default_sort", Index: 0})
-	if name != "resources/0/card" {
+	if name != "Resources/User/Card" {
 		t.Errorf("card.default_sort jump name = %q", name)
 	}
 	if _, ok := prim.(*tview.Form); !ok {
@@ -170,7 +170,7 @@ func TestValidateGlobalShortcut(t *testing.T) {
 	if _, err := e.Run(); err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	if len(e.history) == 0 || e.history[len(e.history)-1] != "validate" {
-		t.Errorf("expected validate to be the front page, history: %v", e.history)
+	if len(e.history) == 0 || e.history[len(e.history)-1] != "Validate" {
+		t.Errorf("expected Validate to be the front page, history: %v", e.history)
 	}
 }
