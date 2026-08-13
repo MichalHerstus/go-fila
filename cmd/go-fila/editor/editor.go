@@ -114,6 +114,9 @@ func (e *Editor) buildNav() {
 	e.navItem("Connections", "Connections", e.connectionsPage)
 	e.navItem("SQLC", "SQLC", e.sqlcPage)
 	e.navItem("Auth", "Auth", e.authPage)
+	e.navItem("Audit", "Audit", e.auditPage)
+	e.navItem("Procedures", "Procedures", e.proceduresPage)
+	e.navItem("Plugins", "Plugins", e.pluginsPage)
 	e.navItem("Navigation", "Navigation", e.navGroupsPage)
 	e.navItem("Resources", "Resources", e.resourcesPage)
 	e.navItem("Pages", "Pages", e.pagesPage)
@@ -217,6 +220,11 @@ func (e *Editor) homePage() tview.Primitive {
 		fmt.Fprintf(tv, "  %s %s%s\n", p.Name, p.Path, mark)
 	}
 	fmt.Fprintf(tv, "\n[::b]Connections[::-]:\n%s\n", strings.Join(conns, "\n"))
+	audit := "disabled"
+	if e.cfg.Audit != nil && e.cfg.Audit.Enabled {
+		audit = "enabled (" + e.cfg.Audit.Table + ")"
+	}
+	fmt.Fprintf(tv, "\n[::b]Audit[::-]: %s  [::b]Procedures[::-]: %d  [::b]Plugins[::-]: %d\n", audit, len(e.cfg.Procedures), len(e.cfg.Plugins))
 	fmt.Fprintf(tv, "\n[::d]Use the left menu to edit. Ctrl+S saves, Ctrl+V validates, Ctrl+P goes to a path, Ctrl+O returns here, Ctrl+Q quits.[::-]")
 	return tv
 }

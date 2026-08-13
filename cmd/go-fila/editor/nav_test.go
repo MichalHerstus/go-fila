@@ -159,14 +159,14 @@ func TestCompletePath(t *testing.T) {
 		}
 	}
 
-	check("~/P", "~/P", []string{"Panel", "Pages", "Preview"})
+	check("~/P", "~/P", []string{"Panel", "Procedures", "Plugins", "Pages", "Preview"})
 	check("~/Pa", "~/Pa", []string{"Panel", "Pages"})
 	check("~/Panel", "~/Panel", []string{"Panel"})
 	check("Res", "Resources", []string{"Resources"})
 	check("Resources/U", "Resources/User", []string{"User"})
 	check("Resources/User/List/Col", "Resources/User/List/Columns", []string{"Columns"})
 	check("Resources/User/Card/Fi", "Resources/User/Card/Fields", []string{"Fields"})
-	check("", "", []string{"Panel", "Connections", "SQLC", "Auth", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"})
+	check("", "", []string{"Panel", "Connections", "SQLC", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"})
 }
 
 // newNavEditor returns an editor ready for dialog interactions (pages + app).
@@ -337,7 +337,7 @@ func TestChildrenOfRoot(t *testing.T) {
 		t.Fatal("childrenOf(nil) should resolve")
 	}
 	got := strings.Join(kids, ",")
-	for _, want := range []string{"Panel", "Connections", "SQLC", "Auth", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"} {
+	for _, want := range []string{"Panel", "Connections", "SQLC", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("childrenOf(nil) missing %s: %v", want, kids)
 		}

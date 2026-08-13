@@ -149,6 +149,33 @@ func (e *Editor) authPage() tview.Primitive {
 				return a.Login.Fields
 			}, func(v []string) { a.Login.Fields = v }))
 		})
+		e.head(f, "Login rate limit")
+		rl := a.Login.RateLimit
+		e.yesno(f, "Enabled", rl != nil, func(v bool) {
+			if v {
+				if a.Login.RateLimit == nil {
+					a.Login.RateLimit = &types.LoginRateLimit{MaxAttempts: 5, WindowSeconds: 300}
+				}
+			} else {
+				a.Login.RateLimit = nil
+			}
+		})
+		max, win := 0, 0
+		if rl != nil {
+			max, win = rl.MaxAttempts, rl.WindowSeconds
+		}
+		e.num(f, "Max attempts", max, func(v int) {
+			if a.Login.RateLimit == nil {
+				a.Login.RateLimit = &types.LoginRateLimit{}
+			}
+			a.Login.RateLimit.MaxAttempts = v
+		})
+		e.num(f, "Window seconds", win, func(v int) {
+			if a.Login.RateLimit == nil {
+				a.Login.RateLimit = &types.LoginRateLimit{}
+			}
+			a.Login.RateLimit.WindowSeconds = v
+		})
 	})
 }
 

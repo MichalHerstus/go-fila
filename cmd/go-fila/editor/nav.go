@@ -157,6 +157,22 @@ func (e *Editor) resolveSegs(segs []string) (navTarget, error) {
 		}
 	case "auth":
 		return e.resolveAuth(rest)
+	case "audit":
+		if len(rest) == 0 {
+			return navTarget{"Audit", e.auditPage}, nil
+		}
+		if len(rest) == 1 && matchesSeg(rest[0], "Excluded Resources") {
+			path := "Audit/Excluded Resources"
+			return navTarget{path, func() tview.Primitive {
+				return e.stringListPage(path, "Audit excluded resources",
+					func() []string { return e.auditCfg().ExcludeResources },
+					func(v []string) { e.auditCfg().ExcludeResources = v })
+			}}, nil
+		}
+	case "procedures":
+		return e.resolveProcedures(rest)
+	case "plugins":
+		return e.resolvePlugins(rest)
 	case "navigation":
 		return e.resolveNavigation(rest)
 	case "resources":
@@ -224,6 +240,36 @@ func (e *Editor) resolveAuth(rest []string) (navTarget, error) {
 		}}, nil
 	}
 	return navTarget{}, navErr(strings.Join(rest, "/"))
+}
+
+// resolveProcedures resolves "Procedures[/<name>]".
+func (e *Editor) resolveProcedures(rest []string) (navTarget, error) {
+	if len(rest) == 0 {
+		return navTarget{"Procedures", e.proceduresPage}, nil
+	}
+	pdx := e.procedureIdxBySeg(rest[0])
+	if pdx < 0 {
+		return navTarget{}, navErr(rest[0])
+	}
+	if len(rest) > 1 {
+		return navTarget{}, navErr(strings.Join(rest[1:], "/"))
+	}
+	return navTarget{e.procedurePath(pdx), func() tview.Primitive { return e.procedurePage(pdx) }}, nil
+}
+
+// resolvePlugins resolves "Plugins[/<name>]".
+func (e *Editor) resolvePlugins(rest []string) (navTarget, error) {
+	if len(rest) == 0 {
+		return navTarget{"Plugins", e.pluginsPage}, nil
+	}
+	plx := e.pluginIdxBySeg(rest[0])
+	if plx < 0 {
+		return navTarget{}, navErr(rest[0])
+	}
+	if len(rest) > 1 {
+		return navTarget{}, navErr(strings.Join(rest[1:], "/"))
+	}
+	return navTarget{e.pluginPath(plx), func() tview.Primitive { return e.pluginPage(plx) }}, nil
 }
 
 // navigation
@@ -797,7 +843,7 @@ func (e *Editor) resolvePreview(rest []string) (navTarget, error) {
 // the path is a known directory. Used for Tab completion.
 func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 	if len(segs) == 0 {
-		return []string{"Panel", "Connections", "SQLC", "Auth", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"}, true
+		return []string{"Panel", "Connections", "SQLC", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"}, true
 	}
 	rest := segs[1:]
 	switch foldSeg(segs[0]) {
@@ -817,6 +863,26 @@ func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 	case "auth":
 		if len(rest) == 0 {
 			return []string{"Login Fields"}, true
+		}
+	case "audit":
+		if len(rest) == 0 {
+			return []string{"Excluded Resources"}, true
+		}
+	case "procedures":
+		if len(rest) == 0 {
+			var out []string
+			for i, p := range e.cfg.Procedures {
+				out = append(out, segName(p.Name, i))
+			}
+			return out, true
+		}
+	case "plugins":
+		if len(rest) == 0 {
+			var out []string
+			for i, pl := range e.cfg.Plugins {
+				out = append(out, segName(pl.Name, i))
+			}
+			return out, true
 		}
 	case "navigation":
 		if len(rest) == 0 {

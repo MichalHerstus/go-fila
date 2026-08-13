@@ -105,6 +105,9 @@ var (
 // the offending value is edited (when the message carries an index or a known
 // section prefix); nil when the problem is not localizable.
 func (e *Editor) structuralGoTo(msg string) func() {
+	if strings.Contains(msg, "undeclared procedure") {
+		return func() { e.showPage("Procedures", e.proceduresPage()) }
+	}
 	if m := resourceIdxRe.FindStringSubmatch(msg); m != nil {
 		if idx, err := strconv.Atoi(m[1]); err == nil && idx >= 0 && idx < len(e.cfg.Resources) {
 			return e.resourceGoTo(e.cfg.Resources[idx].Name)
