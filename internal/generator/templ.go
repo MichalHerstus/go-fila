@@ -263,13 +263,24 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 		}
 	}
 
+	viewLink := ""
+	if r.Detail != nil {
+		viewLink = fmt.Sprintf(`                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 mr-3">View</a>
+`, panelPath, resLower, idCol)
+	}
+	editLink := ""
+	if r.Form != nil && r.Form.Update != nil {
+		editLink = fmt.Sprintf(`                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 mr-3">Edit</a>
+`, panelPath, resLower, idCol)
+	}
 	actionsCol := fmt.Sprintf(`            <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 mr-3">View</a>
-                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 mr-3">Edit</a>
-%s            </td>
-`, panelPath, resLower, idCol, panelPath, resLower, idCol, extraActions)
+%s%s%s            </td>
+`, viewLink, editLink, extraActions)
 
-	createBtn := fmt.Sprintf(`<a href="%s/%s/new" class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Create %s</a>`, panelPath, resLower, resLabel)
+	createBtn := ""
+	if r.Form != nil && r.Form.Create != nil {
+		createBtn = fmt.Sprintf(`<a href="%s/%s/new" class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Create %s</a>`, panelPath, resLower, resLabel)
+	}
 	exportBtn := fmt.Sprintf(`<a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/export/csv", %q, %q)) } class="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 px-4 py-2 text-sm">Export CSV</a>`, panelPath, resLower)
 
 	importBtn := ""
@@ -452,6 +463,12 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 `, panelPath, resLower, idCol, resName))
 	}
 
+	detailEditBtn := ""
+	if r.Form != nil && r.Form.Update != nil {
+		detailEditBtn = fmt.Sprintf(`                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, data.Item[%q])) } class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Edit</a>
+`, panelPath, resLower, idCol)
+	}
+
 	code := fmt.Sprintf(`package views
 
 import "internal/viewmodels"
@@ -462,8 +479,7 @@ templ %s(data *viewmodels.DetailData) {
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">%s Details</h1>
             <div class="flex gap-2">
                 <a href="%s/%s" class="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 px-4 py-2">Back</a>
-                <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, data.Item[%q])) } class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Edit</a>
-%s            </div>
+%s%s            </div>
         </div>
 
         <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
@@ -474,7 +490,7 @@ templ %s(data *viewmodels.DetailData) {
         </div>
     </div>
 }
-`, templName, resName, panelPath, resLower, panelPath, resLower, idCol, actionBtns.String(), rows.String())
+`, templName, resName, panelPath, resLower, detailEditBtn, actionBtns.String(), rows.String())
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "detail.templ"), []byte(code), 0644)
@@ -909,11 +925,19 @@ func (g *Generator) generateCardTempl(dir string, r types.Resource) error {
 `, label, rendered))
 	}
 
+	cardView := ""
+	if r.Detail != nil {
+		cardView = fmt.Sprintf(`                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 text-sm">View</a>
+`, panelPath, resLower, idCol)
+	}
+	cardEdit := ""
+	if r.Form != nil && r.Form.Update != nil {
+		cardEdit = fmt.Sprintf(`                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 text-sm">Edit</a>
+`, panelPath, resLower, idCol)
+	}
 	actions := fmt.Sprintf(`                    <div class="flex gap-2 border-t pt-3 mt-3">
-                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 text-sm">View</a>
-                        <a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/%%v/edit", %q, %q, item[%q])) } class="text-brand-primary hover:text-brand-primary/80 text-sm">Edit</a>
-                    </div>
-`, panelPath, resLower, idCol, panelPath, resLower, idCol)
+%s%s                    </div>
+`, cardView, cardEdit)
 
 	kanbanField := ""
 	if r.Card.KanbanField != "" {

@@ -94,3 +94,122 @@ func TestWriteResourceYAMLOptionsQuery(t *testing.T) {
 		t.Fatalf("options_value must be the referenced foreign column pn:\n%s", out)
 	}
 }
+
+// viewTables returns tables for a schema where order_summary is a database view
+// (no primary key, no foreign keys) alongside a real orders table.
+func viewTables() []TableInfo {
+	return []TableInfo{
+		{
+			Name: "orders",
+			Columns: []ColumnInfo{
+				{Name: "id", DBType: "integer", IsPrimaryKey: true},
+				{Name: "customer_name", DBType: "character varying"},
+				{Name: "total", DBType: "numeric"},
+			},
+		},
+		{
+			Name:   "order_summary",
+			IsView: true,
+			Columns: []ColumnInfo{
+				{Name: "customer_name", DBType: "character varying"},
+				{Name: "total", DBType: "numeric"},
+				{Name: "created_at", DBType: "timestamp without time zone"},
+			},
+		},
+	}
+}
+
+// intGridView returns a view whose resolved key column is an integer literal id,
+// so it is eligible for a detail ("view form").
+func intGridView() TableInfo {
+	return TableInfo{
+		Name:   "active_customers",
+		IsView: true,
+		Columns: []ColumnInfo{
+			{Name: "id", DBType: "integer"},
+			{Name: "name", DBType: "character varying"},
+		},
+	}
+}
+
+// TestWriteResourceYAMLViewReadOnly ensures a text-keyed view is emitted as a
+// read-only resource: list + card present, no form section, and no detail (the
+// non-integer key column cannot feed the int-casting detail handler).
+func TestWriteResourceYAMLViewReadOnly(t *testing.T) {
+	var b strings.Builder
+	tables := viewTables()
+	writeResourceYAML(&b, tables[1], tables, "postgres")
+	out := b.String()
+
+	if !strings.Contains(out, "list:") || !strings.Contains(out, "card:") {
+		t.Fatalf("view resource must have list/card sections, got:\n%s", out)
+	}
+	if strings.Contains(out, "form:") {
+		t.Fatalf("view resource must not have a form section, got:\n%s", out)
+	}
+	if strings.Contains(out, "detail:") {
+		t.Fatalf("text-keyed view must not emit a detail section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "id_column: customer_name") {
+		t.Fatalf("view key column must fall back to the first column (customer_name), got:\n%s", out)
+	}
+}
+
+// TestWriteResourceYAMLViewDetail ensures an integer-keyed view still gets the
+// detail ("view form") section.
+func TestWriteResourceYAMLViewDetail(t *testing.T) {
+	var b strings.Builder
+	writeResourceYAML(&b, intGridView(), []TableInfo{intGridView()}, "postgres")
+	out := b.String()
+
+	if !strings.Contains(out, "detail:") {
+		t.Fatalf("integer-keyed view must emit a detail section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "card:") {
+		t.Fatalf("view must emit a card section, got:\n%s", out)
+	}
+	if strings.Contains(out, "form:") {
+		t.Fatalf("view must not emit a form section, got:\n%s", out)
+	}
+}
+
+// TestGenerateQueriesViewReadOnly ensures views only get read queries
+// (List/Count/Get) and no write queries (Create/Update/Delete).
+func TestGenerateQueriesViewReadOnly(t *testing.T) {
+	queries := generateQueries(viewTables(), "postgres")
+
+	sql := queries["order_summary.sql"]
+	if !strings.Contains(sql, "-- name: ListOrderSummary :many") {
+		t.Fatalf("view must have a List query:\n%s", sql)
+	}
+	if !strings.Contains(sql, "-- name: CountOrderSummary :one") {
+		t.Fatalf("view must have a Count query:\n%s", sql)
+	}
+	if !strings.Contains(sql, "-- name: GetOrderSummary :one") {
+		t.Fatalf("view must have a Get query:\n%s", sql)
+	}
+	for _, bad := range []string{
+		"CreateOrderSummary", "UpdateOrderSummary", "DeleteOrderSummary",
+		"INSERT INTO order_summary", "UPDATE order_summary", "DELETE FROM order_summary",
+	} {
+		if strings.Contains(sql, bad) {
+			t.Fatalf("view must not emit write query %q:\n%s", bad, sql)
+		}
+	}
+	// The Get query must key on the view's fallback key column.
+	if !strings.Contains(sql, "WHERE t.customer_name = $1") {
+		t.Fatalf("view Get query must key on customer_name:\n%s", sql)
+	}
+}
+
+// TestGenerateSchemaSQLView ensures schema.sql (sqlc input) carries a synthetic
+// CREATE TABLE for a view so sqlc can infer its column types.
+func TestGenerateSchemaSQLView(t *testing.T) {
+	schema := generateSchemaSQL(viewTables(), false, false, "postgres")
+	if !strings.Contains(schema, "CREATE TABLE order_summary (") {
+		t.Fatalf("schema.sql must emit a synthetic CREATE TABLE for the view:\n%s", schema)
+	}
+	if !strings.Contains(schema, "customer_name character varying") {
+		t.Fatalf("schema.sql view DDL must include the view columns:\n%s", schema)
+	}
+}

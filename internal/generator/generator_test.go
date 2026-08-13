@@ -1526,6 +1526,77 @@ func TestGenerateFormUnionFields(t *testing.T) {
 	}
 }
 
+// readOnlyConfig returns a config with a resource that has list, card and
+// detail but no form (as generated for database views): it must be read-only.
+func readOnlyConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{
+				Name:     "Order",
+				Label:    "Orders",
+				Table:    "order_summary",
+				IDColumn: "order_no",
+				List: &types.ListConfig{
+					Query: "ListOrderSummary", CountQuery: "CountOrderSummary",
+					Columns: []types.Column{{Name: "order_no", Label: "Order No"}, {Name: "customer_name", Label: "Customer"}},
+				},
+				Card: &types.CardConfig{
+					Fields:  []types.Field{{Name: "customer_name", Type: "text"}},
+					Columns: 3, Rows: 2,
+				},
+				Detail: &types.DetailConfig{
+					Query:  "GetOrderSummary",
+					Fields: []types.Field{{Name: "customer_name", Type: "text"}},
+				},
+			},
+		},
+	}
+}
+
+// TestGenerateReadOnlyResource ensures a resource with no form (database view)
+// generates correctly: no create/update/delete handlers/pages and no "Create" /
+// "Edit" links in the list, card or detail templ views.
+func TestGenerateReadOnlyResource(t *testing.T) {
+	dir := t.TempDir()
+	g := New(readOnlyConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	pkg := filepath.Join(dir, "internal/panel/resources/order")
+	if _, err := os.Stat(filepath.Join(pkg, "create.go")); !os.IsNotExist(err) {
+		t.Error("read-only resource must not generate create.go")
+	}
+	if _, err := os.Stat(filepath.Join(pkg, "update.go")); !os.IsNotExist(err) {
+		t.Error("read-only resource must not generate update.go")
+	}
+	if _, err := os.Stat(filepath.Join(pkg, "delete.go")); !os.IsNotExist(err) {
+		t.Error("read-only resource must not generate delete.go")
+	}
+
+	for _, v := range []string{"list.templ", "cards.templ", "detail.templ"} {
+		view, err := os.ReadFile(filepath.Join(dir, "internal/views/resources/order", v))
+		if err != nil {
+			t.Fatalf("read %s: %v", v, err)
+		}
+		viewStr := string(view)
+		if strings.Contains(viewStr, "/new") {
+			t.Errorf("%s must not contain a Create link (/new) for a read-only resource", v)
+		}
+		if strings.Contains(viewStr, "/edit") {
+			t.Errorf("%s must not contain an Edit link (/edit) for a read-only resource", v)
+		}
+	}
+
+	list, _ := os.ReadFile(filepath.Join(dir, "internal/views/resources/order", "list.templ"))
+	if !strings.Contains(string(list), ">View</a>") {
+		t.Error("read-only list.templ must still render a View link")
+	}
+}
+
 func TestGenerateFormVisibleGuards(t *testing.T) {
 	dir := t.TempDir()
 	g := New(visitOnlyConfig(), dir)

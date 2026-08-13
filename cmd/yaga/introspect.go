@@ -36,11 +36,16 @@ type ForeignKeyInfo struct {
 	ForeignColumn string
 }
 
-// TableInfo describes a database table as discovered by schema introspection.
+// TableInfo describes a database table (or view) as discovered by schema
+// introspection.
 type TableInfo struct {
 	Name        string
 	Columns     []ColumnInfo
 	ForeignKeys []ForeignKeyInfo
+	// IsView marks an object discovered from the database's view catalog
+	// rather than its base tables. Views are surfaced as read-only resources
+	// (list/card/detail only, no create/update/delete forms).
+	IsView bool
 }
 
 // detectDriver determines the database driver from a DSN string. Postgres DSNs
@@ -94,12 +99,14 @@ func introspectSchema(db *sql.DB, driver string) ([]TableInfo, error) {
 	return introspectSQLite(db)
 }
 
-// introspectPostgres queries information_schema to discover tables, columns,
-// primary keys and foreign keys in a PostgreSQL database.
+// introspectPostgres queries information_schema to discover tables and views,
+// their columns, primary keys and foreign keys in a PostgreSQL database.
+// Views carry no primary keys or foreign keys (both discovered only for base
+// tables); they are marked IsView so they surface as read-only resources.
 func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 	rows, err := db.Query(`
-		SELECT table_name FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+		SELECT table_name, table_type FROM information_schema.tables
+		WHERE table_schema = 'public' AND table_type IN ('BASE TABLE', 'VIEW')
 		ORDER BY table_name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing tables: %w", err)
@@ -107,12 +114,14 @@ func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 	defer rows.Close()
 
 	var tableNames []string
+	tableViews := map[string]bool{}
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var name, tt string
+		if err := rows.Scan(&name, &tt); err != nil {
 			return nil, err
 		}
 		tableNames = append(tableNames, name)
+		tableViews[name] = tt == "VIEW"
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -120,7 +129,7 @@ func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 
 	var tables []TableInfo
 	for _, name := range tableNames {
-		ti := TableInfo{Name: name}
+		ti := TableInfo{Name: name, IsView: tableViews[name]}
 
 		colRows, err := db.Query(`
 			SELECT column_name, data_type, is_nullable, column_default
@@ -162,16 +171,18 @@ func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("listing PKs for %s: %w", name, err)
 		}
-		for pkRows.Next() {
-			var colName string
-			if err := pkRows.Scan(&colName); err != nil {
-				pkRows.Close()
-				return nil, err
-			}
-			for i := range ti.Columns {
-				if ti.Columns[i].Name == colName {
-					ti.Columns[i].IsPrimaryKey = true
-					break
+		if !ti.IsView {
+			for pkRows.Next() {
+				var colName string
+				if err := pkRows.Scan(&colName); err != nil {
+					pkRows.Close()
+					return nil, err
+				}
+				for i := range ti.Columns {
+					if ti.Columns[i].Name == colName {
+						ti.Columns[i].IsPrimaryKey = true
+						break
+					}
 				}
 			}
 		}
@@ -195,13 +206,15 @@ func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
 		}
-		for fkRows.Next() {
-			var fk ForeignKeyInfo
-			if err := fkRows.Scan(&fk.Column, &fk.ForeignTable, &fk.ForeignColumn); err != nil {
-				fkRows.Close()
-				return nil, err
+		if !ti.IsView {
+			for fkRows.Next() {
+				var fk ForeignKeyInfo
+				if err := fkRows.Scan(&fk.Column, &fk.ForeignTable, &fk.ForeignColumn); err != nil {
+					fkRows.Close()
+					return nil, err
+				}
+				ti.ForeignKeys = append(ti.ForeignKeys, fk)
 			}
-			ti.ForeignKeys = append(ti.ForeignKeys, fk)
 		}
 		fkRows.Close()
 		if err := fkRows.Err(); err != nil {
@@ -220,8 +233,8 @@ func introspectPostgres(db *sql.DB) ([]TableInfo, error) {
 // loose placeholder parsing.
 func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 	rows, err := db.Query(`
-		SELECT table_name FROM INFORMATION_SCHEMA.TABLES
-		WHERE table_type = 'BASE TABLE' AND table_schema = SCHEMA_NAME()
+		SELECT table_name, table_type FROM INFORMATION_SCHEMA.TABLES
+		WHERE table_type IN ('BASE TABLE', 'VIEW') AND table_schema = SCHEMA_NAME()
 		ORDER BY table_name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing tables: %w", err)
@@ -229,12 +242,14 @@ func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 	defer rows.Close()
 
 	var tableNames []string
+	tableViews := map[string]bool{}
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var name, tt string
+		if err := rows.Scan(&name, &tt); err != nil {
 			return nil, err
 		}
 		tableNames = append(tableNames, name)
+		tableViews[name] = tt == "VIEW"
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -242,7 +257,7 @@ func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 
 	var tables []TableInfo
 	for _, name := range tableNames {
-		ti := TableInfo{Name: name}
+		ti := TableInfo{Name: name, IsView: tableViews[name]}
 
 		colRows, err := db.Query(`
 			SELECT column_name, data_type, is_nullable, column_default
@@ -271,61 +286,24 @@ func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 			return nil, err
 		}
 
-		pkRows, err := db.Query(`
-			SELECT kcu.column_name
-			FROM INFORMATION_SCHEMA.table_constraints tc
-			JOIN INFORMATION_SCHEMA.key_column_usage kcu
-				ON tc.constraint_name = kcu.constraint_name
-				AND tc.table_schema = kcu.table_schema
-			WHERE tc.table_name = $1
-				AND tc.constraint_type = 'PRIMARY KEY'
-				AND tc.table_schema = SCHEMA_NAME()
-			ORDER BY kcu.ordinal_position`, name)
-		if err != nil {
-			return nil, fmt.Errorf("listing PKs for %s: %w", name, err)
-		}
-		for pkRows.Next() {
-			var colName string
-			if err := pkRows.Scan(&colName); err != nil {
-				pkRows.Close()
-				return nil, err
-			}
-			for i := range ti.Columns {
-				if ti.Columns[i].Name == colName {
-					ti.Columns[i].IsPrimaryKey = true
-					break
-				}
-			}
-		}
-		pkRows.Close()
-		if err := pkRows.Err(); err != nil {
-			return nil, err
-		}
-
-		// Tables without a declared PRIMARY KEY still often have an IDENTITY
-		// column that acts as the row key (e.g. legacy MSSQL schemas). Treat
-		// identity columns as the primary key so yaga keys routes on them
-		// and omits them from INSERT/UPDATE. A declared PK takes precedence.
-		hasPK := false
-		for i := range ti.Columns {
-			if ti.Columns[i].IsPrimaryKey {
-				hasPK = true
-				break
-			}
-		}
-		if !hasPK {
-			idRows, err := db.Query(`
-				SELECT c.name
-				FROM sys.columns c
-				JOIN sys.tables t ON t.object_id = c.object_id
-				WHERE t.name = $1 AND c.is_identity = 1`, name)
+		if !ti.IsView {
+			pkRows, err := db.Query(`
+				SELECT kcu.column_name
+				FROM INFORMATION_SCHEMA.table_constraints tc
+				JOIN INFORMATION_SCHEMA.key_column_usage kcu
+					ON tc.constraint_name = kcu.constraint_name
+					AND tc.table_schema = kcu.table_schema
+				WHERE tc.table_name = $1
+					AND tc.constraint_type = 'PRIMARY KEY'
+					AND tc.table_schema = SCHEMA_NAME()
+				ORDER BY kcu.ordinal_position`, name)
 			if err != nil {
-				return nil, fmt.Errorf("listing identity columns for %s: %w", name, err)
+				return nil, fmt.Errorf("listing PKs for %s: %w", name, err)
 			}
-			for idRows.Next() {
+			for pkRows.Next() {
 				var colName string
-				if err := idRows.Scan(&colName); err != nil {
-					idRows.Close()
+				if err := pkRows.Scan(&colName); err != nil {
+					pkRows.Close()
 					return nil, err
 				}
 				for i := range ti.Columns {
@@ -335,35 +313,74 @@ func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 					}
 				}
 			}
-			idRows.Close()
-			if err := idRows.Err(); err != nil {
+			pkRows.Close()
+			if err := pkRows.Err(); err != nil {
 				return nil, err
 			}
-		}
 
-		fkRows, err := db.Query(`
-			SELECT fk_col.name AS column_name, rt.name AS foreign_table, rc.name AS foreign_column
-			FROM sys.foreign_keys fk
-			JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
-			JOIN sys.tables t ON t.object_id = fk.parent_object_id
-			JOIN sys.columns fk_col ON fk_col.object_id = fkc.parent_object_id AND fk_col.column_id = fkc.parent_column_id
-			JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
-			JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
-			WHERE t.name = $1`, name)
-		if err != nil {
-			return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
-		}
-		for fkRows.Next() {
-			var fk ForeignKeyInfo
-			if err := fkRows.Scan(&fk.Column, &fk.ForeignTable, &fk.ForeignColumn); err != nil {
-				fkRows.Close()
+			// Tables without a declared PRIMARY KEY still often have an IDENTITY
+			// column that acts as the row key (e.g. legacy MSSQL schemas). Treat
+			// identity columns as the primary key so yaga keys routes on them
+			// and omits them from INSERT/UPDATE. A declared PK takes precedence.
+			hasPK := false
+			for i := range ti.Columns {
+				if ti.Columns[i].IsPrimaryKey {
+					hasPK = true
+					break
+				}
+			}
+			if !hasPK {
+				idRows, err := db.Query(`
+					SELECT c.name
+					FROM sys.columns c
+					JOIN sys.tables t ON t.object_id = c.object_id
+					WHERE t.name = $1 AND c.is_identity = 1`, name)
+				if err != nil {
+					return nil, fmt.Errorf("listing identity columns for %s: %w", name, err)
+				}
+				for idRows.Next() {
+					var colName string
+					if err := idRows.Scan(&colName); err != nil {
+						idRows.Close()
+						return nil, err
+					}
+					for i := range ti.Columns {
+						if ti.Columns[i].Name == colName {
+							ti.Columns[i].IsPrimaryKey = true
+							break
+						}
+					}
+				}
+				idRows.Close()
+				if err := idRows.Err(); err != nil {
+					return nil, err
+				}
+			}
+
+			fkRows, err := db.Query(`
+				SELECT fk_col.name AS column_name, rt.name AS foreign_table, rc.name AS foreign_column
+				FROM sys.foreign_keys fk
+				JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
+				JOIN sys.tables t ON t.object_id = fk.parent_object_id
+				JOIN sys.columns fk_col ON fk_col.object_id = fkc.parent_object_id AND fk_col.column_id = fkc.parent_column_id
+				JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
+				JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id AND rc.column_id = fkc.referenced_column_id
+				WHERE t.name = $1`, name)
+			if err != nil {
+				return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
+			}
+			for fkRows.Next() {
+				var fk ForeignKeyInfo
+				if err := fkRows.Scan(&fk.Column, &fk.ForeignTable, &fk.ForeignColumn); err != nil {
+					fkRows.Close()
+					return nil, err
+				}
+				ti.ForeignKeys = append(ti.ForeignKeys, fk)
+			}
+			fkRows.Close()
+			if err := fkRows.Err(); err != nil {
 				return nil, err
 			}
-			ti.ForeignKeys = append(ti.ForeignKeys, fk)
-		}
-		fkRows.Close()
-		if err := fkRows.Err(); err != nil {
-			return nil, err
 		}
 
 		tables = append(tables, ti)
@@ -372,21 +389,25 @@ func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 }
 
 // introspectSQLite queries sqlite_master and PRAGMA statements to discover
-// tables, columns, primary keys and foreign keys in a SQLite database.
+// tables and views, their columns, primary keys and foreign keys in a SQLite
+// database. Views carry no primary keys or foreign keys (both discovered only
+// for base tables); they are marked IsView so they surface as read-only.
 func introspectSQLite(db *sql.DB) ([]TableInfo, error) {
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	rows, err := db.Query(`SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("listing tables: %w", err)
 	}
 	defer rows.Close()
 
 	var tableNames []string
+	tableViews := map[string]bool{}
 	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
+		var name, tt string
+		if err := rows.Scan(&name, &tt); err != nil {
 			return nil, err
 		}
 		tableNames = append(tableNames, name)
+		tableViews[name] = tt == "view"
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -394,7 +415,7 @@ func introspectSQLite(db *sql.DB) ([]TableInfo, error) {
 
 	var tables []TableInfo
 	for _, name := range tableNames {
-		ti := TableInfo{Name: name}
+		ti := TableInfo{Name: name, IsView: tableViews[name]}
 
 		colRows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, name))
 		if err != nil {
@@ -422,23 +443,25 @@ func introspectSQLite(db *sql.DB) ([]TableInfo, error) {
 			return nil, err
 		}
 
-		fkRows, err := db.Query(fmt.Sprintf(`PRAGMA foreign_key_list(%s)`, name))
-		if err != nil {
-			return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
-		}
-		for fkRows.Next() {
-			var fk ForeignKeyInfo
-			var id, seq int
-			var onUpdate, onDelete, match string
-			if err := fkRows.Scan(&id, &seq, &fk.ForeignTable, &fk.Column, &fk.ForeignColumn, &onUpdate, &onDelete, &match); err != nil {
-				fkRows.Close()
+		if !ti.IsView {
+			fkRows, err := db.Query(fmt.Sprintf(`PRAGMA foreign_key_list(%s)`, name))
+			if err != nil {
+				return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
+			}
+			for fkRows.Next() {
+				var fk ForeignKeyInfo
+				var id, seq int
+				var onUpdate, onDelete, match string
+				if err := fkRows.Scan(&id, &seq, &fk.ForeignTable, &fk.Column, &fk.ForeignColumn, &onUpdate, &onDelete, &match); err != nil {
+					fkRows.Close()
+					return nil, err
+				}
+				ti.ForeignKeys = append(ti.ForeignKeys, fk)
+			}
+			fkRows.Close()
+			if err := fkRows.Err(); err != nil {
 				return nil, err
 			}
-			ti.ForeignKeys = append(ti.ForeignKeys, fk)
-		}
-		fkRows.Close()
-		if err := fkRows.Err(); err != nil {
-			return nil, err
 		}
 
 		tables = append(tables, ti)
@@ -564,12 +587,34 @@ func findTableByName(tables []TableInfo, name string) *TableInfo {
 	return nil
 }
 
+// hasTable reports whether a real (non-view) table with the given name exists.
+// Views named e.g. "users" / "roles" must never be mistaken for the auth tables.
+func hasTable(tables []TableInfo, name string) bool {
+	for _, ti := range tables {
+		if ti.Name == name && !ti.IsView {
+			return true
+		}
+	}
+	return false
+}
+
 // findPKColumn returns the primary key column name for a table. Returns "id"
-// as a fallback.
+// as a fallback. Views carry no primary keys, so they fall back to a column
+// literally named "id" when present, else their first column.
 func findPKColumn(ti TableInfo) string {
 	for _, c := range ti.Columns {
 		if c.IsPrimaryKey {
 			return c.Name
+		}
+	}
+	if ti.IsView {
+		for _, c := range ti.Columns {
+			if strings.EqualFold(c.Name, "id") {
+				return c.Name
+			}
+		}
+		if len(ti.Columns) > 0 {
+			return ti.Columns[0].Name
 		}
 	}
 	return "id"
@@ -590,6 +635,19 @@ func idColumnName(ti TableInfo) string {
 	return ""
 }
 
+// viewKeyIsInt reports whether a view's resolved key column maps to an integer
+// field type. The generated detail handler casts the key to an int, so only
+// integer-keyed views can get a detail ("view form") that compiles.
+func viewKeyIsInt(ti TableInfo) bool {
+	key := findPKColumn(ti)
+	for _, c := range ti.Columns {
+		if c.Name == key {
+			return mapDBTypeToFieldType(c.DBType) == "integer"
+		}
+	}
+	return false
+}
+
 // placeholder returns the SQL bind placeholder for the given 1-based argument
 // position. Postgres uses $N; sqlite uses "?".
 func placeholder(n int, driver string) string {
@@ -603,8 +661,8 @@ func placeholder(n int, driver string) string {
 // database. If either is missing, both are created with a driver-appropriate
 // DDL, default roles are seeded, and an admin user is inserted.
 func ensureAuthTables(db *sql.DB, driver string, tables []TableInfo) error {
-	hasUsers := findTableByName(tables, "users") != nil
-	hasRoles := findTableByName(tables, "roles") != nil
+	hasUsers := hasTable(tables, "users")
+	hasRoles := hasTable(tables, "roles")
 
 	if hasUsers && hasRoles {
 		return nil
@@ -919,14 +977,31 @@ func writeResourceYAML(b *strings.Builder, ti TableInfo, allTables []TableInfo, 
 		b.WriteString(fmt.Sprintf("      default_sort: -%s\n", defaultSort))
 	}
 
-	// detail section
-	b.WriteString("    detail:\n")
-	b.WriteString(fmt.Sprintf("      query: Get%s\n", toSingularPascal(ti.Name)))
-	b.WriteString("      params:\n")
-	b.WriteString(fmt.Sprintf("        id: \"{record.%s}\"\n", pk))
-	b.WriteString("      fields:\n")
-	for _, c := range ti.Columns {
-		writeFieldYAML(b, c, ti, allTables, driver, false, "        ")
+	// detail section. Views are read-only, so their detail ("view form") is
+	// only emitted when the key column is integer-typed — the generated detail
+	// handler casts the key to an int, so a text/non-integer key column would
+	// not compile against the sqlc Get query.
+	emitDetail := !ti.IsView || viewKeyIsInt(ti)
+	if emitDetail {
+		b.WriteString("    detail:\n")
+		b.WriteString(fmt.Sprintf("      query: Get%s\n", toSingularPascal(ti.Name)))
+		b.WriteString("      params:\n")
+		b.WriteString(fmt.Sprintf("        id: \"{record.%s}\"\n", pk))
+		b.WriteString("      fields:\n")
+		for _, c := range ti.Columns {
+			writeFieldYAML(b, c, ti, allTables, driver, false, "        ")
+		}
+	}
+
+	if ti.IsView {
+		// Views are surfaced as read-only resources: a card view is provided,
+		// but no create/update/delete form (the view is not writable).
+		b.WriteString("    card:\n")
+		b.WriteString("      fields:\n")
+		for _, c := range ti.Columns {
+			writeFieldYAML(b, c, ti, allTables, driver, true, "        ")
+		}
+		return
 	}
 
 	// form section
@@ -1243,60 +1318,64 @@ func generateQueries(tables []TableInfo, driver string) map[string]string {
 		}
 		b.WriteString(fmt.Sprintf("\nWHERE t.%s = %s;\n\n", pk, placeholder(1, driver)))
 
-		// Create
-		var insertCols []string
-		for _, c := range ti.Columns {
-			if c.IsPrimaryKey && driver != "sqlite" {
-				continue
+		// Views are read-only: omit the Create/Update/Delete queries (the
+		// view is not writable; sqlc would also fail to infer write DML on it).
+		if !ti.IsView {
+			// Create
+			var insertCols []string
+			for _, c := range ti.Columns {
+				if c.IsPrimaryKey && driver != "sqlite" {
+					continue
+				}
+				insertCols = append(insertCols, c.Name)
 			}
-			insertCols = append(insertCols, c.Name)
-		}
-		b.WriteString(fmt.Sprintf("-- name: Create%s :one\n", singularName))
-		b.WriteString(fmt.Sprintf("INSERT INTO %s (", ti.Name))
-		for i, col := range insertCols {
-			if i > 0 {
-				b.WriteString(", ")
+			b.WriteString(fmt.Sprintf("-- name: Create%s :one\n", singularName))
+			b.WriteString(fmt.Sprintf("INSERT INTO %s (", ti.Name))
+			for i, col := range insertCols {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(col)
 			}
-			b.WriteString(col)
-		}
-		b.WriteString(")\nVALUES (")
-		for i := range insertCols {
-			if i > 0 {
-				b.WriteString(", ")
+			b.WriteString(")\nVALUES (")
+			for i := range insertCols {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(placeholder(i+1, driver))
 			}
-			b.WriteString(placeholder(i+1, driver))
-		}
-		if driver != "sqlite" {
-			b.WriteString(")\nRETURNING *;\n\n")
-		} else {
-			b.WriteString(");\n\n")
-		}
+			if driver != "sqlite" {
+				b.WriteString(")\nRETURNING *;\n\n")
+			} else {
+				b.WriteString(");\n\n")
+			}
 
-		// Update
-		b.WriteString(fmt.Sprintf("-- name: Update%s :one\n", singularName))
-		b.WriteString(fmt.Sprintf("UPDATE %s SET\n", ti.Name))
-		argN := 2
-		for i, c := range ti.Columns {
-			if c.IsPrimaryKey {
-				continue
+			// Update
+			b.WriteString(fmt.Sprintf("-- name: Update%s :one\n", singularName))
+			b.WriteString(fmt.Sprintf("UPDATE %s SET\n", ti.Name))
+			argN := 2
+			for i, c := range ti.Columns {
+				if c.IsPrimaryKey {
+					continue
+				}
+				comma := ","
+				if i == len(ti.Columns)-1 {
+					comma = ""
+				}
+				b.WriteString(fmt.Sprintf("    %s = %s%s\n", c.Name, placeholder(argN, driver), comma))
+				argN++
 			}
-			comma := ","
-			if i == len(ti.Columns)-1 {
-				comma = ""
+			b.WriteString(fmt.Sprintf("WHERE %s = %s", pk, placeholder(1, driver)))
+			if driver != "sqlite" {
+				b.WriteString("\nRETURNING *;\n\n")
+			} else {
+				b.WriteString(";\n\n")
 			}
-			b.WriteString(fmt.Sprintf("    %s = %s%s\n", c.Name, placeholder(argN, driver), comma))
-			argN++
-		}
-		b.WriteString(fmt.Sprintf("WHERE %s = %s", pk, placeholder(1, driver)))
-		if driver != "sqlite" {
-			b.WriteString("\nRETURNING *;\n\n")
-		} else {
-			b.WriteString(";\n\n")
-		}
 
-		// Delete
-		b.WriteString(fmt.Sprintf("-- name: Delete%s :exec\n", singularName))
-		b.WriteString(fmt.Sprintf("DELETE FROM %s WHERE %s = %s;\n\n", ti.Name, pk, placeholder(1, driver)))
+			// Delete
+			b.WriteString(fmt.Sprintf("-- name: Delete%s :exec\n", singularName))
+			b.WriteString(fmt.Sprintf("DELETE FROM %s WHERE %s = %s;\n\n", ti.Name, pk, placeholder(1, driver)))
+		}
 
 		queries[ti.Name+".sql"] = b.String()
 	}
@@ -1391,8 +1470,8 @@ func cmdInitFromDB(configPath, outDir, dsn, adminPassword string, force bool) er
 		fmt.Println("No tables found in database.")
 	}
 
-	hasRoles := findTableByName(tables, "roles") != nil
-	hasUsers := findTableByName(tables, "users") != nil
+	hasRoles := hasTable(tables, "roles")
+	hasUsers := hasTable(tables, "users")
 
 	if err := ensureAuthTables(db, driver, tables); err != nil {
 		return fmt.Errorf("ensuring auth tables: %w", err)
