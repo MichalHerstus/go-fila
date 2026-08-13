@@ -49,7 +49,7 @@ make                                                           # tailwind + sqlc
 - `generate` runs `sqlc generate` + tailwind itself but their failure is
   **non-fatal** — re-run `make` afterwards; it redoes them in the right order.
   Tailwind needs the standalone binary: `make get-tailwind` downloads it to
-  `.tools/`, then `make TAILWIND=$(CURDIR)/.tools/tailwindcss css`.
+  `.tools/`, and `make css` picks it up automatically.
 - `make` targets: `build` (default), `css`, `sqlc`, `templ`, `tidy`,
   `get-tailwind`, `run`, `package`, `clean`.
 - Sanity-check a config without building: `./yaga validate --verbose`

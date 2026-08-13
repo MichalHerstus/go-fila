@@ -37,11 +37,11 @@ PORT ?= 8080
 # Log level for the dashboard (passed to the binary as --log): full or err.
 LOG ?= full
 
-# Tailwind CSS standalone binary. Defaults to "tailwindcss" on PATH; point it
-# at the binary downloaded by the get-tailwind target to build without a JS
-# toolchain:
-#   make TAILWIND=$(CURDIR)/.tools/tailwindcss css
-TAILWIND ?= tailwindcss
+# Tailwind CSS standalone binary. Defaults to the binary downloaded by the
+# get-tailwind target into .tools/, falling back to "tailwindcss" on PATH.
+# Override to point at any binary:
+#   make TAILWIND=/path/to/tailwindcss css
+TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)
 
 # Pinned Tailwind CSS standalone release used by the get-tailwind target.
 TAILWIND_VERSION ?= ` + tailwindStandaloneVersion + `
@@ -79,7 +79,7 @@ get-tailwind:
 	curl -sL -o .tools/tailwindcss "https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/$$file" ; \
 	chmod +x .tools/tailwindcss ; \
 	echo "Downloaded .tools/tailwindcss" ; \
-	echo "Next: make TAILWIND=$(CURDIR)/.tools/tailwindcss css"
+	echo "Downloaded .tools/tailwindcss; make css/build will now use it automatically"
 
 # Regenerate the sqlc query code into internal/data.
 sqlc:

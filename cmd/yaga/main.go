@@ -475,13 +475,13 @@ func cmdGenerate() {
 	if err := gen.RunTailwind(); err != nil {
 		fmt.Printf("Warning: Tailwind build failed: %v\n", err)
 		fmt.Println("  Make sure the Tailwind CSS standalone binary is installed.")
-		fmt.Println("  You can run 'make get-tailwind' then 'make TAILWIND=$(CURDIR)/.tools/tailwindcss css' manually later.")
+		fmt.Println("  You can run 'make get-tailwind' then 'make css' manually later.")
 	}
 
 	fmt.Println("")
 	fmt.Println("Next steps:")
 	fmt.Println("  1. cd", outDir)
-	fmt.Println("  2. make css        (or: make get-tailwind && make TAILWIND=$(CURDIR)/.tools/tailwindcss css)")
+	fmt.Println("  2. make css        (or: make get-tailwind && make css)")
 	fmt.Println("  3. If sqlc failed above: sqlc generate")
 	fmt.Println("  4. go mod tidy")
 	fmt.Println("  5. go build ./...")

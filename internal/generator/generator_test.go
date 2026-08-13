@@ -1945,14 +1945,14 @@ func TestGenerateMakefileNoNPM(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		`TAILWIND ?= tailwindcss`,
+		`TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`,
 		`TAILWIND_VERSION ?= ` + tailwindStandaloneVersion,
 		`build: css sqlc templ`,
 		`css:`,
 		`$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify`,
 		`get-tailwind:`,
 		`https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/$$file`,
-		`make TAILWIND=$(CURDIR)/.tools/tailwindcss css`,
+		`make css/build will now use it automatically`,
 	} {
 		if !strings.Contains(mkStr, want) {
 			t.Errorf("Makefile missing %q\n--- generated:\n%s", want, mkStr)

@@ -607,10 +607,10 @@ Chart.js **embedded** into yaga via `//go:embed`.
   `tailwind.config.js` + `styles.css`). Rewritten generated `Makefile`
   (`makefile.go`): remove `deps`/`npm install`; `build: css sqlc templ`; `css:`
   runs `$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css
-  --minify` with `TAILWIND ?= tailwindcss`; new optional `get-tailwind` target maps
+  --minify` with `TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`; new optional `get-tailwind` target maps
   `uname -s/-m` (linux/macos × x64/arm64; Windows excluded as today) and curls the pinned
-  **v3.4.x** standalone binary to `.tools/tailwindcss`, printing the
-  `make TAILWIND=$(CURDIR)/.tools/tailwindcss css` usage.
+  **v3.4.x** standalone binary to `.tools/tailwindcss`, which the `css` target then uses
+  automatically (falling back to a `tailwindcss` on PATH).
 - **Docs + hints**: `cmdGenerate` warning/Next-steps drop npm (`make css` /
   install the standalone binary); update `AGENTS.md`, `README.md` (prereq table),
   `SPEC.md`, `AGENTS_for_generated_dashboard.md`.
