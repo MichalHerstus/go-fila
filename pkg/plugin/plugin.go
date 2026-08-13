@@ -81,6 +81,7 @@ type Manifest struct {
 	Navigation      []NavigationGroup
 	HookAttachments []HookAttachment
 	SQLFiles        map[string]string
+	HookSources     map[string]string
 }
 
 // Panel is the builder a plugin registers contributions into. It accumulates a
@@ -96,7 +97,8 @@ type Panel struct {
 func NewPanel() *Panel {
 	return &Panel{
 		manifest: Manifest{
-			SQLFiles: map[string]string{},
+			SQLFiles:    map[string]string{},
+			HookSources: map[string]string{},
 		},
 		resNames:  map[string]bool{},
 		pageNames: map[string]bool{},
@@ -147,6 +149,23 @@ func (p *Panel) AddSQLFile(name, content string) {
 	p.manifest.SQLFiles[name] = content
 }
 
+// AddHookSource contributes a `package hooks` Go source file that the loader
+// writes into the generated app's internal/hooks/ directory, compiled together
+// with the generated Scope struct and stubs. Plugins use it to provide real
+// implementations for the fn hooks they attach via AddHookToResource (the
+// loader tracks the file's function names and skips stub generation for them).
+// name must be a bare "<file>.go" (no directories) and must not be "hooks.go",
+// which is reserved for the generated file. The content must declare
+// `package hooks` and may reference the generated Scope type from the same
+// package.
+func (p *Panel) AddHookSource(name, content string) error {
+	if err := ValidateHookSourceName(name); err != nil {
+		return err
+	}
+	p.manifest.HookSources[name] = content
+	return nil
+}
+
 // AddHookToResource records that a hook should be attached to a resource's
 // form action (create/update/delete) or custom action, before or after it.
 // The target resource must exist in the merged config; the loader resolves it
@@ -181,4 +200,21 @@ func ValidateSQLFileName(name string) error {
 		return nil
 	}
 	return fmt.Errorf("plugin: sql file %q must be under queries/ or migrations/ with a .sql extension", name)
+}
+
+// ValidateHookSourceName reports whether name is a valid hook source file
+// location: a bare "<file>.go" with no path separators, and not the reserved
+// "hooks.go" (which the loader generates with the Scope struct and stubs). It
+// is used by the loader to give a helpful error before writing files.
+func ValidateHookSourceName(name string) error {
+	if strings.Contains(name, "/") || strings.Contains(name, "\\") {
+		return fmt.Errorf("plugin: hook source %q must be a bare file name (no directories)", name)
+	}
+	if !strings.HasSuffix(name, ".go") {
+		return fmt.Errorf("plugin: hook source %q must end in .go", name)
+	}
+	if name == "hooks.go" {
+		return fmt.Errorf("plugin: hook source %q is reserved for the generated file", name)
+	}
+	return nil
 }

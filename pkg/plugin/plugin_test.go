@@ -38,6 +38,19 @@ func TestPanelBuilder(t *testing.T) {
 		t.Fatal("expected error for invalid when")
 	}
 
+	if err := p.AddHookSource("audit_hooks.go", "package hooks\n"); err != nil {
+		t.Fatalf("AddHookSource: %v", err)
+	}
+	if err := p.AddHookSource("sub/hooks.go", "x"); err == nil {
+		t.Fatal("expected error for hook source with a directory")
+	}
+	if err := p.AddHookSource("hooks.go", "x"); err == nil {
+		t.Fatal("expected error for reserved hook source name")
+	}
+	if err := p.AddHookSource("hooks.txt", "x"); err == nil {
+		t.Fatal("expected error for non-go hook source")
+	}
+
 	m := p.Manifest()
 	if len(m.Resources) != 1 || len(m.Pages) != 1 || len(m.Navigation) != 1 {
 		t.Fatalf("unexpected manifest: %+v", m)
@@ -45,7 +58,7 @@ func TestPanelBuilder(t *testing.T) {
 	if m.Pages[0].Path != "/P" {
 		t.Fatalf("expected default page path /P, got %q", m.Pages[0].Path)
 	}
-	if len(m.SQLFiles) != 2 || len(m.HookAttachments) != 1 {
+	if len(m.SQLFiles) != 2 || len(m.HookAttachments) != 1 || len(m.HookSources) != 1 {
 		t.Fatalf("unexpected manifest extras: %+v", m)
 	}
 }
@@ -69,6 +82,7 @@ func TestManifestJSONRoundTrip(t *testing.T) {
 		Actions: []Action{{Name: "prune", Query: "DELETE FROM audit_log WHERE created_at < $1"}},
 	})
 	p.AddHookToResource("AuditLog", "create", "after", Hook{Name: "h", SQL: "SELECT 1"})
+	p.AddHookSource("audit_hooks.go", "package hooks\nfunc LogCustomerCreated(ctx context.Context, db *sql.DB, s Scope) error { return nil }\n")
 
 	// The manifest must round-trip through JSON using Go field names, which is
 	// how the loader decodes the plugin subprocess output.
@@ -94,6 +108,9 @@ func TestManifestJSONRoundTrip(t *testing.T) {
 	}
 	if len(out.HookAttachments) != 1 || out.HookAttachments[0].Hook.SQL != "SELECT 1" {
 		t.Fatalf("round-trip hook mismatch: %+v", out.HookAttachments)
+	}
+	if len(out.HookSources) != 1 || out.HookSources["audit_hooks.go"] == "" {
+		t.Fatalf("round-trip hook source mismatch: %+v", out.HookSources)
 	}
 }
 

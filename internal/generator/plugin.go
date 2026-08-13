@@ -90,8 +90,8 @@ func (g *Generator) loadPlugin(p types.PluginConfig) error {
 		return err
 	}
 	if g.Verbose {
-		fmt.Printf("plugin %q loaded: %d resource(s), %d page(s), %d nav group(s), %d SQL file(s), %d hook(s)\n",
-			p.Name, len(m.Resources), len(m.Pages), len(m.Navigation), len(m.SQLFiles), len(m.HookAttachments))
+		fmt.Printf("plugin %q loaded: %d resource(s), %d page(s), %d nav group(s), %d SQL file(s), %d hook attachment(s), %d hook source(s)\n",
+			p.Name, len(m.Resources), len(m.Pages), len(m.Navigation), len(m.SQLFiles), len(m.HookAttachments), len(m.HookSources))
 	}
 	return nil
 }
@@ -274,13 +274,40 @@ func runShim(dir string) error {
 }
 
 // mergeManifest merges a decoded plugin manifest into the config: resources,
-// pages and navigation groups are appended; hook attachments are resolved
-// against the (merged) resource set; SQL files are written into the output
-// dir, never overwriting existing files. fn hooks from plugins are rejected
-// (they require M5).
+// pages and navigation groups are appended; hook sources are written into the
+// output dir's internal/hooks/ and their function names tracked so generateHooks
+// skips stubs for them; hook attachments are resolved against the (merged)
+// resource set; SQL files are written into the output dir, never overwriting
+// existing files. fn hooks from plugins are allowed when the fn name is backed
+// by one of the plugin's hook sources.
 // Params: p (the plugin declaration, for error messages), m (the manifest).
 // Returns: an error describing the first merge problem.
 func (g *Generator) mergeManifest(p types.PluginConfig, m pluginapi.Manifest) error {
+	if g.pluginFnNames == nil {
+		g.pluginFnNames = map[string]bool{}
+		g.pluginHookFiles = map[string]string{}
+	}
+
+	for name, content := range m.HookSources {
+		if err := pluginapi.ValidateHookSourceName(name); err != nil {
+			return fmt.Errorf("plugin %q: %w", p.Name, err)
+		}
+		g.pluginHookFiles[name] = content
+		for _, fn := range hookFuncNames(content) {
+			g.pluginFnNames[fn] = true
+		}
+		dst := filepath.Join(g.OutDir, "internal/hooks", name)
+		if _, err := os.Stat(dst); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return fmt.Errorf("plugin %q: creating hooks dir: %w", p.Name, err)
+		}
+		if err := os.WriteFile(dst, []byte(content), 0644); err != nil {
+			return fmt.Errorf("plugin %q: writing %s: %w", p.Name, name, err)
+		}
+	}
+
 	for _, r := range m.Resources {
 		if err := g.resourceNameTaken(r.Name); err != nil {
 			return err
@@ -319,6 +346,31 @@ func (g *Generator) mergeManifest(p types.PluginConfig, m pluginapi.Manifest) er
 	return nil
 }
 
+// hookFuncNames scans a plugin hook source for package-level function
+// declarations and returns their names. These identify fn hooks whose
+// implementation the plugin provides, so generateHooks must not emit a stub
+// for them (a stub would be a duplicate definition in the same package).
+// Methods (func with a receiver) and generic functions are skipped.
+// Params: src (the hook source file content).
+// Returns: the function names in declaration order.
+func hookFuncNames(src string) []string {
+	var fns []string
+	for _, line := range strings.Split(src, "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "func ")
+		if !ok {
+			continue
+		}
+		name, _, _ := strings.Cut(rest, "(")
+		name = strings.TrimSpace(name)
+		if name == "" || strings.HasPrefix(name, "(") || strings.ContainsAny(name, "[]*{}") {
+			continue
+		}
+		fns = append(fns, name)
+	}
+	return fns
+}
+
 // resourceNameTaken returns an error when a resource with the given name
 // already exists in the config (from YAML or an earlier plugin).
 func (g *Generator) resourceNameTaken(name string) error {
@@ -343,16 +395,18 @@ func (g *Generator) pageNameTaken(name string) error {
 
 // attachHook resolves one hook attachment against the merged resource set and
 // appends the hook to the target action's before/after list. fn hooks are
-// rejected (M5). The hook's SQL binds the current record id as $1; proc hooks
-// bind it the same way (postgres/mssql, ignored on sqlite).
+// allowed when the fn name is backed by a plugin hook source (AddHookSource);
+// an fn hook without a matching source is fatal. The hook's SQL binds the
+// current record id as $1; proc hooks bind it the same way (postgres/mssql,
+// ignored on sqlite).
 // Params: pluginName (for error messages), att (the attachment).
-// Returns: an error for a missing resource/action or a fn hook.
+// Returns: an error for a missing resource/action or an unbacked fn hook.
 func (g *Generator) attachHook(pluginName string, att pluginapi.HookAttachment) error {
-	if att.Hook.Fn != "" {
-		return fmt.Errorf("plugin %q: fn hook %q requires M5 — use sql", pluginName, att.Hook.Fn)
+	if att.Hook.Fn != "" && !g.pluginFnNames[att.Hook.Fn] {
+		return fmt.Errorf("plugin %q: fn hook %q has no matching hook source — add AddHookSource with the implementation, or use sql/proc", pluginName, att.Hook.Fn)
 	}
-	if att.Hook.SQL == "" && att.Hook.Proc == "" {
-		return fmt.Errorf("plugin %q: hook on %s.%s.%s must set sql or proc", pluginName, att.Resource, att.Action, att.When)
+	if att.Hook.SQL == "" && att.Hook.Proc == "" && att.Hook.Fn == "" {
+		return fmt.Errorf("plugin %q: hook on %s.%s.%s must set sql, proc or fn", pluginName, att.Resource, att.Action, att.When)
 	}
 	if att.Hook.Name == "" {
 		att.Hook.Name = pluginName + "_" + att.Action + "_" + att.When

@@ -12,7 +12,7 @@ import (
 )
 
 // pluginBaseConfig returns a minimal config with a Customer resource that has
-// a delete form action, used to test hook-attachment merge.
+// create and delete form actions, used to test hook-attachment merge.
 func pluginBaseConfig() *types.Config {
 	return &types.Config{
 		Version: "1",
@@ -22,6 +22,7 @@ func pluginBaseConfig() *types.Config {
 				Name:  "Customer",
 				Label: "Customer",
 				Form: &types.FormConfig{
+					Create: &types.FormAction{Query: "CreateCustomer", Fields: []types.Field{{Name: "name", Type: "text"}}},
 					Delete: &types.FormAction{Query: "DeleteCustomer"},
 				},
 			},
@@ -125,20 +126,45 @@ func TestMergeManifestMissingHookTarget(t *testing.T) {
 func TestMergeManifestMissingAction(t *testing.T) {
 	g := New(pluginBaseConfig(), t.TempDir())
 	m := auditManifest()
-	m.HookAttachments[0].Action = "create"
+	m.HookAttachments[0].Action = "update"
 	if err := g.mergeManifest(types.PluginConfig{Name: "audit"}, m); err == nil {
 		t.Fatal("expected error for missing hook target action")
 	}
 }
 
-func TestMergeManifestRejectsFnHook(t *testing.T) {
+func TestMergeManifestRejectsUnbackedFnHook(t *testing.T) {
 	g := New(pluginBaseConfig(), t.TempDir())
 	m := auditManifest()
 	m.HookAttachments[0].Hook = pluginapi.Hook{Name: "h", Fn: "MyHook"}
 	if err := g.mergeManifest(types.PluginConfig{Name: "audit"}, m); err == nil {
-		t.Fatal("expected error for fn hook from plugin")
-	} else if !strings.Contains(err.Error(), "M5") {
-		t.Fatalf("expected M5 rejection message, got: %v", err)
+		t.Fatal("expected error for fn hook without a hook source")
+	} else if !strings.Contains(err.Error(), "no matching hook source") {
+		t.Fatalf("expected missing-source error, got: %v", err)
+	}
+}
+
+func TestMergeManifestFnHookBackedBySource(t *testing.T) {
+	dir := t.TempDir()
+	g := New(pluginBaseConfig(), dir)
+	m := auditManifest()
+	m.HookSources = map[string]string{"audit_hooks.go": "package hooks\nfunc LogCustomerCreated(ctx context.Context, db *sql.DB, s Scope) error { return nil }\n"}
+	m.HookAttachments = []pluginapi.HookAttachment{
+		{Resource: "Customer", Action: "create", When: "after",
+			Hook: pluginapi.Hook{Name: "audit_customer_create", Fn: "LogCustomerCreated"}},
+	}
+	if err := g.mergeManifest(types.PluginConfig{Name: "audit"}, m); err != nil {
+		t.Fatalf("mergeManifest: %v", err)
+	}
+
+	cust := g.Config.Resources[0]
+	if cust.Form.Create.Hooks == nil || len(cust.Form.Create.Hooks.After) != 1 || cust.Form.Create.Hooks.After[0].Fn != "LogCustomerCreated" {
+		t.Fatalf("expected fn hook attached, got %+v", cust.Form.Create.Hooks)
+	}
+	if !g.pluginFnNames["LogCustomerCreated"] {
+		t.Fatal("expected LogCustomerCreated tracked as plugin-backed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal/hooks", "audit_hooks.go")); err != nil {
+		t.Errorf("hook source file not written: %v", err)
 	}
 }
 
@@ -258,6 +284,30 @@ func TestLoadAuditPluginIntegration(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(outDir, "sql", name)); err != nil {
 			t.Errorf("sql file %s not written: %v", name, err)
 		}
+	}
+
+	// Verify the fn hook was merged and backed by the plugin hook source.
+	cust := cfg.Resources[0]
+	if cust.Form.Create.Hooks == nil || len(cust.Form.Create.Hooks.After) != 1 || cust.Form.Create.Hooks.After[0].Fn != "LogCustomerCreated" {
+		t.Fatalf("expected after-create fn hook attached, got %+v", cust.Form.Create.Hooks)
+	}
+	hooksSrc, err := os.ReadFile(filepath.Join(outDir, "internal/hooks", "audit_hooks.go"))
+	if err != nil {
+		t.Fatalf("read audit_hooks.go: %v", err)
+	}
+	if !strings.Contains(string(hooksSrc), "func LogCustomerCreated(ctx context.Context, db *sql.DB, s Scope) error") {
+		t.Error("hook source must define LogCustomerCreated")
+	}
+	hooksGo, err := os.ReadFile(filepath.Join(outDir, "internal/hooks", "hooks.go"))
+	if err != nil {
+		t.Fatalf("read hooks.go: %v", err)
+	}
+	hooksStr := string(hooksGo)
+	if !strings.Contains(hooksStr, "type Scope struct") {
+		t.Error("hooks.go must define Scope for the plugin hook source")
+	}
+	if strings.Contains(hooksStr, "func LogCustomerCreated(") {
+		t.Error("hooks.go must not stub a plugin-backed fn hook")
 	}
 }
 

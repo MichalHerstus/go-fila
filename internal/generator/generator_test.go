@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/go-fila/go-fila/internal/types"
+	pluginapi "github.com/go-fila/go-fila/pkg/plugin"
 )
 
 // hookConfig returns a minimal config exercising hooks on create, delete and a
@@ -397,6 +398,133 @@ func TestGenerateHooks(t *testing.T) {
 		if !strings.Contains(hooksStr, want) {
 			t.Errorf("hooks.go missing %q", want)
 		}
+	}
+}
+
+func TestGeneratePluginFnHookSkippedStub(t *testing.T) {
+	cfg := hookConfig()
+	cfg.Resources[0].Actions[0].Hooks.After = append(cfg.Resources[0].Actions[0].Hooks.After,
+		types.Hook{Name: "audit_customer_create", Fn: "LogCustomerCreated"})
+
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	g.pluginFnNames = map[string]bool{"LogCustomerCreated": true}
+	g.pluginHookFiles = map[string]string{"audit_hooks.go": "package hooks\n"}
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	hooksGo, err := os.ReadFile(filepath.Join(dir, "internal/hooks", "hooks.go"))
+	if err != nil {
+		t.Fatalf("read hooks.go: %v", err)
+	}
+	hooksStr := string(hooksGo)
+	for _, want := range []string{
+		`type Scope struct`,
+		`func ValidateUserDomain(ctx context.Context, db *sql.DB, s Scope) error { return nil }`,
+		`func LogDeactivate(ctx context.Context, db *sql.DB, s Scope) error { return nil }`,
+	} {
+		if !strings.Contains(hooksStr, want) {
+			t.Errorf("hooks.go missing %q", want)
+		}
+	}
+	if strings.Contains(hooksStr, "func LogCustomerCreated(") {
+		t.Error("hooks.go must not stub a plugin-backed fn hook")
+	}
+
+	actions, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "actions.go"))
+	if err != nil {
+		t.Fatalf("read actions.go: %v", err)
+	}
+	actionsStr := string(actions)
+	if !strings.Contains(actionsStr, "hooks.LogCustomerCreated(r.Context(), db, scope)") {
+		t.Error("actions.go missing plugin fn hook call")
+	}
+}
+
+func TestGenerateHooksOnlyPluginSource(t *testing.T) {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{Name: "User", List: &types.ListConfig{Columns: []types.Column{{Name: "name", Label: "Name"}}}},
+		},
+	}
+
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	g.pluginHookFiles = map[string]string{"audit_hooks.go": "package hooks\n"}
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	hooksGo, err := os.ReadFile(filepath.Join(dir, "internal/hooks", "hooks.go"))
+	if err != nil {
+		t.Fatalf("read hooks.go: %v", err)
+	}
+	hooksStr := string(hooksGo)
+	if !strings.Contains(hooksStr, "type Scope struct") {
+		t.Error("hooks.go must emit Scope when a plugin hook source exists")
+	}
+	if strings.Contains(hooksStr, "func ") || strings.Contains(hooksStr, "import (") {
+		t.Error("hooks.go with no fn hooks must have no stubs and no imports")
+	}
+}
+
+func TestHookFuncNames(t *testing.T) {
+	src := `package hooks
+
+func LogCustomerCreated(ctx context.Context, db *sql.DB, s Scope) error { return nil }
+
+func helper(x int) int { return x }
+
+func (p *thing) method() error { return nil }
+
+func F[T any](x T) {}
+
+func Exported(y string) {}
+`
+	got := hookFuncNames(src)
+	want := []string{"LogCustomerCreated", "helper", "Exported"}
+	if len(got) != len(want) {
+		t.Fatalf("hookFuncNames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("hookFuncNames = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestAttachHookRequiresSourceForFn(t *testing.T) {
+	g := New(&types.Config{}, t.TempDir())
+	err := g.attachHook("audit", pluginapi.HookAttachment{
+		Resource: "User",
+		Action:   "create",
+		When:     "after",
+		Hook:     pluginapi.Hook{Fn: "LogCustomerCreated"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no matching hook source") {
+		t.Fatalf("expected missing-hook-source error, got %v", err)
+	}
+
+	cfg := &types.Config{Resources: []types.Resource{{
+		Name: "User",
+		Form: &types.FormConfig{Create: &types.FormAction{Fields: []types.Field{{Name: "name", Type: "text"}}}},
+	}}}
+	g2 := New(cfg, t.TempDir())
+	g2.pluginFnNames = map[string]bool{"LogCustomerCreated": true}
+	if err := g2.attachHook("audit", pluginapi.HookAttachment{
+		Resource: "User",
+		Action:   "create",
+		When:     "after",
+		Hook:     pluginapi.Hook{Name: "audit_customer_create", Fn: "LogCustomerCreated"},
+	}); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	hooks := g2.Config.Resources[0].Form.Create.Hooks
+	if hooks == nil || len(hooks.After) != 1 || hooks.After[0].Fn != "LogCustomerCreated" {
+		t.Fatalf("fn hook not merged: %+v", hooks)
 	}
 }
 

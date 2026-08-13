@@ -220,13 +220,14 @@ regression guard does not apply — assert via `assertGeneratedGoParses` + snipp
 
 Status: partially implemented (2026-08-13). Implementation order D2 → D3 →
 D5 → D6 (D1 — auth features — and D4 — API mode — are excluded from the plan).
-D2 (audit log) and D3 (CSV import + export column selection) are done.
+D2 (audit log), D3 (CSV import + export column selection) and D5 (plugin fn hooks)
+are done.
 Decisions already taken: sqlite procedures are **YAML-seeded only** (no runtime
 editor UI). Assumptions flagged ⚠️ below are open to veto before implementation.
 
 | Item | Status |
 |---|---|
-| Plugin system (`SPECv05plus.md` M4) | **Done** (loader, `pkg/plugin`, `--skip-plugins`); remaining work is M5 (plugin **fn** hooks) → D5 |
+| Plugin system (`SPECv05plus.md` M4) | **Done (D5)** — loader, `pkg/plugin`, `--skip-plugins`, plus `AddHookSource` + plugin fn hooks |
 | Audit log resource | **Done (D2)** — config `audit` block, generator-implicit INSERTs on create/update/delete/action in one tx, augmented list-only AuditLog resource + nav, driver-aware DDL/queries, demo-enabled |
 | CSV import + export column selection | **Done (D3)** — `list.export` subset (Label headers) + `import_csv` (import.go, shared `buildCreateParams`, transactional, ?flash topbar, modal) |
 | SQLite stored procedures (batch-in-table) | Greenfield |
@@ -368,6 +369,19 @@ Completes the already-built plugin system (`SPECv05plus.md` §6.7):
 - Merge validation: a plugin fn hook must have a matching hook source, else fatal.
 - Deliverable: extend the plugin example with an fn hook; regression — no plugins →
   unchanged output.
+
+**Done (D5, 2026-08-13):** implemented as designed. `AddHookSource` (name validated:
+bare `<file>.go`, not the reserved `hooks.go`); the loader writes hook sources into
+`internal/hooks/`, tracks every package-level function name via `hookFuncNames`, and
+`collectFnHooks` skips stubs for those names. `attachHook` merges fn hooks when the fn
+name is backed by a source (fatal otherwise). `generateHooks` now also emits `hooks.go`
+(Scope only, no stubs/imports) when plugin hook sources exist even with zero YAML hook
+blocks, so plugin files compile. The audit example gained a `LogCustomerCreated` fn hook
++ `audit_hooks.go` source; e2e verified the hook fires on customer create (audit_log row)
+and delete (SQL hook) on sqlite, and the generated app builds. Regression: existing
+no-plugin hook tests byte-identical (all green). Also fixed a latent flag bug: `cmdGenerate`
+and `cmdValidate` mis-indexed `parseGlobalFlags`'s tuple so `--force`/`--verbose`/`--skip-plugins`
+were swapped (`--verbose` silently disabled the plugin loader).
 
 ---
 

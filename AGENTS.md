@@ -351,6 +351,28 @@ Config block `audit: {enabled, table (default audit_log), include_values, policy
 - Editor: "Import CSV" yes/no on the resource page; "Export" string-list on the list
   page (`Resources/<res>/List/Export`, registered in `nav.go`).
 
+## Plugin fn hooks (D5)
+
+Completes M5 (`SPECv05plus.md` §6.7). `pkg/plugin.Panel.AddHookSource(name, content)`
+contributes a `package hooks` Go source file (name validated: bare `<file>.go`, not the
+reserved `hooks.go`) into `Manifest.HookSources`. The loader (`mergeManifest` in
+plugin.go) writes each source into `OutDir/internal/hooks/` (never overwriting) and tracks
+every package-level function name via `hookFuncNames` (regex-free line scan for `func <Ident>(`,
+skipping methods and generics) into `g.pluginFnNames`. `attachHook` merges fn `HookAttachment`s
+only when the fn name is backed by a source — an unbacked plugin fn hook is **fatal**
+("no matching hook source"). `collectFnHooks`/`generateHooks` skip stubs for plugin-backed
+names; `generateHooks` also runs when `len(g.pluginHookFiles) > 0` even with zero YAML hook
+blocks (emitting Scope only, no imports/stubs) so the plugin files compile. A plugin fn hook
+that uses `Scope.Values` (e.g. `s.Values`) or the plugin's own table emits SQL that is driver-
+agnostic via `$1`/`s.ID`. Gotchas:
+- The loader registers a plugin's hook sources BEFORE its attachments are merged (same
+  mergeManifest), so a plugin can back its own fn hooks; cross-plugin backing requires the
+  provider to be declared earlier in `plugins:`.
+- `parseGlobalFlags` returns `(configPath, outDir, db, adminPassword, force, verbose,
+  skipPlugins, demo)` — callers must destructure in that exact order. `cmdGenerate` and
+  `cmdValidate` previously swapped positions 4/5 so `--force` looked verbose and `--verbose`
+  silently set `SkipPlugins` (fixed in D5).
+
 ## Security hardening (Phase A of SPEC_future_enhancement.md)
 
 The generated app ships security defaults. Keep them intact when editing the emitters:

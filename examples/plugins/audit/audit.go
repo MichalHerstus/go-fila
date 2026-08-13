@@ -2,9 +2,10 @@
 //
 // Example go-fila plugin: an audit trail. At generation time it contributes an
 // AuditLog resource, an AuditOverview page with two stat widgets, an "Audit"
-// navigation group, the audit_log schema + queries SQL files, and attaches an
-// after-delete SQL hook to the existing "Customer" resource so every customer
-// deletion is recorded.
+// navigation group, the audit_log schema + queries SQL files, and attaches two
+// hooks to the existing "Customer" resource: an after-create fn hook
+// (LogCustomerCreated, implemented by the plugin's hook source file) and an
+// after-delete SQL hook, so every customer create/delete is recorded.
 //
 // The plugin is driver-aware: go-fila injects the database driver into the
 // config map under the reserved "driver" key, and the emitted SQL uses the
@@ -126,12 +127,22 @@ func (p *auditPlugin) Register(pb *plugin.Panel) error {
 
 	pb.AddSQLFile("migrations/audit_schema.sql", p.schemaSQL())
 	pb.AddSQLFile("queries/audit.sql", p.queriesSQL())
+	pb.AddHookSource("audit_hooks.go", p.hookSource())
 
-	return pb.AddHookToResource("Customer", "delete", "after", plugin.Hook{
+	if err := pb.AddHookToResource("Customer", "delete", "after", plugin.Hook{
 		Name: "audit_customer_delete",
 		SQL: fmt.Sprintf(
 			"INSERT INTO %s (table_name, record_id, action, message, created_at) VALUES ('customers', $1, 'delete', 'Customer deleted', CURRENT_TIMESTAMP)",
 			p.table),
+	}); err != nil {
+		return err
+	}
+
+	// fn hook backed by the AddHookSource file above: the loader tracks
+	// LogCustomerCreated and skips stub generation for it in hooks.go.
+	return pb.AddHookToResource("Customer", "create", "after", plugin.Hook{
+		Name: "audit_customer_create",
+		Fn:   "LogCustomerCreated",
 	})
 }
 
@@ -173,4 +184,24 @@ SELECT COUNT(*) FROM %s;
 -- name: GetAuditLog :one
 SELECT id, table_name, record_id, action, message, created_at FROM %s WHERE id = %s;
 `, p.table, p.table, p.table, ph)
+}
+
+// hookSource returns the `package hooks` source file written into the
+// generated app's internal/hooks/ directory. It implements LogCustomerCreated,
+// the fn hook attached to Customer create, using the same audit_log table the
+// plugin contributes. $1 binds the record id on every driver.
+func (p *auditPlugin) hookSource() string {
+	return fmt.Sprintf(`package hooks
+
+import (
+    "context"
+    "database/sql"
+)
+
+// LogCustomerCreated records a customer creation in the audit trail.
+func LogCustomerCreated(ctx context.Context, db *sql.DB, s Scope) error {
+    _, err := db.ExecContext(ctx, "INSERT INTO %s (table_name, record_id, action, message, created_at) VALUES ('customers', $1, 'create', 'Customer created', CURRENT_TIMESTAMP)", s.ID)
+    return err
+}
+`, p.table)
 }

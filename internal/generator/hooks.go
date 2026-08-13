@@ -16,14 +16,17 @@ import (
 )
 
 // generateHooks writes internal/hooks/hooks.go into the output directory when
-// any hook is declared anywhere in the config (fn or sql). The file defines
-// the Scope struct shared by all hook calls (handlers reference hooks.Scope
-// for every hook block, sql-only included) plus one stub per unique fn hook
-// name; sql-only hooks produce the Scope struct with no stubs. Nothing is
-// written when no hooks are declared.
+// any hook is declared anywhere in the config (fn or sql) or when a plugin
+// contributed a hook source file (which references Scope from the same
+// package, so the struct must exist). The file defines the Scope struct shared
+// by all hook calls (handlers reference hooks.Scope for every hook block,
+// sql-only included) plus one stub per unique fn hook name that is not backed
+// by a plugin hook source; sql-only hooks produce the Scope struct with no
+// stubs. Nothing is written when no hooks are declared and no plugin hook
+// sources exist.
 // Returns: an error on write failure.
 func (g *Generator) generateHooks() error {
-	if !g.hasAnyHooks() {
+	if !g.hasAnyHooks() && len(g.pluginHookFiles) == 0 {
 		return nil
 	}
 
@@ -83,8 +86,9 @@ func (g *Generator) hasAnyHooks() bool {
 
 // collectFnHooks walks every resource in config order, gathering the unique,
 // non-empty fn hook names from the form actions (create/update/delete) and the
-// custom actions. Order is preserved and duplicates are dropped.
-// Returns: the deduplicated list of fn hook names.
+// custom actions that are NOT backed by a plugin hook source (those skip stub
+// generation). Order is preserved and duplicates are dropped.
+// Returns: the deduplicated list of fn hook names needing stubs.
 func (g *Generator) collectFnHooks() []string {
 	seen := map[string]bool{}
 	var fns []string
@@ -95,13 +99,13 @@ func (g *Generator) collectFnHooks() []string {
 					continue
 				}
 				for _, h := range fa.Hooks.Before {
-					if h.Fn != "" && !seen[h.Fn] {
+					if h.Fn != "" && !g.pluginFnNames[h.Fn] && !seen[h.Fn] {
 						seen[h.Fn] = true
 						fns = append(fns, h.Fn)
 					}
 				}
 				for _, h := range fa.Hooks.After {
-					if h.Fn != "" && !seen[h.Fn] {
+					if h.Fn != "" && !g.pluginFnNames[h.Fn] && !seen[h.Fn] {
 						seen[h.Fn] = true
 						fns = append(fns, h.Fn)
 					}
@@ -113,13 +117,13 @@ func (g *Generator) collectFnHooks() []string {
 				continue
 			}
 			for _, h := range a.Hooks.Before {
-				if h.Fn != "" && !seen[h.Fn] {
+				if h.Fn != "" && !g.pluginFnNames[h.Fn] && !seen[h.Fn] {
 					seen[h.Fn] = true
 					fns = append(fns, h.Fn)
 				}
 			}
 			for _, h := range a.Hooks.After {
-				if h.Fn != "" && !seen[h.Fn] {
+				if h.Fn != "" && !g.pluginFnNames[h.Fn] && !seen[h.Fn] {
 					seen[h.Fn] = true
 					fns = append(fns, h.Fn)
 				}

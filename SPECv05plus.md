@@ -205,12 +205,12 @@ type HookAttachment struct {
     Resource string // existing resource name (e.g. "Customer")
     Action   string // "create" | "update" | "delete" | <custom action name>
     When     string // "before" | "after"
-    Hook     Hook   // SQL/proc hooks fully supported; fn hooks deferred to M5
+    Hook     Hook   // SQL/proc hooks and fn hooks (fn backed by AddHookSource, M5)
 }
 ```
 `pkg/plugin` re-exports `internal/types` under public aliases (`type Resource = types.Resource`, plus `Page`, `Widget`, `NavigationGroup`, `NavigationItem`, `Column`, `Field`, `Hook`, `Hooks`, `ListConfig`, `DetailConfig`, `FormConfig`, `FormAction`, `CardConfig`, `Action`, `Policy`, `ChartConfig`, `Validation`, `HookAttachment`) — plugins are a separate module and cannot import `internal/*`. Structs carry only `yaml:` tags, so JSON round-trips via Go field names; the loader decodes back into the same types. Plugin authors import `github.com/go-fila/go-fila/pkg/plugin`.
 
-**`AddHookToResource` semantics:** appends the hook to the target resource's `Before`/`After` list at merge time (same data the existing generator already emits hooks from). The SQL/proc string binds the current record id as `$1` (parity with the existing `hookCallsStr`, which passes `scope.ID`): `0` for before-create, the new row id after-create, the parsed path id otherwise. Only `$1` (the id) is bound for SQL/proc hooks; `Scope.Values` is available to fn hooks only (M5). **fn hooks from plugins are rejected at merge time in M4** with a fatal error ("requires M5 — use sql"). `proc` hooks are emitted as `CALL/EXEC` and ignored on sqlite.
+**`AddHookToResource` semantics:** appends the hook to the target resource's `Before`/`After` list at merge time (same data the existing generator already emits hooks from). The SQL/proc string binds the current record id as `$1` (parity with the existing `hookCallsStr`, which passes `scope.ID`): `0` for before-create, the new row id after-create, the parsed path id otherwise. Only `$1` (the id) is bound for SQL/proc hooks; `Scope.Values` is available to fn hooks. **fn hooks are merged when the fn name is backed by a plugin hook source** (M5); an fn hook without a matching source is a fatal merge error. `proc` hooks are emitted as `CALL/EXEC` and ignored on sqlite.
 
 ### 6.3 YAML (`types/plugin.go`, `types/config.go`, `parser/validator.go`)
 ```go
@@ -247,8 +247,8 @@ Validate `name`/`source` non-empty; reject duplicate plugin names.
 
 **Exit criteria:** a sample `audit` plugin loads, contributes an `audit_log` resource + stat widget + nav group, and a Customer delete inserts an `audit_log` row via the plugin's SQL hook; `go-fila generate` with no plugins produces output byte-identical to the end of M3 (regression).
 
-### 6.7 M5 (future — designed, not built)
-Plugin **fn hooks**: `Panel.AddHookSource(name, content)` writes a `package hooks` Go file into `OutDir/internal/hooks/` (compiles inside the generated app, so it may reference `hooks.Scope`); the loader tracks plugin-provided fn names and `generateHooks` skips stub generation for them; fn `HookAttachment`s are merged instead of rejected. A bug in plugin hook source surfaces as a generated-app build error, not a go-fila error (same as hand-written user hooks).
+### 6.7 M5 (implemented 2026-08-13)
+Plugin **fn hooks**: `Panel.AddHookSource(name, content)` writes a `package hooks` Go file into `OutDir/internal/hooks/` (compiles inside the generated app, so it may reference `hooks.Scope`); the loader tracks plugin-provided fn names and `generateHooks` skips stub generation for them; fn `HookAttachment`s are merged instead of rejected, and an fn hook without a matching hook source is fatal at merge time. A bug in plugin hook source surfaces as a generated-app build error, not a go-fila error (same as hand-written user hooks). `generateHooks` also emits `hooks.go` (Scope only) when plugin hook sources exist even if no YAML hook block is declared, so the plugin files compile. Verified e2e: the audit example's `LogCustomerCreated` fn hook fires on customer create and inserts an `audit_log` row; no-plugin output unchanged.
 
 ---
 

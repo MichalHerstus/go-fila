@@ -28,6 +28,13 @@ type Generator struct {
 	SkipPlugins bool
 	// Verbose enables per-plugin load summaries.
 	Verbose bool
+	// pluginFnNames tracks fn hook names whose implementation is provided by a
+	// plugin hook source, so generateHooks skips stub generation for them.
+	pluginFnNames map[string]bool
+	// pluginHookFiles holds every plugin-provided hooks-package source file
+	// (name -> content), used to gate Scope emission even when no YAML hook
+	// block is declared.
+	pluginHookFiles map[string]string
 }
 
 // New creates a Generator for the given parsed configuration and output

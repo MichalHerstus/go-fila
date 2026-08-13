@@ -17,7 +17,7 @@ import (
 )
 
 // version is the current go-fila release version.
-const version = "0.12.0"
+const version = "0.13.0"
 
 //go:embed AGENTS_for_generated_dashboard.md
 var agentsForGeneratedDashboard string
@@ -418,7 +418,7 @@ SELECT * FROM roles ORDER BY name;
 // is valid. With --verbose it also prints a short summary of the panel, the
 // number of resources, pages and navigation groups.
 func cmdValidate() {
-	configPath, _, _, _, verbose, _, _, _ := parseGlobalFlags()
+	configPath, _, _, _, _, verbose, _, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {
@@ -440,7 +440,7 @@ func cmdValidate() {
 // the Tailwind CSS build; failures there are reported as warnings instead of
 // being fatal, since the user can re-run them manually.
 func cmdGenerate() {
-	configPath, outDir, _, _, verbose, skipPlugins, _, _ := parseGlobalFlags()
+	configPath, outDir, _, _, _, verbose, skipPlugins, _ := parseGlobalFlags()
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {
