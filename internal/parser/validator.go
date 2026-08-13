@@ -133,6 +133,7 @@ func ValidateAll(cfg *types.Config) []error {
 			add(fmt.Errorf("resources[%d]: %w", i, err))
 		}
 	}
+	validateProcedures(cfg, add)
 	for i, p := range cfg.Pages {
 		if p.Name == "" {
 			add(fmt.Errorf("pages[%d].name is required", i))
@@ -182,6 +183,88 @@ func validateAction(a types.Action) error {
 		return fmt.Errorf("%q: query and proc are mutually exclusive", a.Name)
 	}
 	return nil
+}
+
+// driver returns the database driver of the first configured connection,
+// defaulting to "postgres" when no connections are configured (mirrors the
+// generator's driver()).
+// Params: cfg (the config to inspect).
+// Returns: the driver name.
+func driver(cfg *types.Config) string {
+	for _, conn := range cfg.Connections {
+		if conn.Driver != "" {
+			return conn.Driver
+		}
+	}
+	return "postgres"
+}
+
+// validateProcedures checks the `procedures:` block: every entry needs a name
+// and names must be unique. When the driver is sqlite, every proc: reference
+// on an action or hook must match a declared procedure — on sqlite proc:
+// execution is driven by the declared body, so an undeclared reference is a
+// fatal config error (mirroring the plugin-load-failure semantics). Postgres
+// and mssql ignore the block entirely (real procedures come from user DDL).
+// Params: cfg (the config to validate), add (collects a validation problem).
+func validateProcedures(cfg *types.Config, add func(error)) {
+	names := map[string]bool{}
+	for i, p := range cfg.Procedures {
+		if p.Name == "" {
+			add(fmt.Errorf("procedures[%d].name is required", i))
+			continue
+		}
+		if names[p.Name] {
+			add(fmt.Errorf("procedures[%d].name %q is duplicated", i, p.Name))
+		}
+		names[p.Name] = true
+	}
+	d := driver(cfg)
+	if d != "sqlite" && d != "sqlite3" {
+		return
+	}
+	for i, r := range cfg.Resources {
+		for label, proc := range procRefs(r) {
+			if !names[proc] {
+				add(fmt.Errorf("resources[%d] (%s) %s references undeclared procedure %q - add a matching procedures: entry", i, r.Name, label, proc))
+			}
+		}
+	}
+}
+
+// procRefs returns every proc: reference on a resource as a map keyed by a
+// human-readable "action <name>" / "action <name> hook <name>" label so
+// validation errors name the exact site.
+// Params: r (the resource definition).
+// Returns: a map of site label to procedure name.
+func procRefs(r types.Resource) map[string]string {
+	refs := map[string]string{}
+	collect := func(label string, h *types.Hooks) {
+		if h == nil {
+			return
+		}
+		for _, list := range [][]types.Hook{h.Before, h.After} {
+			for _, hook := range list {
+				if hook.Proc != "" {
+					refs[label+" hook "+hook.Name] = hook.Proc
+				}
+			}
+		}
+	}
+	for _, a := range r.Actions {
+		if a.Proc != "" {
+			refs["action "+a.Name] = a.Proc
+		}
+		collect("action "+a.Name, a.Hooks)
+	}
+	if r.Form != nil {
+		for _, fa := range []*types.FormAction{r.Form.Create, r.Form.Update, r.Form.Delete} {
+			if fa == nil {
+				continue
+			}
+			collect("form", fa.Hooks)
+		}
+	}
+	return refs
 }
 
 // validateHooks validates a single Hooks block, walking the before and after

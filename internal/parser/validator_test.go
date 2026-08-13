@@ -340,3 +340,73 @@ func TestParseCsvImportRequiresCreate(t *testing.T) {
 		t.Fatal("expected error for import_csv without a create form")
 	}
 }
+
+const proceduresYAML = `
+version: "1"
+panel:
+  name: Admin
+  path: /admin
+connections:
+  default:
+    driver: sqlite
+    dsn: ./data/app.db
+sqlc:
+  config: sqlc.yaml
+resources:
+  - name: User
+    form:
+      create:
+        hooks:
+          after:
+            - name: archive_create
+              proc: sp_archive_user
+    actions:
+      - name: archive
+        proc: sp_archive_user
+procedures:
+  - name: sp_archive_user
+    description: Archive the user
+    sql: |
+      UPDATE users SET status = 'archived' WHERE id = $1;
+      INSERT INTO events (msg) VALUES ('user archived');
+`
+
+func TestParseProceduresValid(t *testing.T) {
+	cfg, err := Parse([]byte(proceduresYAML))
+	if err != nil {
+		t.Fatalf("expected valid procedures config, got: %v", err)
+	}
+	if len(cfg.Procedures) != 1 || cfg.Procedures[0].Name != "sp_archive_user" {
+		t.Fatalf("unexpected procedures: %+v", cfg.Procedures)
+	}
+	if !strings.Contains(cfg.Procedures[0].SQL, "UPDATE users") || !strings.Contains(cfg.Procedures[0].SQL, "INSERT INTO events") {
+		t.Fatalf("procedure body not preserved: %+v", cfg.Procedures[0].SQL)
+	}
+}
+
+func TestParseProceduresRejectsUndeclaredRefOnSqlite(t *testing.T) {
+	yaml := strings.ReplaceAll(proceduresYAML, "\nprocedures:", "\n#procedures:")
+	if _, err := Parse([]byte(yaml)); err == nil {
+		t.Fatal("expected error for undeclared proc reference on sqlite")
+	} else if !strings.Contains(err.Error(), "undeclared procedure") {
+		t.Fatalf("expected undeclared-procedure error, got: %v", err)
+	}
+}
+
+func TestParseProceduresIgnoredOnPostgres(t *testing.T) {
+	yaml := strings.ReplaceAll(proceduresYAML, "driver: sqlite", "driver: postgres")
+	if _, err := Parse([]byte(yaml)); err != nil {
+		t.Fatalf("expected no error for undeclared proc reference on postgres, got: %v", err)
+	}
+}
+
+func TestParseProceduresRejectsDuplicateNames(t *testing.T) {
+	yaml := strings.ReplaceAll(proceduresYAML,
+		"  - name: sp_archive_user\n",
+		"  - name: sp_archive_user\n  - name: sp_archive_user\n")
+	if _, err := Parse([]byte(yaml)); err == nil {
+		t.Fatal("expected error for duplicate procedure names")
+	} else if !strings.Contains(err.Error(), "duplicated") {
+		t.Fatalf("expected duplicate-name error, got: %v", err)
+	}
+}

@@ -136,13 +136,15 @@ func (g *Generator) collectFnHooks() []string {
 // hookCallsStr renders the Go source that runs a before/after hook list against
 // a Scope variable. fn hooks call the generated stub in the hooks package; sql
 // hooks are inlined as db.ExecContext binding the current scope id ($1); proc
-// hooks call the stored procedure driver-appropriately (CALL on postgres, EXEC
-// on mssql) and are skipped entirely on sqlite. A hook error aborts the request
-// with a 500 response.
+// hooks call the stored procedure driver-appropriately — CALL on postgres, EXEC
+// on mssql, and procs.Exec(db, name, scope.ID) on sqlite when the procedure is
+// declared under procedures: (undeclared sqlite proc hooks are skipped, so a
+// config without a procedures: block stays byte-identical). A hook error aborts
+// the request with a 500 response.
 // Params: hooks (the before or after list), scopeVar (name of the Scope var),
 // indent (the leading whitespace for each emitted line).
 // Returns: the Go source lines (empty when the list is empty or all hooks are
-// proc hooks on sqlite).
+// proc hooks on sqlite that are skipped).
 func (g *Generator) hookCallsStr(hooks []types.Hook, scopeVar, indent string) string {
 	var lines []string
 	for _, h := range hooks {
@@ -157,6 +159,11 @@ func (g *Generator) hookCallsStr(hooks []types.Hook, scopeVar, indent string) st
 %s    httperr.Internal(w, err)
 %s    return
 %s}`, indent, h.SQL, scopeVar, indent, indent, indent))
+		case h.Proc != "" && g.isSQLite() && g.procedureByName(h.Proc) != nil:
+			lines = append(lines, fmt.Sprintf(`%sif err := procs.Exec(db, %q, %s.ID); err != nil {
+%s    httperr.Internal(w, err)
+%s    return
+%s}`, indent, h.Proc, scopeVar, indent, indent, indent))
 		case h.Proc != "" && !g.isSQLite():
 			lines = append(lines, fmt.Sprintf(`%sif _, err := db.ExecContext(r.Context(), %q, %s.ID); err != nil {
 %s    httperr.Internal(w, err)
@@ -168,12 +175,13 @@ func (g *Generator) hookCallsStr(hooks []types.Hook, scopeVar, indent string) st
 }
 
 // hookBlockEmits reports whether a Hooks block emits any code for the
-// configured driver. fn and sql hooks always emit; proc hooks emit only when
-// the driver is postgres or mssql (sqlite has no stored procedures). This is
-// the driver-aware replacement for the "Hooks != nil" checks: a proc-only block
-// on sqlite must not force the hooks import, the Scope literal or the
-// RETURNING id capture, or the generated handler fails to compile with an
-// unused import.
+// configured driver. fn and sql hooks always emit; proc hooks emit when the
+// driver is postgres or mssql, or on sqlite when the procedure is declared
+// under procedures: (a proc-only block with no matching body on sqlite emits
+// nothing). This is the driver-aware replacement for the "Hooks != nil" checks:
+// a proc-only block on sqlite with no declared body must not force the hooks
+// import, the Scope literal or the RETURNING id capture, or the generated
+// handler fails to compile with an unused import.
 // Params: h (the hooks block; nil is valid).
 // Returns: true when at least one hook produces a generated call.
 func (g *Generator) hookBlockEmits(h *types.Hooks) bool {
@@ -185,7 +193,7 @@ func (g *Generator) hookBlockEmits(h *types.Hooks) bool {
 			if hook.Fn != "" || hook.SQL != "" {
 				return true
 			}
-			if hook.Proc != "" && !g.isSQLite() {
+			if hook.Proc != "" && (!g.isSQLite() || g.procedureByName(hook.Proc) != nil) {
 				return true
 			}
 		}

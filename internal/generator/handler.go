@@ -1060,6 +1060,10 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	if g.hookBlockEmits(r.Form.Delete.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
+	procsImport := ""
+	if g.hookUsesProc(r.Form.Delete.Hooks) {
+		procsImport = g.procImport()
+	}
 	authImport := ""
 	if g.auditFor(r) != nil {
 		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
@@ -1105,7 +1109,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-%s%s)
+%s%s%s)
 
 func Delete(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1120,7 +1124,7 @@ func Delete(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, middle, listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, procsImport, middle, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
@@ -1262,6 +1266,7 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	tName := tableName(r)
 
 	hasHooks := false
+	hasProcs := false
 	auditCfg := g.auditFor(r)
 	auditAny := false
 	var dispatch []string
@@ -1270,8 +1275,15 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 		if useHooks {
 			hasHooks = true
 		}
+		if g.hookUsesProc(a.Hooks) {
+			hasProcs = true
+		}
 		exec := g.actionExecSQL(a)
-		auditAction := auditCfg != nil && exec != ""
+		procExec := g.actionProcExec(a, "int64(id)")
+		if procExec != "" {
+			hasProcs = true
+		}
+		auditAction := auditCfg != nil && exec != "" && procExec == ""
 		if auditAction {
 			auditAny = true
 		}
@@ -1295,6 +1307,8 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
             }`, exec))
 			body = append(body, g.auditInsertStr(r, a.Name, "strconv.FormatInt(int64(id), 10)", `""`, "            "))
 			body = append(body, auditTxCommitStr("            "))
+		} else if procExec != "" {
+			body = append(body, procExec)
 		} else if exec != "" {
 			body = append(body, fmt.Sprintf(`            _, err := db.ExecContext(r.Context(), %q, int64(id))
             if err != nil {
@@ -1318,6 +1332,10 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	if hasHooks {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
+	procsImport := ""
+	if hasProcs {
+		procsImport = g.procImport()
+	}
 	authImport := ""
 	if auditAny {
 		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
@@ -1330,7 +1348,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-%s%s)
+%s%s%s)
 
 func Action(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1351,7 +1369,7 @@ func Action(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, strings.Join(dispatch, "\n"), listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, procsImport, strings.Join(dispatch, "\n"), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
@@ -1367,10 +1385,16 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 	listPath := fmt.Sprintf("%s/%s", g.Config.Panel.Path, pkgName)
 
 	hasExec := false
+	hasProcs := false
 	for _, a := range r.Actions {
-		if a.Bulk && g.actionExecSQL(a) != "" {
+		if !a.Bulk {
+			continue
+		}
+		if g.actionExecSQL(a) != "" {
 			hasExec = true
-			break
+		}
+		if g.actionProcExec(a, "id") != "" {
+			hasProcs = true
 		}
 	}
 
@@ -1383,7 +1407,13 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 		if hasExec {
 			executor = "tx"
 		}
-		if exec := g.actionExecSQL(a); exec != "" {
+		if procExec := g.actionProcExec(a, "id"); procExec != "" {
+			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+        for _, id := range ids {
+%s
+        }
+`, a.Name, procExec))
+		} else if exec := g.actionExecSQL(a); exec != "" {
 			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
         for _, id := range ids {
             _, err := %s.ExecContext(r.Context(), %q, id)
@@ -1422,6 +1452,10 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
         }
 `
 	}
+	procsImport := ""
+	if hasProcs {
+		procsImport = g.procImport()
+	}
 
 	code := fmt.Sprintf(`package %s
 
@@ -1430,7 +1464,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-)
+%s)
 
 func Bulk(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1458,7 +1492,7 @@ func Bulk(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), txCode, strings.Join(dispatch, "\n"), commitCode, listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), procsImport, txCode, strings.Join(dispatch, "\n"), commitCode, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "bulk.go"), []byte(code), 0644)
 }
@@ -1572,6 +1606,10 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	hooksImport := ""
 	if g.hookBlockEmits(create.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
+	}
+	procsImport := ""
+	if g.hookUsesProc(create.Hooks) {
+		procsImport = g.procImport()
 	}
 
 	fileImport := ""
@@ -1719,7 +1757,7 @@ import (
     "fmt"
     "net/http"
     "strings"
-    %s%s%s%s
+    %s%s%s%s%s
     %q
     %q
     auth %q
@@ -1762,6 +1800,7 @@ func Create(db *sql.DB) http.HandlerFunc {
 		bcryptImport,
 		fileImport,
 		hooksImport,
+		procsImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		optLoadCode,
@@ -1913,6 +1952,10 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	if g.hookBlockEmits(update.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
+	procsImport := ""
+	if g.hookUsesProc(update.Hooks) {
+		procsImport = g.procImport()
+	}
 
 	fileImport := ""
 	uploadHelper := ""
@@ -2042,7 +2085,7 @@ import (
     "net/http"
     "strconv"
     "strings"
-%s%s%s
+%s%s%s%s
     %q
     %q
     %q
@@ -2100,6 +2143,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 		jsonImport,
 		fileImport,
 		hooksImport,
+		procsImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		populateQuery,

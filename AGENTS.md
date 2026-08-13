@@ -230,7 +230,8 @@ M2 wiring: Tailwind runs `darkMode: 'class'`; `theme.extend.colors.brand.{primar
 
 ### Hooks (`hooks.go`, `RETURNING id`)
 Hooks attach to `FormAction` (create/update/delete) and `Action`. `internal/generator/hooks.go` emits the shared `internal/hooks/hooks.go` (Scope struct + one stub per unique fn hook, deduped across the whole config) and the `hookCallsStr`/`scopeValuesStr`/`returningClause` snippet builders. Gotchas:
-- **Any hook block forces the `hooks` import in the generated handler** — the `hooks.Scope{...}` literal lives in the hooks package, so a sql-only hook still needs `import hooks "…/internal/hooks"`. Condition on `Hooks != nil`, NOT on `HasFn()`. **Exception: proc-only hooks on sqlite.** Since sqlite cannot call stored procedures, use `g.hookBlockEmits(h)` (true for any fn/sql hook, or any proc hook when the driver isn't sqlite) as the gate for the import/Scope/`RETURNING` — a proc-only block on sqlite must produce no `hooks` import and no `RETURNING` or the generated handler fails with an unused import.
+- **Any hook block forces the `hooks` import in the generated handler** — the `hooks.Scope{...}` literal lives in the hooks package, so a sql-only hook still needs `import hooks "…/internal/hooks"`. Condition on `Hooks != nil`, NOT on `HasFn()`. **Proc hooks (driver-aware):** use `g.hookBlockEmits(h)` as the gate for the import/Scope/`RETURNING` — true for any fn/sql hook, or any proc hook when the driver isn't sqlite, or on sqlite **when the proc is declared under `procedures:`**. A proc-only block on sqlite with no declared body must produce no `hooks` import and no `RETURNING` or the generated handler fails with an unused import (byte-identical regression guarded by `TestGenerateProcSQLiteIgnored`).
+- **`procs` import is per-handler:** the `internal/panel/procs` import (`g.procImport()`, gated on `usesProcedures()` — sqlite + `len(Procedures) > 0`) is added to a handler only when that handler actually emits a `procs.Exec` call — `hookUsesProc(hooks)` for create/update/delete, and `hasProcs` (any action's `actionProcExec` or proc hook) for actions.go/bulk.go. An unused `procs` import fails the build.
 - **create id capture**: only when `g.hookBlockEmits(create.Hooks)` does the create POST switch from `db.ExecContext(query, vals...)` to `db.QueryRowContext(r.Context(), query+" RETURNING <id>", vals...).Scan(&newID)` (postgres/sqlite) or `" OUTPUT INSERTED.<id>"` (mssql, no RETURNING in T-SQL) — `idColumn(r)` drives the column. `scope.ID = newID` runs before after-hooks. The hookless path stays byte-identical (`ExecContext`, no RETURNING).
 - `sql` hooks are emitted as `db.ExecContext(r.Context(), "<sql>", scope.ID)` — always pass the SQL as a Sprintf **arg** (`%q`), never concatenate it into a template (a `%` inside hook SQL would corrupt the emitted source). `scope.ID` is 0 for before-create, the new row id after-create, the parsed path id otherwise; `$1` works on sqlite (named-param syntax + positional binding) and mssql (loose `$N`).
 - **Stored procedures (`proc:`)** — a third hook kind and an alternative to `query:` on actions (mutually exclusive, enforced by the parser). `procSQL(name)` emits `CALL <name>($1)` on postgres and `EXEC <name> $1` on mssql (go-mssqldb rewrites `$1`→bound `@p1`, passed positionally to the proc's first param); the record id binds as `$1`, same as sql hooks/actions. `procSQL` returns `""` on sqlite and callers skip the emission: `hookCallsStr` drops proc hooks, `actionExecSQL` returns `""` so the action case becomes an empty `{}` block (still redirects) and the bulk loop gets `_ = id` as its body. A proc-only `Hooks` block on sqlite must NOT emit the import/Scope/RETURNING (see `hookBlockEmits` above).
@@ -373,6 +374,47 @@ agnostic via `$1`/`s.ID`. Gotchas:
   `cmdValidate` previously swapped positions 4/5 so `--force` looked verbose and `--verbose`
   silently set `SkipPlugins` (fixed in D5).
 
+## SQLite stored procedures (D6)
+
+`internal/generator/procs.go` implements sqlite `proc:` as **named SQL-batch bodies**.
+Config block (top-level, sqlite-only semantics):
+```yaml
+procedures:
+  - name: sp_archive_customer
+    description: "Archive a customer and record the event"
+    sql: |
+      UPDATE customers SET status = 'inactive' WHERE id = $1;
+      INSERT INTO customer_log (customer_id, msg) VALUES ($1, 'archived');
+```
+`generateProcedures()` (wired after `generateAuditSchema`) emits `sql/migrations/procedures.sql`
+(`CREATE TABLE IF NOT EXISTS sql_procedures(name PK, body, description, updated_at)` + one
+`INSERT OR IGNORE` seed per procedure, `''`-escaped bodies, multi-line bodies preserved) and
+the shared `internal/panel/procs/procs.go` package. Only emitted when `usesProcedures()`
+(sqlite AND `len(Procedures) > 0`); postgres/mssql ignore the block.
+- **`procs.Exec(db, name, id) error`** (runtime, generated app): reads the body from
+  `sql_procedures` at call time, splits it with a tokenizer (`splitStatements` — top-level
+  `;` only; handles `'…'` strings incl. `''` escapes, `"…"`/`[…]` identifiers, `--` and
+  `/* */` comments), runs each statement inside one transaction, drains result rows, rolls
+  back on error. **Placeholder binding:** `containsPlaceholder(stmt)` decides whether to
+  bind the id — mattn errors when args exceed placeholders, so statements without `$N` get
+  no args. The generator package carries byte-identical `splitStatements`/`containsPlaceholder`
+  copies (unit-tested in `procs_test.go`); the emitted copy is validated at runtime by e2e.
+- **Driver-aware `proc` emission flips on sqlite:** `hookBlockEmits` is true for a proc hook
+  when `procedureByName(hook.Proc) != nil`; `hookCallsStr` emits `procs.Exec(db, "<name>",
+  scope.ID)`; `actionProcExec(a, idExpr)` (actions.go `int64(id)`, bulk.go `id`) emits the
+  `procs.Exec` call and is treated like a real exec (audit is skipped for sqlite proc actions —
+  they can't nest inside the audit tx). Create gains `RETURNING <id>` capture for proc-only
+  after-hooks. Undeclared sqlite proc refs still emit nothing (`procSQL` unchanged for
+  pg/mssql; `TestGenerateProcSQLiteIgnored` guards the byte-identical regression).
+- **Validator** (`validateProcedures` in parser): names required + unique; when the driver
+  is sqlite, every `proc:` reference on an action/hook must match a `procedures:` entry —
+  fatal config error (no runtime editor exists), mirroring plugin-load-failure semantics.
+- **Seeds are `INSERT OR IGNORE`** — an existing `sql_procedures` row (already-applied
+  migration with a newer body) is never overwritten by a re-run.
+- **Bulk** (`generateBulkHandler`): a bulk proc action loops `procs.Exec(db, name, id)` per
+  selected id; `hasExec` (the tx wrapper) is gated on raw-SQL exec actions only, so a
+  proc-only bulk resource gets no outer `BeginTx` (procs.Exec is itself transactional).
+
 ## Security hardening (Phase A of SPEC_future_enhancement.md)
 
 The generated app ships security defaults. Keep them intact when editing the emitters:
@@ -466,9 +508,9 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 | `cmd/go-fila/introspect.go` | `init --db` — DB introspection, auth table creation, YAML/SQL generation |
 | `cmd/go-fila/edit.go` | `edit` — entry point for interactive YAML config editor |
 | `cmd/go-fila/editor/` | tview TUI editor: 3-pane shell, section editors, sync + validate + preview screens (18 files, see `edit` above) |
-| `internal/types/` | YAML-tagged Go structs for config schema (5 files: config.go, panel.go, resource.go, field.go, hook.go) |
+| `internal/types/` | YAML-tagged Go structs for config schema (6 files: config.go, panel.go, resource.go, field.go, hook.go, procedure.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (13 files, see above; `assets/` holds the embedded Chart.js 4.4.1 bundle) |
+| `internal/generator/` | Code generation pipeline (17 files, see above; `assets/` holds the embedded Chart.js 4.4.1 bundle) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/go-fila/main.go`'s `cmdInit` |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
 | `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |

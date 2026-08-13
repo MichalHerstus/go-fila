@@ -18,6 +18,7 @@ type Config struct {
 	Pages       []Page                `yaml:"pages"`
 	Plugins     []PluginConfig        `yaml:"plugins"`
 	Audit       *AuditConfig          `yaml:"audit"`
+	Procedures  []Procedure           `yaml:"procedures"`
 }
 
 // AuditConfig enables a generator-implicit audit log of every mutating

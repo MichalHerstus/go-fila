@@ -220,8 +220,8 @@ regression guard does not apply — assert via `assertGeneratedGoParses` + snipp
 
 Status: partially implemented (2026-08-13). Implementation order D2 → D3 →
 D5 → D6 (D1 — auth features — and D4 — API mode — are excluded from the plan).
-D2 (audit log), D3 (CSV import + export column selection) and D5 (plugin fn hooks)
-are done.
+D2 (audit log), D3 (CSV import + export column selection), D5 (plugin fn hooks)
+and D6 (SQLite stored procedures) are done.
 Decisions already taken: sqlite procedures are **YAML-seeded only** (no runtime
 editor UI). Assumptions flagged ⚠️ below are open to veto before implementation.
 
@@ -230,7 +230,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Plugin system (`SPECv05plus.md` M4) | **Done (D5)** — loader, `pkg/plugin`, `--skip-plugins`, plus `AddHookSource` + plugin fn hooks |
 | Audit log resource | **Done (D2)** — config `audit` block, generator-implicit INSERTs on create/update/delete/action in one tx, augmented list-only AuditLog resource + nav, driver-aware DDL/queries, demo-enabled |
 | CSV import + export column selection | **Done (D3)** — `list.export` subset (Label headers) + `import_csv` (import.go, shared `buildCreateParams`, transactional, ?flash topbar, modal) |
-| SQLite stored procedures (batch-in-table) | Greenfield |
+| SQLite stored procedures (batch-in-table) | **Done (D6)** — YAML `procedures:` block, `sql_procedures` DDL + `INSERT OR IGNORE` seeds, `internal/panel/procs` package (`Exec(db,name,id)` + tokenizer statement split), sqlite proc emission flips (actions/hooks/bulk/create RETURNING), validator rejects undeclared sqlite proc refs |
 | AI-assisted `go-fila edit` (OpenRouter / LM Studio) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, path+value diff output (`changedPaths`), local LM Studio provider via `--model "lmstudio"`, httptest stub (OpenRouter + LM Studio) + `mergeYAML`/`changedPaths` suites) |
 | Drop Node.js/npm from the dashboard build | **Done (D8)** |
 | Editor Validate (main menu → results list → jump-to-fix) | **Done (D9)** |
@@ -386,6 +386,26 @@ were swapped (`--verbose` silently disabled the plugin loader).
 ---
 
 ### D6 — SQLite stored procedures (SQL-batch-in-table, YAML-seeded)
+
+**Status: implemented (2026-08-13).** Config block `procedures:` (top-level,
+sqlite-only semantics) with `name`/`description`/`sql`. `internal/generator/procs.go`
+emits `sql/migrations/procedures.sql` (`CREATE TABLE IF NOT EXISTS sql_procedures(name PK,
+body, description, updated_at)` + one `INSERT OR IGNORE` seed per procedure, `''`-escaped
+bodies) and `internal/panel/procs/procs.go` — `Exec(db, name, id) error` looks the body up
+at call time, splits it with a tokenizer (`'…'` strings incl. `''` escapes, `"…"`/`[…]`
+identifiers, `--`/`/* */` comments) and runs each statement inside one transaction,
+draining result rows and rolling back on error; the id is bound only when the statement
+contains a `$N` placeholder (mattn errors when args exceed placeholders). Driver-aware
+flips: `hookBlockEmits` is true for a declared proc on sqlite, `hookCallsStr` emits
+`procs.Exec(db, "<name>", scope.ID)`, `actionExecSQL`/bulk emit `procs.Exec(db, "<name>",
+id)`, and create gains `RETURNING <id>` capture for proc-only after-hooks. `procs` import
+is added per-handler only when that handler actually emits a `procs.Exec` call. Undeclared
+sqlite proc refs are skipped (feature-off output byte-identical — `TestGenerateProcSQLiteIgnored`
+guards this). Validator (`validateProcedures`) requires unique non-empty names and — when
+the driver is sqlite — every `proc:` reference on an action/hook to match a declared body
+(fatal config error). Postgres/mssql ignore the block. e2e verified on sqlite: a proc
+after-hook on create and a bulk proc action both ran their multi-statement batches
+atomically with `$1` bound (customer_log rows + audit intact).
 
 SQLite has no stored procedures; a "procedure stored in a table and run by the sqlite
 engine" is a **named SQL-batch executor** — the body is read from a table at call time,

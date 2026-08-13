@@ -171,6 +171,9 @@ func (g *Generator) Generate() error {
 	if err := g.generateAuditSchema(); err != nil {
 		return fmt.Errorf("generating audit schema: %w", err)
 	}
+	if err := g.generateProcedures(); err != nil {
+		return fmt.Errorf("generating procedures: %w", err)
+	}
 
 	if err := g.generateMain(); err != nil {
 		return fmt.Errorf("generating main.go: %w", err)

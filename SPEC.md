@@ -129,6 +129,21 @@ navigation:
         label: "Google Analytics"
         url: https://analytics.google.com
         opens_in_new_tab: true
+
+# SQLite "stored procedures" (D6) — named SQL-batch bodies, sqlite-only
+# semantics. Each entry seeds a row of the sql_procedures table (DDL + INSERT
+# OR IGNORE emitted into sql/migrations); `proc:` references on actions/hooks
+# name an entry. The generated app reads the body at call time, splits it into
+# statements and runs them inside one transaction, binding the record id only
+# for statements that contain a $N placeholder. On sqlite a proc: reference
+# MUST match a procedures: entry (validator error otherwise); on postgres/mssql
+# the block is ignored (real procs come from user DDL).
+procedures:
+  - name: archive_old_orders
+    description: "Archive orders older than 1 year"
+    sql: |
+      UPDATE orders SET status='archived' WHERE created_at < datetime('now','-1 year');
+      INSERT INTO audit_events (msg) VALUES ('bulk archive ran');
 ```
 
 ---
@@ -322,7 +337,7 @@ resources:
 
 `internal/hooks/hooks.go` defines `Scope{ID int64, Table, Action string, Values map[string]interface{}}` and one compile-ready stub per declared `fn` hook; the user implements the stubs. `sql` hooks are inlined as `db.ExecContext(..., <sql>, scope.ID)`. Create handlers capture the new row id via a driver-aware `QueryRowContext(...).Scan(&newID)` using `RETURNING <id>` (postgres/sqlite) or `OUTPUT INSERTED.<id>` (mssql) so after-create hooks see it. A hook error aborts the request with HTTP 500.
 
-**Stored procedures (`proc`):** `proc` on a hook or custom action names a stored procedure to call, binding the current record id as its single argument. Postgres emits `CALL <name>($1)`; mssql emits `EXEC <name> $1` (go-mssqldb loose `$N`→`@p1` mapping passes the bound parameter positionally to the proc's first parameter). Schema-qualified names (`myschema.sp_foo`) are passed through verbatim. **SQLite has no stored procedures: proc references are ignored at generation time** — a proc hook is skipped, and a proc-only custom action becomes a no-op that still redirects back to the list (hooks in the same block still run). No output parameters or return values are captured (plain `db.ExecContext`).
+**Stored procedures (`proc`):** `proc` on a hook or custom action names a stored procedure to call, binding the current record id as its single argument. Postgres emits `CALL <name>($1)`; mssql emits `EXEC <name> $1` (go-mssqldb loose `$N`→`@p1` mapping passes the bound parameter positionally to the proc's first parameter). Schema-qualified names (`myschema.sp_foo`) are passed through verbatim. On sqlite a `proc:` reference names a **declared SQL-batch procedure** (see the top-level `procedures:` block): the generated app emits `procs.Exec(db, "<name>", id)`, which reads the body from the `sql_procedures` table, splits it into statements and runs them atomically, binding the id only for statements with a `$N` placeholder. An undeclared sqlite proc reference is a validator error; a `procedures:` block on postgres/mssql is ignored. No output parameters or return values are captured (plain `db.ExecContext` / `procs.Exec`).
 
 **Field types (UI rendering only, no DB mapping):**
 
