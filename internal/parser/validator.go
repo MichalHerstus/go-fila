@@ -77,6 +77,23 @@ func ValidateAll(cfg *types.Config) []error {
 			}
 		}
 	}
+	if cfg.Audit != nil {
+		if cfg.Audit.Table == "" {
+			cfg.Audit.Table = "audit_log"
+		}
+		for _, ex := range cfg.Audit.ExcludeResources {
+			found := false
+			for _, r := range cfg.Resources {
+				if r.Name == ex {
+					found = true
+					break
+				}
+			}
+			if !found {
+				add(fmt.Errorf("audit.exclude_resources references unknown resource %q", ex))
+			}
+		}
+	}
 	for i, r := range cfg.Resources {
 		if r.Name == "" {
 			add(fmt.Errorf("resources[%d].name is required", i))

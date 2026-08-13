@@ -55,6 +55,281 @@ func hookConfig() *types.Config {
 	}
 }
 
+// auditConfig returns a minimal config with the audit log enabled and value
+// snapshots turned on, exercising audit weaving on create/update/delete/action.
+func auditConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Audit: &types.AuditConfig{
+			Enabled:       true,
+			Table:         "audit_log",
+			IncludeValues: true,
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Label: "User",
+				List: &types.ListConfig{
+					Columns: []types.Column{{Name: "name", Label: "Name"}},
+				},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{{Name: "name", Type: "text"}},
+					},
+					Update: &types.FormAction{
+						Fields: []types.Field{{Name: "name", Type: "text"}},
+					},
+					Delete: &types.FormAction{},
+				},
+				Actions: []types.Action{
+					{Name: "deactivate", Query: "UPDATE users SET status = 'inactive' WHERE id = $1"},
+				},
+			},
+		},
+	}
+}
+
+func TestGenerateAudit(t *testing.T) {
+	dir := t.TempDir()
+	g := New(auditConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	// The config is augmented with a list-only AuditLog resource.
+	found := false
+	for _, r := range g.Config.Resources {
+		if r.Name == "AuditLog" && r.Form == nil {
+			found = true
+			if r.Table != "audit_log" {
+				t.Errorf("AuditLog resource table = %q, want audit_log", r.Table)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("audit generation must augment the config with a list-only AuditLog resource")
+	}
+
+	create, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "create.go"))
+	if err != nil {
+		t.Fatalf("read create.go: %v", err)
+	}
+	createStr := string(create)
+	for _, want := range []string{
+		`db.BeginTx(r.Context(), nil)`,
+		`tx.QueryRowContext(r.Context(), query+" RETURNING id", vals...)`,
+		`var valuesJSON []byte`,
+		`"name": vals[0],`,
+		`INSERT INTO audit_log (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1, $2, $3, $4, $5, $6)`,
+		`auth.UserID(r), auth.UserName(r), "users", "create", fmt.Sprintf("%d", newID), string(valuesJSON)`,
+		`tx.Commit()`,
+		`defer tx.Rollback()`,
+	} {
+		if !strings.Contains(createStr, want) {
+			t.Errorf("create.go missing %q", want)
+		}
+	}
+	for _, notWant := range []string{`db.ExecContext(r.Context(), query, vals...)`} {
+		if strings.Contains(createStr, notWant) {
+			t.Errorf("create.go must not contain %q when audit is on", notWant)
+		}
+	}
+
+	update, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "update.go"))
+	if err != nil {
+		t.Fatalf("read update.go: %v", err)
+	}
+	updateStr := string(update)
+	for _, want := range []string{
+		`_, err = tx.ExecContext(r.Context(), query, vals...)`,
+		`strconv.FormatInt(int64(id), 10)`,
+		`"users", "update"`,
+		`"encoding/json"`,
+	} {
+		if !strings.Contains(updateStr, want) {
+			t.Errorf("update.go missing %q", want)
+		}
+	}
+
+	del, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "delete.go"))
+	if err != nil {
+		t.Fatalf("read delete.go: %v", err)
+	}
+	delStr := string(del)
+	for _, want := range []string{
+		`tx.ExecContext(r.Context(), "DELETE FROM users WHERE id = $1", int64(id))`,
+		`auth "`,
+		`"users", "delete", strconv.FormatInt(int64(id), 10), ""`,
+	} {
+		if !strings.Contains(delStr, want) {
+			t.Errorf("delete.go missing %q", want)
+		}
+	}
+
+	actions, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "actions.go"))
+	if err != nil {
+		t.Fatalf("read actions.go: %v", err)
+	}
+	actionsStr := string(actions)
+	for _, want := range []string{
+		`tx, err := db.BeginTx(r.Context(), nil)`,
+		`_, err = tx.ExecContext(r.Context(), "UPDATE users SET status = 'inactive' WHERE id = $1", int64(id))`,
+		`"users", "deactivate", strconv.FormatInt(int64(id), 10), ""`,
+		`auth "`,
+	} {
+		if !strings.Contains(actionsStr, want) {
+			t.Errorf("actions.go missing %q", want)
+		}
+	}
+
+	mw, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "middleware.go"))
+	if err != nil {
+		t.Fatalf("read middleware.go: %v", err)
+	}
+	mwStr := string(mw)
+	for _, want := range []string{
+		`"fmt"`,
+		`func UserID(r *http.Request) string {`,
+		`fmt.Sprintf("%v", id)`,
+	} {
+		if !strings.Contains(mwStr, want) {
+			t.Errorf("middleware.go missing %q (UserID helper must be emitted when audit is on)", want)
+		}
+	}
+
+	if !strings.Contains(string(mw), `func UserID`) {
+		t.Error("middleware.go must define UserID when audit is on")
+	}
+}
+
+func TestGenerateAuditNoValuesAndExcluded(t *testing.T) {
+	dir := t.TempDir()
+	cfg := auditConfig()
+	cfg.Audit.IncludeValues = false
+	cfg.Audit.ExcludeResources = []string{"User"}
+	// Move the User resource to the tail so the generated AuditLog resource
+	// (appended by applyAudit) does not mask exclusion by name lookup; the
+	// resource is excluded by name regardless of order.
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	create, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/user", "create.go"))
+	if err != nil {
+		t.Fatalf("read create.go: %v", err)
+	}
+	createStr := string(create)
+	if strings.Contains(createStr, "var valuesJSON") {
+		t.Error("create.go must not emit values_json when audit.include_values is false")
+	}
+	if strings.Contains(createStr, "INSERT INTO audit_log") {
+		t.Error("create.go must not emit an audit INSERT when the resource is excluded")
+	}
+	if strings.Contains(createStr, "BeginTx") {
+		t.Error("create.go must not wrap in a transaction when the resource is excluded")
+	}
+	// The hookless path stays byte-identical for excluded resources.
+	if !strings.Contains(createStr, "db.ExecContext(r.Context(), query, vals...)") {
+		t.Error("create.go must keep the plain hookless exec for excluded resources")
+	}
+
+	mw, err := os.ReadFile(filepath.Join(dir, "internal/panel/auth", "middleware.go"))
+	if err != nil {
+		t.Fatalf("read middleware.go: %v", err)
+	}
+	if strings.Contains(string(mw), "func UserID") {
+		t.Error("middleware.go must not emit UserID when audit is enabled but every resource is excluded")
+	}
+}
+
+func TestGenerateAuditSchemaSkippedWhenDeclared(t *testing.T) {
+	dir := t.TempDir()
+	cfg := auditConfig()
+	// Simulate the demo/user schema already declaring the audit table.
+	migDir := filepath.Join(dir, "sql", "migrations")
+	if err := os.MkdirAll(migDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(migDir, "schema.sql"), []byte("CREATE TABLE audit_log (\n    id INTEGER PRIMARY KEY AUTOINCREMENT\n);\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(migDir, "audit_log.sql")); !os.IsNotExist(err) {
+		t.Error("must not emit audit_log.sql when a migration already declares the audit table")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sql", "queries", "audit_log.sql")); !os.IsNotExist(err) {
+		t.Error("must not emit audit_log.sql queries when a migration already declares the audit table")
+	}
+}
+
+func TestGenerateAuditSchemaEmitted(t *testing.T) {
+	dir := t.TempDir()
+	g := New(auditConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	ddl, err := os.ReadFile(filepath.Join(dir, "sql", "migrations", "audit_log.sql"))
+	if err != nil {
+		t.Fatalf("read audit_log.sql: %v", err)
+	}
+	ddlStr := string(ddl)
+	for _, want := range []string{
+		"CREATE TABLE audit_log (",
+		"user_id TEXT",
+		"values_json",
+		"created_at",
+	} {
+		if !strings.Contains(ddlStr, want) {
+			t.Errorf("audit_log.sql missing %q", want)
+		}
+	}
+	queries, err := os.ReadFile(filepath.Join(dir, "sql", "queries", "audit_log.sql"))
+	if err != nil {
+		t.Fatalf("read queries/audit_log.sql: %v", err)
+	}
+	if !strings.Contains(string(queries), "-- name: ListAuditLogs :many") {
+		t.Error("queries/audit_log.sql missing ListAuditLogs")
+	}
+}
+
+func TestAuditForExcludesAugmentedResource(t *testing.T) {
+	g := New(auditConfig(), t.TempDir())
+	g.applyAudit()
+	if g.auditFor(types.Resource{Name: "AuditLog"}) != nil {
+		t.Error("the generated AuditLog resource itself must never be audited")
+	}
+	if g.auditFor(types.Resource{Name: "User"}) == nil {
+		t.Error("User must be audited")
+	}
+}
+
+func TestContainsCreateTable(t *testing.T) {
+	cases := []struct {
+		sql   string
+		table string
+		want  bool
+	}{
+		{"CREATE TABLE audit_log (id INT);", "audit_log", true},
+		{"create table audit_log (id int);", "audit_log", true},
+		{"CREATE TABLE IF NOT EXISTS audit_log (id INT);", "audit_log", true},
+		{`CREATE TABLE "AuditLog" (id INT);`, "auditlog", true},
+		{"CREATE TABLE users (id INT);", "audit_log", false},
+		{"CREATE TABLE audit_trail (id INT);", "audit_log", false},
+		{"-- comment about audit_log", "audit_log", false},
+		{"", "audit_log", false},
+	}
+	for _, c := range cases {
+		if got := containsCreateTable(c.sql, c.table); got != c.want {
+			t.Errorf("containsCreateTable(%q, %q) = %v, want %v", c.sql, c.table, got, c.want)
+		}
+	}
+}
+
 func TestGenerateHooks(t *testing.T) {
 	dir := t.TempDir()
 	g := New(hookConfig(), dir)

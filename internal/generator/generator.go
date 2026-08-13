@@ -150,13 +150,19 @@ func (g *Generator) Generate() error {
 
 	// Plugins run after the user's SQL is copied (plugin SQL must land in the
 	// out dir before sqlc runs) and before any resource/page generation. The
-	// second ensureDirs call creates handler/view dirs for plugin-contributed
-	// resources.
+	// audit log augments the config after plugins (the AuditLog resource is
+	// itself list-only) but before the second ensureDirs so its handler/view
+	// dirs are created. The second ensureDirs call creates handler/view dirs
+	// for plugin- and audit-contributed resources.
 	if err := g.loadPlugins(); err != nil {
 		return fmt.Errorf("loading plugins: %w", err)
 	}
+	g.applyAudit()
 	if err := g.ensureDirs(); err != nil {
 		return fmt.Errorf("creating resource directories: %w", err)
+	}
+	if err := g.generateAuditSchema(); err != nil {
+		return fmt.Errorf("generating audit schema: %w", err)
 	}
 
 	if err := g.generateMain(); err != nil {

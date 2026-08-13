@@ -140,6 +140,13 @@ auth:
   password_reset: true
   remember_me: true
 
+audit:
+  enabled: true
+  table: audit_log
+  include_values: true
+  policy: "admin"
+  exclude_resources: []
+
 resources:
   - name: Role
     label: Roles
@@ -999,6 +1006,17 @@ CREATE TABLE orderlines (
     unit_price REAL NOT NULL DEFAULT 0,
     line_total REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT,
+    user_name TEXT,
+    table_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    row_id TEXT,
+    values_json TEXT,
+    created_at DATETIME DEFAULT (datetime('now'))
 );
 `
 }

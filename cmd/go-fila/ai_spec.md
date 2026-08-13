@@ -45,6 +45,21 @@ connections:
 - `auth.login.rate_limit.max_attempts` / `rate_limit.window_seconds` — ints
 - `auth.registration`, `auth.password_reset`, `auth.remember_me` — bools
 
+## audit
+
+Optional generator-implicit audit log. When `enabled`, every create/update/delete/action
+writes an `audit_log` row (op + audit insert in one transaction) and a list-only
+`AuditLog` resource is generated:
+
+```yaml
+audit:
+  enabled: true
+  table: audit_log            # default
+  include_values: true        # store JSON snapshot of submitted form values
+  policy: "admin"             # optional RBAC roles for the audit resource
+  exclude_resources: []       # resource names to skip
+```
+
 ## navigation
 
 ```yaml

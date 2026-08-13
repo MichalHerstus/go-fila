@@ -30,8 +30,8 @@ type ColumnRef struct {
 // References is the full set of YAML-side references extracted from a config.
 type References struct {
 	Queries    []QueryRef
-	Tables     map[string]string   // resource name -> table name (lowercased)
-	Columns    map[string][]string // resource name -> column/field names referenced
+	Tables     map[string]string      // resource name -> table name (lowercased)
+	Columns    map[string][]string    // resource name -> column/field names referenced
 	ColumnRefs map[string][]ColumnRef // resource name -> column references with location
 }
 

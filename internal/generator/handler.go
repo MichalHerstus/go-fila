@@ -1055,9 +1055,14 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	if g.hookBlockEmits(r.Form.Delete.Hooks) {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
+	authImport := ""
+	if g.auditFor(r) != nil {
+		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
+	}
 
+	hasHooks := g.hookBlockEmits(r.Form.Delete.Hooks)
 	middle := ""
-	if g.hookBlockEmits(r.Form.Delete.Hooks) {
+	if hasHooks {
 		middle += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,
             Action: "delete",
@@ -1066,13 +1071,25 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 `, tName)
 		middle += g.hookCallsStr(r.Form.Delete.Hooks.Before, "scope", "        ") + "\n"
 	}
-	middle += fmt.Sprintf(`        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE %s = $1", int64(id))
+	if g.auditFor(r) != nil {
+		middle += auditTxBeginStr("        ")
+		middle += fmt.Sprintf(`        _, err = tx.ExecContext(r.Context(), "DELETE FROM %s WHERE %s = $1", int64(id))
         if err != nil {
             httperr.Internal(w, err)
             return
         }
 `, tName, idColumn(r))
-	if g.hookBlockEmits(r.Form.Delete.Hooks) {
+		middle += g.auditInsertStr(r, "delete", "strconv.FormatInt(int64(id), 10)", `""`, "        ") + "\n"
+		middle += auditTxCommitStr("        ")
+	} else {
+		middle += fmt.Sprintf(`        _, err = db.ExecContext(r.Context(), "DELETE FROM %s WHERE %s = $1", int64(id))
+        if err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+`, tName, idColumn(r))
+	}
+	if hasHooks {
 		middle += g.hookCallsStr(r.Form.Delete.Hooks.After, "scope", "        ") + "\n"
 	}
 
@@ -1083,7 +1100,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-%s)
+%s%s)
 
 func Delete(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1098,7 +1115,7 @@ func Delete(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), hooksImport, middle, listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, middle, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
@@ -1209,11 +1226,18 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	tName := tableName(r)
 
 	hasHooks := false
+	auditCfg := g.auditFor(r)
+	auditAny := false
 	var dispatch []string
 	for _, a := range r.Actions {
 		useHooks := g.hookBlockEmits(a.Hooks)
 		if useHooks {
 			hasHooks = true
+		}
+		exec := g.actionExecSQL(a)
+		auditAction := auditCfg != nil && exec != ""
+		if auditAction {
+			auditAny = true
 		}
 		var body []string
 		if useHooks {
@@ -1226,7 +1250,16 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 				body = append(body, before)
 			}
 		}
-		if exec := g.actionExecSQL(a); exec != "" {
+		if auditAction {
+			body = append(body, auditTxBeginStr("            "))
+			body = append(body, fmt.Sprintf(`            _, err = tx.ExecContext(r.Context(), %q, int64(id))
+            if err != nil {
+                httperr.Internal(w, err)
+                return
+            }`, exec))
+			body = append(body, g.auditInsertStr(r, a.Name, "strconv.FormatInt(int64(id), 10)", `""`, "            "))
+			body = append(body, auditTxCommitStr("            "))
+		} else if exec != "" {
 			body = append(body, fmt.Sprintf(`            _, err := db.ExecContext(r.Context(), %q, int64(id))
             if err != nil {
                 httperr.Internal(w, err)
@@ -1249,6 +1282,10 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 	if hasHooks {
 		hooksImport = fmt.Sprintf("    hooks %q\n", g.moduleImport("internal/hooks"))
 	}
+	authImport := ""
+	if auditAny {
+		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
+	}
 
 	code := fmt.Sprintf(`package %s
 
@@ -1257,7 +1294,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-%s)
+%s%s)
 
 func Action(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1278,7 +1315,7 @@ func Action(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), hooksImport, strings.Join(dispatch, "\n"), listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, strings.Join(dispatch, "\n"), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
@@ -1517,23 +1554,53 @@ func safeUploadExt(ext string) bool {
         }
         query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
 `, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
-	if g.hookBlockEmits(create.Hooks) {
-		postCode += fmt.Sprintf(`        scope := hooks.Scope{
+	hasHooks := g.hookBlockEmits(create.Hooks)
+	audit := g.auditFor(r)
+	jsonImport := ""
+	if audit != nil && audit.IncludeValues {
+		jsonImport = "    \"encoding/json\"\n"
+	}
+	if hasHooks || audit != nil {
+		if hasHooks {
+			postCode += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,
             Action: "create",
             Values: map[string]interface{}{
 %s        },
         }
 `, tName, scopeValuesStr(colNames))
-		postCode += g.hookCallsStr(create.Hooks.Before, "scope", "        ") + "\n"
-		postCode += fmt.Sprintf(`        var newID int64
+			postCode += g.hookCallsStr(create.Hooks.Before, "scope", "        ") + "\n"
+		}
+		if audit != nil {
+			postCode += auditTxBeginStr("        ")
+			postCode += fmt.Sprintf(`        var newID int64
+        if err := tx.QueryRowContext(r.Context(), query+%q, vals...).Scan(&newID); err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+`, g.returningClause(r))
+			if hasHooks {
+				postCode += "        scope.ID = newID\n"
+			}
+			valuesArg := `""`
+			if audit.IncludeValues {
+				postCode += auditValuesStr(colNames, "        ") + "\n"
+				valuesArg = "string(valuesJSON)"
+			}
+			postCode += g.auditInsertStr(r, "create", `fmt.Sprintf("%d", newID)`, valuesArg, "        ") + "\n"
+			postCode += auditTxCommitStr("        ")
+		} else {
+			postCode += fmt.Sprintf(`        var newID int64
         if err := db.QueryRowContext(r.Context(), query+%q, vals...).Scan(&newID); err != nil {
             httperr.Internal(w, err)
             return
         }
         scope.ID = newID
 `, g.returningClause(r))
-		postCode += g.hookCallsStr(create.Hooks.After, "scope", "        ") + "\n"
+		}
+		if hasHooks {
+			postCode += g.hookCallsStr(create.Hooks.After, "scope", "        ") + "\n"
+		}
 	} else {
 		postCode += `        _, err := db.ExecContext(r.Context(), query, vals...)
         if err != nil {
@@ -1550,7 +1617,7 @@ import (
     "fmt"
     "net/http"
     "strings"
-    %s%s%s
+    %s%s%s%s
     %q
     %q
     auth %q
@@ -1589,6 +1656,7 @@ func Create(db *sql.DB) http.HandlerFunc {
     }
 }
 %s`, pkgName,
+		jsonImport,
 		bcryptImport,
 		fileImport,
 		hooksImport,
@@ -1820,7 +1888,13 @@ func safeUploadExt(ext string) bool {
         vals = append(vals, int64(id))
         query := fmt.Sprintf("UPDATE %%s SET %%s WHERE %%s = $%%d", %q, strings.Join(setClauses, ", "), %q, len(cols)+1)
 `, colsLiteral(colNames), strings.Join(valExprs, ", "), tName, idColumn(r))
-	if g.hookBlockEmits(update.Hooks) {
+	hasHooks := g.hookBlockEmits(update.Hooks)
+	audit := g.auditFor(r)
+	jsonImport := ""
+	if audit != nil && audit.IncludeValues {
+		jsonImport = "    \"encoding/json\"\n"
+	}
+	if hasHooks {
 		postCode += fmt.Sprintf(`        scope := hooks.Scope{
             Table:  %q,
             Action: "update",
@@ -1831,13 +1905,30 @@ func safeUploadExt(ext string) bool {
 `, tName, scopeValuesStr(colNames))
 		postCode += g.hookCallsStr(update.Hooks.Before, "scope", "        ") + "\n"
 	}
-	postCode += `        _, err = db.ExecContext(r.Context(), query, vals...)
+	if audit != nil {
+		postCode += auditTxBeginStr("        ")
+		postCode += `        _, err = tx.ExecContext(r.Context(), query, vals...)
         if err != nil {
             httperr.Internal(w, err)
             return
         }
 `
-	if g.hookBlockEmits(update.Hooks) {
+		valuesArg := `""`
+		if audit.IncludeValues {
+			postCode += auditValuesStr(colNames, "        ") + "\n"
+			valuesArg = "string(valuesJSON)"
+		}
+		postCode += g.auditInsertStr(r, "update", "strconv.FormatInt(int64(id), 10)", valuesArg, "        ") + "\n"
+		postCode += auditTxCommitStr("        ")
+	} else {
+		postCode += `        _, err = db.ExecContext(r.Context(), query, vals...)
+        if err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+`
+	}
+	if hasHooks {
 		postCode += g.hookCallsStr(update.Hooks.After, "scope", "        ") + "\n"
 	}
 
@@ -1849,7 +1940,7 @@ import (
     "net/http"
     "strconv"
     "strings"
-%s%s
+%s%s%s
     %q
     %q
     %q
@@ -1904,6 +1995,7 @@ func Update(db *sql.DB) http.HandlerFunc {
     }
 }
 %s`, pkgName,
+		jsonImport,
 		fileImport,
 		hooksImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),

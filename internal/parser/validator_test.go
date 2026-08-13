@@ -240,3 +240,56 @@ func TestValidateAllReportsEveryProblem(t *testing.T) {
 		t.Errorf("Validate should return the first error, got %v", got)
 	}
 }
+
+const auditYAML = `
+version: "1"
+panel:
+  name: Admin
+  path: /admin
+resources:
+  - name: User
+    list:
+      columns:
+        - name: name
+audit:
+  enabled: true
+  table: custom_audit
+  include_values: true
+  exclude_resources: [User]
+`
+
+func TestParseAuditValid(t *testing.T) {
+	cfg, err := Parse([]byte(auditYAML))
+	if err != nil {
+		t.Fatalf("expected valid config with audit, got error: %v", err)
+	}
+	if cfg.Audit == nil || !cfg.Audit.Enabled {
+		t.Fatal("audit block must be parsed")
+	}
+	if cfg.Audit.Table != "custom_audit" {
+		t.Errorf("audit.table = %q, want custom_audit", cfg.Audit.Table)
+	}
+	if !cfg.Audit.IncludeValues {
+		t.Error("audit.include_values must be true")
+	}
+	if len(cfg.Audit.ExcludeResources) != 1 || cfg.Audit.ExcludeResources[0] != "User" {
+		t.Errorf("audit.exclude_resources = %v, want [User]", cfg.Audit.ExcludeResources)
+	}
+}
+
+func TestParseAuditDefaultsTable(t *testing.T) {
+	cfg, err := Parse([]byte(strings.ReplaceAll(auditYAML, "table: custom_audit", "")))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Audit.Table != "audit_log" {
+		t.Errorf("default audit.table = %q, want audit_log", cfg.Audit.Table)
+	}
+}
+
+func TestParseAuditRejectsUnknownExcludedResource(t *testing.T) {
+	yaml := strings.ReplaceAll(auditYAML, "exclude_resources: [User]", "exclude_resources: [Nope]")
+	if _, err := Parse([]byte(yaml)); err == nil {
+		t.Fatal("expected error for unknown audit.exclude_resources resource")
+	}
+}

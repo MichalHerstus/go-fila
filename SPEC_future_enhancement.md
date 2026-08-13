@@ -79,9 +79,10 @@ go-fila generator sources that emit the affected generated-app code.
 
 ### Low / correctness
 
-- `html` widget + `stat` render DB output via `templ.Raw` (untrusted data = stored
-  XSS) — document or opt-in.
-  Source: `internal/generator/templ.go:998-1027`
+- `html` widget renders DB output via `templ.Raw` (untrusted data = stored XSS) —
+  documented as trusted-input-required (`SPEC.md`); `stat`/`stats_grid` values are
+  numeric-only (safe by construction). ✅ documented (Phase C, 2026-08-13)
+  Source: `internal/generator/templ.go:1071`, `router.go:383`
 - Action + bulk routes skip RBAC entirely (documented design) — consider optional
   enforcement.
 - `update.go` / `delete.go` hardcode `WHERE id` instead of `idColumn(r)` — breaks
@@ -156,13 +157,68 @@ optional row-level RBAC enforcement.
   `r.With(auth.ActionRBACMiddleware(res))` only when a policy exists
   (`hasActionPolicies`).
 
-**Phase C — Performance & correctness**
+**Phase C — Performance & correctness** (status 2026-08-13: C.0 all done, C.2 done,
+C.3 done, **C.1 deferred**)
 Windowed COUNT, configurable `per_page`, pool settings wiring, transactional bulk,
-batched options loader, `idColumn(r)` in update/delete, widget error logging.
+batched options loader, `idColumn(r)` in update/delete, widget error logging, request
+logging with request-id + timing.
+
+**C.0 — Original items (all implemented; verified 2026-08-13):**
+1. **Windowed COUNT** ✅ — the list/card data query emits
+   `SELECT {cols}, COUNT(*) OVER() AS _total FROM …` and scans `_total` per row — a
+   single round trip; when the page is empty `totalSet` stays false and the handler
+   falls back to `total = page*perPage`. The old two-query + `countClauses`/$N-renumber
+   hack is gone. Source: `internal/generator/handler.go` (list/card).
+2. **Configurable `per_page`** ✅ — `ListConfig.PerPage` (default 20 applied in
+   `internal/parser/validator.go:95`), an editor "Per page" field
+   (`cmd/go-fila/editor/resource.go:166`), and the handler reads `r.List.PerPage` for
+   `LIMIT/OFFSET` (`handler.go:326`). Sources: `internal/types/resource.go:33`.
+3. **Pool settings wiring** ✅ — `connections.*.pool` (`max_open_conns`/`max_idle_conns`/
+   `conn_max_lifetime`) is emitted as `db.SetMaxOpenConns`/`SetMaxIdleConns`/
+   `SetConnMaxLifetime` right after `Ping()` and before the sanity query; no setters
+   when the block is absent. Source: `internal/generator/main.go`
+   (`TestGeneratePoolSettings`).
+4. **Transactional bulk** ✅ — the bulk id-loop runs inside a single `db.BeginTx`;
+   `Commit()` only when every Exec succeeded, `defer Rollback()` otherwise. Source:
+   `internal/generator/bulk.go`.
+5. **Batched options loader** ✅ — distinct `options_query` values load once per resource
+   into a shared `{name}Opts := map[string]string{}`; no N queries for N fields.
+   Source: `internal/generator/handler.go` (`TestGenerateOptionsLoaderDedupe`).
+6. **Widget error logging** ✅ — every widget `Query*`/`Scan` error is
+   `log.Printf`'d and the widget renders with whatever rows it got. Source:
+   `internal/generator/router.go`.
+7. **`idColumn(r)` in update/delete** ✅ — DELETE/UPDATE use `idColumn(r)` (honoring
+   `id_column:` overrides) instead of a hardcoded `WHERE id`. Source:
+   `internal/generator/handler.go:1069,1822`; regression tests at
+   `generator_test.go:1360-1389`.
+
+**C.2 — Stored-XSS documentation (done 2026-08-13):** only the `html` widget is a real
+raw-HTML vector — it casts a query *string* result to `template.HTML` and renders via
+`templ.Raw` (`internal/generator/router.go:383`, `templ.go:1071`); the query is
+config-authored, so its *result* must be trusted input. `stat`/`stats_grid` values are
+safe by construction: they scan into `int64` and wrap `fmt.Sprintf("%d", …)`, so only
+config-authored numbers ever reach `statWidget`'s `templ.Raw` (`templ.go:1090`). No code
+change; documented in `SPEC.md` and the §1 Low finding is marked ✅ documented.
+
+**C.1 — Request logging with request-id + timing (deferred, not implemented):** remove
+the dead `SessionMiddleware` (emitted `auth.go:574-582`, registered at `router.go:52` —
+its `/static/` branch no-ops then falls through to `next`) and replace the
+`if logLevel == "err" { errorOnlyLogger } else { middleware.Logger }` split
+(`router.go:46-50`) and the `errorOnlyLogger` literal (`router.go:139-148`, no timing /
+request id) with a single generated `requestLogger`: `r.Use(middleware.RequestID)` then
+`r.Use(requestLogger(logLevel == "err"))`, wrapping `middleware.NewWrapResponseWriter`,
+`time.Since(start)`, logging `[<reqid>] <method> <uri> <status> <duration>` (err mode
+skips status < 400). `--log full|err` flag values unchanged; generated router imports
+gain `"time"`. This is a global emitter change (all configs), so the byte-identical
+regression guard does not apply — assert via `assertGeneratedGoParses` + snippet tests.
+
+**C.3 — Cross-cutting (done 2026-08-13):** version 0.9.0 → 0.10.0
+(`cmd/go-fila/main.go`); AGENTS.md hardening notes; gates `go build ./...`,
+`go vet ./...`, `go test ./...`, `gofmt -l .`.
 
 **Phase D — Feature roadmap**
 
-Status: planned (2026-08-09). Four milestones below; implementation order D2 → D3 →
+Status: partially implemented (2026-08-13). Implementation order D2 → D3 →
 D5 → D6 (D1 — auth features — and D4 — API mode — are excluded from the plan).
 Decisions already taken: sqlite procedures are **YAML-seeded only** (no runtime
 editor UI). Assumptions flagged ⚠️ below are open to veto before implementation.
@@ -170,7 +226,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Item | Status |
 |---|---|
 | Plugin system (`SPECv05plus.md` M4) | **Done** (loader, `pkg/plugin`, `--skip-plugins`); remaining work is M5 (plugin **fn** hooks) → D5 |
-| Audit log resource | Greenfield (strong existing infra: `hooks.Scope`, `RETURNING id`, `auth.UserName`) |
+| Audit log resource | **Done (D2)** — config `audit` block, generator-implicit INSERTs on create/update/delete/action in one tx, augmented list-only AuditLog resource + nav, driver-aware DDL/queries, demo-enabled |
 | CSV import + export column selection | Export exists (all list cols); import + selection new |
 | SQLite stored procedures (batch-in-table) | Greenfield |
 | AI-assisted `go-fila edit` (OpenRouter / LM Studio) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, path+value diff output (`changedPaths`), local LM Studio provider via `--model "lmstudio"`, httptest stub (OpenRouter + LM Studio) + `mergeYAML`/`changedPaths` suites) |
@@ -182,6 +238,33 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 ---
 
 ### D2 — Audit log resource
+
+**Status: implemented (2026-08-13).** Config block `audit` (`enabled`, `table` default
+`audit_log`, `include_values`, `policy`, `exclude_resources`) implemented in
+`internal/generator/audit.go`. `applyAudit()` runs after plugins in `Generate()` and
+appends a list-only `AuditLog` resource (`default_sort: -created_at`, `values_json`
+column only when `include_values`, RBAC from `policy`) + an "Audit Log" nav group.
+`generateAuditSchema()` emits driver-aware `audit_log` DDL into `sql/migrations/` and a
+sqlc List/Count file into `sql/queries/`, both skipped when a migration already declares
+the audit table (`auditTableInMigrations`/`containsCreateTable` — otherwise sqlc fails
+with "relation already exists"). `auditFor(r)` honors `exclude_resources` and never
+audits the generated AuditLog resource. `auditInsertStr`/`auditTxBeginStr`/
+`auditTxCommitStr`/`auditValuesStr` weave
+`INSERT INTO audit_log (user_id, user_name, table_name, action, row_id, values_json)
+VALUES ($1,$2,$3,$4,$5,$6)` into create/update/delete/action handlers, with the op + audit
+insert wrapped in one transaction (`tx, err := db.BeginTx` / `defer tx.Rollback()` /
+`tx.Commit()`; the hookless `_, err := db.ExecContext` path and byte-identical output are
+relaxed for audited resources). Actor id comes from a generated `auth.UserID(r)` helper
+(gated on `auditAnyResource()`); create needs the `RETURNING <id>` capture path even
+without hooks (`fmt.Sprintf("%d", newID)`); delete/action store `row_id` only.
+`values_json` contains bcrypt output (documented). Demo enables audit
+(`include_values: true, policy: "admin"`) with `audit_log` in `demoSchema()`. Tests:
+generator snippets (create/update/delete/action/middleware, no-values+excluded keeps
+hookless path, schema skipped-when-declared, `containsCreateTable` table), parser
+(defaults/validation), plus a full HTTP e2e against the generated demo (login → create/
+update/action/delete → rows appear in `audit_log` with correct actor/action/row_id/values
+JSON; curl's naive cookie jar 403s on the two-cookie session-rotation response — use an
+RFC 6265 jar).
 
 **Design (recommended: generator-implicit audit on every mutating op)**
 ```yaml

@@ -299,6 +299,17 @@ When any form field has type `file` or `image`:
 - Middleware: `AuthMiddleware` reads `session.Values["user_id"]`, stores `user_id` + `role` in context.
 - RBAC middleware generated **conditionally**: `r.With(auth.RBACMiddleware(resource, action)).Get/Post(...)` when resource has `policies:` in YAML. Action routes **never** use RBAC (plain `r.Post`).
 
+## Audit log (D2)
+
+Config block `audit: {enabled, table (default audit_log), include_values, policy, exclude_resources}` (parser validates the block; unknown excluded resources are an error). Implementation lives in `internal/generator/audit.go`; orchestration in `Generate()`:
+
+- **`applyAudit()`** runs after `loadPlugins()` (before the second `ensureDirs` so the resource dirs are created). It appends a **list-only** `AuditLog` resource (`default_sort: -created_at`, `values_json` json column only when `include_values`, `policies.view_any` from `audit.policy`, `PerPage: 20` — the validator default does NOT apply post-parse) plus an "Audit Log" navigation group. Skipped when a resource named `AuditLog` already exists. The appended resource flows through the normal resource/router/views pipeline unchanged.
+- **`generateAuditSchema()`** writes driver-aware DDL (`sql/migrations/{table}.sql` — postgres/mssql `BIGSERIAL`+`JSONB`, sqlite `AUTOINCREMENT`+`TEXT`) and a sqlc List/Count file (`sql/queries/{table}.sql`). Both are **skipped when any `.sql` migration in the out dir already declares the table** (`auditTableInMigrations` / `containsCreateTable`, case-insensitive, `IF NOT EXISTS`-aware) — otherwise sqlc dies with `relation "audit_log" already exists` (the demo schema declares it, so the demo generates no audit files).
+- **`auditFor(r)`** returns the config when audit is on, the resource is not in `exclude_resources`, and it is not the generated `AuditLog` resource. `auditAnyResource()` gates the **emitted `auth.UserID(r)` helper** (middleware.go) — `fmt` import + `UserID` are only added when ≥1 resource is audited, keeping the auth output byte-identical otherwise.
+- **Handler weaving** (create/update/delete/action): the op + audit INSERT run inside ONE transaction — `tx, err := db.BeginTx(r.Context(), nil)` / `defer tx.Rollback()` / `tx.Commit()` (after-hooks still run on `db`, after commit; before-hooks before the tx). `auditTxBeginStr`/`auditTxCommitStr` emit the prologue/epilogue; `auditInsertStr(r, action, rowID, valuesArg, indent)` emits `if _, err := tx.ExecContext(r.Context(), "INSERT INTO {table} (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1,$2,$3,$4,$5,$6)", auth.UserID(r), auth.UserName(r), {table}, {action}, {rowID}, {valuesArg}); err != nil { ... }`. **The hookless `_, err := db.ExecContext` path is NOT emitted for audited resources** — the `RETURNING <id>`/`OUTPUT INSERTED.<id>` capture path is used on create even without hooks (`var newID int64` + `if err := tx.QueryRowContext(...).Scan(&newID)`; row_id = `fmt.Sprintf("%d", newID)`), update/delete use `_, err = tx.ExecContext` (reusing the outer `err`), actions use `_, err = tx.ExecContext` inside the case `{ }` block (where `err` is freshly declared by BeginTx's `:=`). Delete/action pass `""` for values; create/update pass `string(valuesJSON)` from `auditValuesStr(colNames, indent)` (`var valuesJSON []byte` + `json.Marshal(map[string]interface{}{...})` referencing `vals[i]` — `encoding/json` import added when `include_values`). Action cases only audit when the action actually executes SQL (`exec != ""`); proc-only-on-sqlite actions skip audit.
+- **Imports to add conditionally**: create.go `encoding/json` (include_values only); delete.go/actions.go `auth` (audited only); update.go `encoding/json`. create.go/update.go already import `fmt`/`auth`; delete/actions already import `strconv`.
+- **Gotchas**: `values_json` for password fields holds the bcrypt output (documented, not plaintext). The tx `err` interplay differs per handler (see above) — `if _, err := tx.ExecContext(...)` is legal anywhere (if-init shadows). For curl e2e, the login session-rotation emits TWO `Set-Cookie` for the same name and curl's naive cookie jar ends up empty (POSTs 403); use an RFC 6265 jar (Python `http.cookiejar`). Demo enables audit (`include_values: true, policy: "admin"`) with `audit_log` in `demoSchema()`.
+
 ## Security hardening (Phase A of SPEC_future_enhancement.md)
 
 The generated app ships security defaults. Keep them intact when editing the emitters:
@@ -365,6 +376,17 @@ The generated app ships security defaults. Keep them intact when editing the emi
   with `r.With(auth.ActionRBACMiddleware("<res>"))` — gated on
   `hasActionPolicies(res)` (a `policies:` block alone is NOT enough; the action
   itself must set `policy:`).
+
+### Phase C (performance & correctness)
+
+Already-implemented items (verified 2026-08-13): windowed `COUNT(*) OVER() AS _total`
+on list/card (single round trip, empty-page fallback), configurable `r.List.PerPage`
+(default 20), `connections.*.pool` → `db.Set*` setters, transactional bulk, batched
+(deduped) options loader, per-widget error logging, and `idColumn(r)` in update/delete.
+The `html` widget renders its query result as **raw HTML** (`templ.Raw`) — document in
+configs that it requires trusted input; `stat` values are numeric-only. C.1 (request-id +
+timing request logger replacing the dead `SessionMiddleware` and the
+`middleware.Logger`/`errorOnlyLogger` split) is deferred.
 
 ## Pages & widgets
 

@@ -17,6 +17,21 @@ type Config struct {
 	Resources   []Resource            `yaml:"resources"`
 	Pages       []Page                `yaml:"pages"`
 	Plugins     []PluginConfig        `yaml:"plugins"`
+	Audit       *AuditConfig          `yaml:"audit"`
+}
+
+// AuditConfig enables a generator-implicit audit log of every mutating
+// operation (create/update/delete/action). When enabled, the generator
+// augments the config with a list-only AuditLog resource and an "Audit Log"
+// navigation group, emits the audit_log table DDL into sql/migrations, and
+// weaves an INSERT INTO audit_log into the create/update/delete/action
+// handlers (op + audit insert run inside one transaction).
+type AuditConfig struct {
+	Enabled          bool     `yaml:"enabled"`
+	Table            string   `yaml:"table"`
+	IncludeValues    bool     `yaml:"include_values"`
+	Policy           string   `yaml:"policy"`
+	ExcludeResources []string `yaml:"exclude_resources"`
 }
 
 // Panel describes the admin panel shell: its id, URL path, display name,

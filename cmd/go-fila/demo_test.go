@@ -32,6 +32,12 @@ func TestDemoYAMLValid(t *testing.T) {
 	if !strings.Contains(demoSchema(), "CREATE TABLE") {
 		t.Fatal("demo schema missing")
 	}
+	if cfg.Audit == nil || !cfg.Audit.Enabled {
+		t.Fatal("demo config must enable the audit log")
+	}
+	if !strings.Contains(demoSchema(), "CREATE TABLE audit_log") {
+		t.Fatal("demo schema must define the audit_log table")
+	}
 }
 
 // TestRandomPassword ensures the generated one-time admin password has the

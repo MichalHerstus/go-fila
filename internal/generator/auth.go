@@ -557,13 +557,27 @@ func resetLoginLimit(r *http.Request) {
 		}
 	}
 
+	auditImport := ""
+	auditHelper := ""
+	if g.auditAnyResource() {
+		auditImport = "    \"fmt\"\n"
+		auditHelper = `
+func UserID(r *http.Request) string {
+    if id := r.Context().Value(UserKey); id != nil {
+        return fmt.Sprintf("%v", id)
+    }
+    return ""
+}
+`
+	}
+
 	middlewareCode := fmt.Sprintf(`package auth
 
 import (
     "context"
     "net/http"
     "strings"
-)
+%s)
 
 type contextKey string
 
@@ -609,7 +623,7 @@ func UserName(r *http.Request) string {
     }
     return ""
 }
-%s`, panelPath, panelPath, rbacMiddleware+actionRBACMiddleware)
+%s%s`, auditImport, panelPath, panelPath, auditHelper, rbacMiddleware+actionRBACMiddleware)
 
 	if err := os.WriteFile(filepath.Join(dir, "middleware.go"), []byte(middlewareCode), 0644); err != nil {
 		return err

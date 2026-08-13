@@ -100,6 +100,19 @@ auth:
   password_reset: true
   remember_me: true
 
+# Optional generator-implicit audit log (D2). When enabled, every mutating
+# operation (create/update/delete/action) writes an audit_log row inside the
+# same transaction, and a list-only AuditLog resource + "Audit Log" nav group
+# are generated. The audit_log DDL is emitted into sql/migrations (unless a
+# migration already declares the table). values_json holds the submitted form
+# values (create/update only); password fields appear as bcrypt output.
+audit:
+  enabled: false
+  table: audit_log            # default
+  include_values: false       # store JSON snapshot of form values
+  policy: "admin"             # optional RBAC roles for the audit resource
+  exclude_resources: []       # resource names to skip
+
 navigation:
   - group: "User Management"
     icon: users
@@ -362,6 +375,12 @@ pages:
 ```
 
 **Widget types:** `stat`, `stats_grid`, `chart` (line/bar/pie/area), `table`, `list`, `html`
+
+> **`html` widget security note:** the `html` widget renders its query result as **raw
+> HTML** (`templ.Raw`). The query itself is config-authored, but its *result* is DB data —
+> a column that untrusted actors can write to becomes a stored-XSS vector in the admin
+> origin. Only use `html` widgets over trusted data. `stat`/`stats_grid` values are
+> numeric-only and safe by construction.
 
 ---
 
