@@ -112,6 +112,23 @@ func ValidateAll(cfg *types.Config) []error {
 		if r.List != nil && r.List.PerPage < 1 {
 			r.List.PerPage = 20
 		}
+		if r.List != nil {
+			for _, ex := range r.List.Export {
+				found := false
+				for _, c := range r.List.Columns {
+					if c.Name == ex {
+						found = true
+						break
+					}
+				}
+				if !found {
+					add(fmt.Errorf("resources[%d] (%s) list.export references unknown column %q", i, r.Name, ex))
+				}
+			}
+		}
+		if r.ImportCSV && (r.Form == nil || r.Form.Create == nil) {
+			add(fmt.Errorf("resources[%d] (%s) import_csv requires a form.create section", i, r.Name))
+		}
 		if err := validateResourceHooks(r); err != nil {
 			add(fmt.Errorf("resources[%d]: %w", i, err))
 		}

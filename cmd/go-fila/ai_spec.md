@@ -91,6 +91,7 @@ Each resource (PascalCase `name`; becomes lowercased URL segment):
     count_query: CountUsers
     per_page: 20
     default_sort: -created_at   # leading "-" = descending
+    export: [name, email]   # optional subset of columns for CSV export (Label headers)
     columns:
       - name: email
         label: Email
@@ -98,6 +99,7 @@ Each resource (PascalCase `name`; becomes lowercased URL segment):
         sortable: true
         searchable: true
         options: {active: Active}   # badge/select display options
+  import_csv: true          # optional: enable CSV import on the list view
   card:
     fields: []             # same field shape as form fields
     columns: 4             # cards per row

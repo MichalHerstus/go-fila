@@ -272,6 +272,27 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 	createBtn := fmt.Sprintf(`<a href="%s/%s/new" class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Create %s</a>`, panelPath, resLower, resLabel)
 	exportBtn := fmt.Sprintf(`<a href={ templ.SafeURL(fmt.Sprintf("%%s/%%s/export/csv", %q, %q)) } class="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 px-4 py-2 text-sm">Export CSV</a>`, panelPath, resLower)
 
+	importBtn := ""
+	importModal := ""
+	if r.ImportCSV {
+		importBtn = `<button type="button" onclick="document.getElementById('import-modal').classList.remove('hidden')" class="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 px-4 py-2 text-sm">Import CSV</button> `
+		importModal = fmt.Sprintf(`
+        <div id="import-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 w-full max-w-md">
+                <h2 class="text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">Import %s from CSV</h2>
+                <form method="POST" enctype="multipart/form-data" action={ templ.SafeURL(fmt.Sprintf("%%s/%%s/import/csv", %q, %q)) }>
+                    <input type="hidden" name="_csrf" value={ data.CSRFToken } />
+                    <input type="file" name="file" accept=".csv" required class="block w-full text-sm text-gray-700 dark:text-gray-300 mb-4" />
+                    <div class="flex justify-end gap-2">
+                        <button type="button" onclick="document.getElementById('import-modal').classList.add('hidden')" class="px-4 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 dark:text-gray-400">Cancel</button>
+                        <button type="submit" class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Import</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+`, resLabel, panelPath, resLower)
+	}
+
 	cardBtn := ""
 	if r.Card != nil {
 		cardBtn = fmt.Sprintf(`<a href="%s/%s/cards" class="text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100 px-4 py-2 text-sm">Cards</a>`, panelPath, resLower)
@@ -280,6 +301,9 @@ func (g *Generator) generateListTempl(dir string, r types.Resource) error {
 	headerBtns := createBtn + " " + exportBtn
 	if cardBtn != "" {
 		headerBtns = createBtn + " " + cardBtn + " " + exportBtn
+	}
+	if importBtn != "" {
+		headerBtns = importBtn + headerBtns
 	}
 
 	bulkBtns := ""
@@ -327,9 +351,9 @@ templ %s(data *viewmodels.ListData) {
 
             @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order)
         </div>
-    </div>
+%s    </div>
 }
-`, templName, resLabel, headerBtns, headers.String(), cells.String(), actionsCol)
+`, templName, resLabel, headerBtns, headers.String(), cells.String(), actionsCol, importModal)
 
 	if hasBulk {
 		code = fmt.Sprintf(`package views
@@ -369,9 +393,9 @@ templ %s(data *viewmodels.ListData) {
 
             @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order)
         </div>
-    </div>
+%s    </div>
 }
-`, templName, resLabel, headerBtns, headers.String(), cells.String(), actionsCol, bulkBtns)
+`, templName, resLabel, headerBtns, headers.String(), cells.String(), actionsCol, bulkBtns, importModal)
 	}
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
@@ -1311,6 +1335,9 @@ templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userNam
             @Sidebar(panelPath, theme)
             <div class="flex-1 flex flex-col min-w-0">
                 @Topbar(panelPath, theme, userName, csrfToken)
+                if flash := viewmodels.FlashMessage(ctx); flash != "" {
+                <div class="bg-green-100 dark:bg-green-900/50 border-b border-green-200 dark:border-green-800 px-6 py-2 text-sm text-green-800 dark:text-green-200">{ flash }</div>
+                }
                 <main class="flex-1 overflow-y-auto p-6">
                     <div class={ fmt.Sprintf("max-w-%%s mx-auto", theme.MaxContentWidth) }>
                         @children

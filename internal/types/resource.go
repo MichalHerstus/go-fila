@@ -20,6 +20,9 @@ type Resource struct {
 	Form     *FormConfig   `yaml:"form"`
 	Actions  []Action      `yaml:"actions"`
 	Policies *Policy       `yaml:"policies"`
+	// ImportCSV enables the POST /{res}/import/csv route and the "Import CSV"
+	// button on the list view. Imports reuse the create form's field set.
+	ImportCSV bool `yaml:"import_csv"`
 }
 
 // ListConfig defines the resource list view: the displayed columns, the rows
@@ -32,6 +35,10 @@ type ListConfig struct {
 	Columns     []Column `yaml:"columns"`
 	PerPage     int      `yaml:"per_page"`
 	DefaultSort string   `yaml:"default_sort"`
+	// Export is an optional subset of column names for CSV export. When set,
+	// the export emits only those columns (with Label headers); when empty the
+	// export falls back to all list columns with raw column-name headers.
+	Export []string `yaml:"export"`
 }
 
 // CardConfig defines a card-grid view of the resource: display fields (cards

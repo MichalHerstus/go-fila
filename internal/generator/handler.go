@@ -1028,6 +1028,11 @@ func (g *Generator) generateFormHandlers(dir string, r types.Resource) error {
 			return err
 		}
 	}
+	if r.ImportCSV {
+		if err := g.generateImportHandler(dir, r); err != nil {
+			return err
+		}
+	}
 	if r.Form.Update != nil {
 		if err := g.generateUpdateHandler(dir, r); err != nil {
 			return err
@@ -1121,19 +1126,55 @@ func Delete(db *sql.DB) http.HandlerFunc {
 }
 
 // generateCSVHandler writes export.go: an ExportCSV(db) handler that selects
-// all list columns ordered by the first column and streams them as an
-// attachment CSV file using encoding/csv.
+// the exported columns ordered by the first column and streams them as an
+// attachment CSV file using encoding/csv. When list.export is set it exports
+// only that subset (with Label headers); otherwise all list columns with
+// raw column-name headers (historical behavior).
 // Params: dir (resource package directory), r (the resource definition).
 // Returns: an error on write failure.
 func (g *Generator) generateCSVHandler(dir string, r types.Resource) error {
 	pkgName := strings.ToLower(r.Name)
 	tName := tableName(r)
 
+	exportCols := r.List.Columns
+	useLabels := false
+	if len(r.List.Export) > 0 {
+		var filtered []types.Column
+		for _, want := range r.List.Export {
+			for _, c := range r.List.Columns {
+				if c.Name == want {
+					filtered = append(filtered, c)
+					break
+				}
+			}
+		}
+		exportCols = filtered
+		useLabels = true
+	}
+
 	var colNames []string
-	for _, c := range r.List.Columns {
+	for _, c := range exportCols {
 		colNames = append(colNames, c.Name)
 	}
 	selectFrag, fromFrag, _, _, _ := g.listSelectFrom(r, tName, colNames)
+
+	headerCode := `        out := make([]string, len(cols))
+        for i, c := range cols {
+            out[i] = csvSafe(c)
+        }
+        wr.Write(out)
+`
+	if useLabels {
+		var labels []string
+		for _, c := range exportCols {
+			lbl := c.Label
+			if lbl == "" {
+				lbl = c.Name
+			}
+			labels = append(labels, fmt.Sprintf("csvSafe(%q)", lbl))
+		}
+		headerCode = fmt.Sprintf("        wr.Write([]string{%s})\n", strings.Join(labels, ", "))
+	}
 
 	code := fmt.Sprintf(`package %s
 
@@ -1160,12 +1201,7 @@ func ExportCSV(db *sql.DB) http.HandlerFunc {
         defer wr.Flush()
 
         cols, _ := rows.Columns()
-        out := make([]string, len(cols))
-        for i, c := range cols {
-            out[i] = csvSafe(c)
-        }
-        wr.Write(out)
-
+%s
         vals := make([]string, len(cols))
         ptrs := make([]interface{}, len(cols))
         for i := range vals {
@@ -1193,7 +1229,7 @@ func csvSafe(s string) string {
     }
     return s
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), selectFrag, fromFrag, tName)
+`, pkgName, g.moduleImport("internal/panel/httperr"), selectFrag, fromFrag, tName, headerCode)
 
 	return os.WriteFile(filepath.Join(dir, "export.go"), []byte(code), 0644)
 }
@@ -1473,6 +1509,60 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 		}
 	}
 
+	// buildCreateParams is the shared INSERT-value constructor used by both the
+	// Create POST and the CSV import handler: it maps a field-name -> value map
+	// onto the create column order, bcrypt-hashes password fields and coerces
+	// booleans. File/image fields are rejected (uploads are request-bound, the
+	// CSV path cannot carry them), so the create POST only uses it when the
+	// resource has no such fields (legacy inline construction otherwise).
+	usesBuildParams := !hasFile
+	needBuildParams := !hasFile || r.ImportCSV
+
+	var buildParamsCode string
+	var formMapCode string
+	if needBuildParams {
+		if hasFile {
+			buildParamsCode = `func buildCreateParams(m map[string]string) ([]interface{}, error) {
+    return nil, fmt.Errorf("file/image uploads are not supported in CSV import")
+}
+`
+		} else {
+			var bpPre []string
+			var bpVals []string
+			for _, f := range paramFields {
+				if f.Type == "password" {
+					bpPre = append(bpPre, fmt.Sprintf(`    %sBytes, err := bcrypt.GenerateFromPassword([]byte(m[%q]), bcrypt.DefaultCost)
+    if err != nil {
+        return nil, err
+    }`, f.Name, f.Name))
+					bpVals = append(bpVals, fmt.Sprintf("string(%sBytes)", f.Name))
+				} else if f.Type == "boolean" {
+					bpVals = append(bpVals, fmt.Sprintf("m[%q] == \"true\"", f.Name))
+				} else {
+					bpVals = append(bpVals, fmt.Sprintf("m[%q]", f.Name))
+				}
+			}
+			buildParamsCode = fmt.Sprintf(`func buildCreateParams(m map[string]string) ([]interface{}, error) {
+%s
+    vals := []interface{}{%s}
+    return vals, nil
+}
+`, strings.Join(bpPre, "\n"), strings.Join(bpVals, ", "))
+		}
+		if usesBuildParams {
+			var entries []string
+			for _, f := range paramFields {
+				entries = append(entries, fmt.Sprintf("%q: r.FormValue(%q)", f.Name, f.Name))
+			}
+			formMapCode = fmt.Sprintf(`        vals, err := buildCreateParams(map[string]string{%s})
+        if err != nil {
+            http.Error(w, "invalid form", http.StatusBadRequest)
+            return
+        }
+`, strings.Join(entries, ", "))
+		}
+	}
+
 	bcryptImport := ""
 	if hasPassword {
 		bcryptImport = `    "golang.org/x/crypto/bcrypt"
@@ -1546,14 +1636,17 @@ func safeUploadExt(ext string) bool {
 		formParseCode = "r.ParseMultipartForm(32 << 20)"
 	}
 
+	valsLine := ""
+	if !usesBuildParams {
+		valsLine = fmt.Sprintf("        vals := []interface{}{%s}\n", strings.Join(valExprs, ", "))
+	}
 	postCode := fmt.Sprintf(`        cols := []string{%s}
-        vals := []interface{}{%s}
-        placeholders := make([]string, len(cols))
+%s        placeholders := make([]string, len(cols))
         for i := range cols {
             placeholders[i] = fmt.Sprintf("$%%d", i+1)
         }
         query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-`, colsLiteral(colNames), strings.Join(valExprs, ", "), tName)
+`, colsLiteral(colNames), valsLine, tName)
 	hasHooks := g.hookBlockEmits(create.Hooks)
 	audit := g.auditFor(r)
 	jsonImport := ""
@@ -1602,12 +1695,21 @@ func safeUploadExt(ext string) bool {
 			postCode += g.hookCallsStr(create.Hooks.After, "scope", "        ") + "\n"
 		}
 	} else {
-		postCode += `        _, err := db.ExecContext(r.Context(), query, vals...)
+		execAssign := ":="
+		if usesBuildParams {
+			execAssign = "="
+		}
+		postCode += fmt.Sprintf(`        _, err %s db.ExecContext(r.Context(), query, vals...)
         if err != nil {
             httperr.Internal(w, err)
             return
         }
-`
+`, execAssign)
+	}
+
+	preInsertCode := preHashCode
+	if usesBuildParams {
+		preInsertCode = formMapCode
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1671,10 +1773,10 @@ func Create(db *sql.DB) http.HandlerFunc {
 		g.Config.Panel.Path,
 		r.Name,
 		formParseCode,
-		preHashCode,
+		preInsertCode,
 		postCode,
 		listPath,
-		uploadHelper)
+		uploadHelper+buildParamsCode)
 
 	return os.WriteFile(filepath.Join(dir, "create.go"), []byte(code), 0644)
 }

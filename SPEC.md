@@ -178,6 +178,7 @@ resources:
           type: datetime
           sortable: true
       default_sort: -created_at
+      export: [id, name, email]   # optional: CSV export emits only these columns (Label headers)
 
     # ── DETAIL VIEW ────────────────────────────────
     detail:
@@ -286,6 +287,13 @@ resources:
       create: "admin"
       update: "admin|manager"
       delete: "admin"
+
+    # ── CSV IMPORT (optional) ───────────────────────
+    # Enables POST /{res}/import/csv + an "Import CSV" button on the list view.
+    # Imports reuse the form.create field set; every row's insert runs inside
+    # one transaction and the result is reported as a ?flash= topbar message.
+    # File/image create fields are rejected (skipped with a per-row error).
+    import_csv: true
 ```
 
 ### Hooks (v0.5+)

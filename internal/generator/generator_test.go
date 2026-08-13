@@ -1798,3 +1798,142 @@ func TestGenerateMakefileNoNPM(t *testing.T) {
 		}
 	}
 }
+
+// csvConfig returns a config exercising D3: a resource with an export column
+// subset and CSV import enabled over its create form fields.
+func csvConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Label: "Users",
+				List: &types.ListConfig{
+					Columns: []types.Column{
+						{Name: "id", Type: "integer"},
+						{Name: "name", Label: "Name", Type: "string"},
+						{Name: "email", Type: "email"},
+						{Name: "status", Type: "badge"},
+					},
+					Export: []string{"name", "email"},
+				},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "text"},
+							{Name: "email", Type: "email"},
+							{Name: "status", Type: "select"},
+						},
+					},
+				},
+				ImportCSV: true,
+			},
+		},
+	}
+}
+
+func readResourceFile(t *testing.T, dir, pkg, file string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources", pkg, file))
+	if err != nil {
+		t.Fatalf("read %s: %v", file, err)
+	}
+	return string(b)
+}
+
+func TestGenerateExportSubset(t *testing.T) {
+	dir := t.TempDir()
+	g := New(csvConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code := readResourceFile(t, dir, "user", "export.go")
+	if !strings.Contains(code, `query := "SELECT name, email FROM users ORDER BY 1"`) {
+		t.Errorf("export must select only the subset columns\n--- generated:\n%s", code)
+	}
+	if !strings.Contains(code, `wr.Write([]string{csvSafe("Name"), csvSafe("email")})`) {
+		t.Errorf("export must emit label headers for the subset\n--- generated:\n%s", code)
+	}
+}
+
+func TestGenerateExportAllColumns(t *testing.T) {
+	cfg := csvConfig()
+	cfg.Resources[0].List.Export = nil
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code := readResourceFile(t, dir, "user", "export.go")
+	if !strings.Contains(code, `query := "SELECT id, name, email, status FROM users ORDER BY 1"`) {
+		t.Errorf("export without subset must keep all list columns\n--- generated:\n%s", code)
+	}
+	if !strings.Contains(code, `out[i] = csvSafe(c)`) {
+		t.Errorf("export without subset must use column-name headers\n--- generated:\n%s", code)
+	}
+}
+
+func TestGenerateImportCSV(t *testing.T) {
+	dir := t.TempDir()
+	g := New(csvConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code := readResourceFile(t, dir, "user", "import.go")
+	for _, want := range []string{
+		`func ImportCSV(db *sql.DB) http.HandlerFunc {`,
+		`rd := csv.NewReader(file)`,
+		`vals, err := buildCreateParams(m)`,
+		`tx, err := db.BeginTx(r.Context(), nil)`,
+		`defer tx.Rollback()`,
+		`if err := tx.Commit(); err != nil {`,
+		`Imported %d, Skipped %d`,
+		`?flash=`,
+	} {
+		if !strings.Contains(code, want) {
+			t.Errorf("import.go must emit %q\n--- generated:\n%s", want, code)
+		}
+	}
+}
+
+func TestCreateUsesBuildCreateParams(t *testing.T) {
+	dir := t.TempDir()
+	g := New(csvConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code := readResourceFile(t, dir, "user", "create.go")
+	if !strings.Contains(code, `func buildCreateParams(m map[string]string) ([]interface{}, error) {`) {
+		t.Errorf("create.go must define buildCreateParams\n--- generated:\n%s", code)
+	}
+	if !strings.Contains(code, `vals, err := buildCreateParams(map[string]string{`) {
+		t.Errorf("create POST must reuse buildCreateParams\n--- generated:\n%s", code)
+	}
+	if strings.Contains(code, `_, err := db.ExecContext`) {
+		t.Errorf("create POST must not redeclare err after buildCreateParams\n--- generated:\n%s", code)
+	}
+}
+
+func TestCreateFileFieldKeepsLegacyPath(t *testing.T) {
+	cfg := csvConfig()
+	cfg.Resources[0].Form.Create.Fields = []types.Field{
+		{Name: "name", Type: "text"},
+		{Name: "avatar", Type: "file"},
+	}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code := readResourceFile(t, dir, "user", "create.go")
+	if !strings.Contains(code, `saveUploadedFile(r, "avatar")`) {
+		t.Errorf("create with file field must keep the upload helper path\n--- generated:\n%s", code)
+	}
+	if strings.Contains(code, `vals, err := buildCreateParams(map[string]string{`) {
+		t.Errorf("create with file field must not use buildCreateParams\n--- generated:\n%s", code)
+	}
+	if !strings.Contains(code, `file/image uploads are not supported in CSV import`) {
+		t.Errorf("import-enabled file resource must emit the buildCreateParams stub\n--- generated:\n%s", code)
+	}
+}

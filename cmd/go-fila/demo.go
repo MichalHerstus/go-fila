@@ -341,6 +341,7 @@ resources:
           type: datetime
           sortable: true
       default_sort: -created_at
+      export: [id, name, email, status]
     card:
       fields:
         - name: name
@@ -435,6 +436,7 @@ resources:
               inactive: Inactive
       delete:
         query: DeleteCustomer
+    import_csv: true
     policies:
       view_any: "admin|manager"
       view: "admin|manager"

@@ -220,6 +220,7 @@ regression guard does not apply — assert via `assertGeneratedGoParses` + snipp
 
 Status: partially implemented (2026-08-13). Implementation order D2 → D3 →
 D5 → D6 (D1 — auth features — and D4 — API mode — are excluded from the plan).
+D2 (audit log) and D3 (CSV import + export column selection) are done.
 Decisions already taken: sqlite procedures are **YAML-seeded only** (no runtime
 editor UI). Assumptions flagged ⚠️ below are open to veto before implementation.
 
@@ -227,7 +228,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 |---|---|
 | Plugin system (`SPECv05plus.md` M4) | **Done** (loader, `pkg/plugin`, `--skip-plugins`); remaining work is M5 (plugin **fn** hooks) → D5 |
 | Audit log resource | **Done (D2)** — config `audit` block, generator-implicit INSERTs on create/update/delete/action in one tx, augmented list-only AuditLog resource + nav, driver-aware DDL/queries, demo-enabled |
-| CSV import + export column selection | Export exists (all list cols); import + selection new |
+| CSV import + export column selection | **Done (D3)** — `list.export` subset (Label headers) + `import_csv` (import.go, shared `buildCreateParams`, transactional, ?flash topbar, modal) |
 | SQLite stored procedures (batch-in-table) | Greenfield |
 | AI-assisted `go-fila edit` (OpenRouter / LM Studio) | **Done (D7)** — `edit --prompt/--apikey/--model/--dry-run` (`cmd/go-fila/ai.go`, embedded `ai_spec.md`, spinner progress, fragment-then-merge (keyed-item), single retry, `.ENV` credential persistence, path+value diff output (`changedPaths`), local LM Studio provider via `--model "lmstudio"`, httptest stub (OpenRouter + LM Studio) + `mergeYAML`/`changedPaths` suites) |
 | Drop Node.js/npm from the dashboard build | **Done (D8)** |
@@ -304,6 +305,32 @@ actor/action/row_id/values JSON.
 ---
 
 ### D3 — CSV import + export column selection
+
+**Status: implemented (2026-08-13).** `ListConfig.Export []string` (optional subset;
+when set the CSV export emits only those columns with `Label` headers, else the
+historical all-list-columns + raw-header behavior) and `resource.import_csv: true`
+(generates `import.go` + `POST /{res}/import/csv`, CSRF-protected and RBAC-wrapped
+with the create permission). The create INSERT value construction was factored out of
+`create.go` into a package-level `buildCreateParams(m map[string]string)
+([]interface{}, error)` shared by the Create POST and the import handler (bcrypt-hashes
+password fields, coerces booleans, returns a clear error for `file`/`image` fields —
+the create POST keeps the legacy inline path only when the resource has such fields,
+where `buildCreateParams` becomes a stub for import). Import parses a multipart CSV,
+maps header cells (trimmed) to the create field names, runs every row's
+`buildCreateParams` + INSERT inside ONE transaction, and redirects to the list with a
+`?flash=...` message ("Imported N, Skipped M: row R: error..."). The flash is
+middleware-stashed into the request context (`flashHandler` + `viewmodels.SetFlash`/
+`FlashMessage`) and rendered as a topbar bar in `Base`. The list view gains an "Import
+CSV" button + modal (outside the bulk `<form>`) when `import_csv` is set. Parser
+rejects unknown `list.export` columns and `import_csv` without a create form. Demo
+enables both on Customer (`export: [id, name, email, status]`, `import_csv: true`).
+Editor: "Import CSV" toggle on the resource page + "Export" string-list editor on the
+list page (`Resources/<res>/List/Export`). Known limitation: imports are NOT audited
+(the audit weaving only covers the create/update/delete/action handlers). Tests:
+generator snippets (export subset/all-columns, import.go reuse + transaction + flash,
+create POST reuses buildCreateParams, file-field resource keeps the upload path +
+stub), parser validation, and a live e2e (3 valid + 1 duplicate-email row →
+"Imported 3, Skipped 1" flash; export returns only the selected columns).
 
 **Export column selection:** `ListConfig` gains `Export []string` (optional subset).
 `generateCSVHandler` uses those column names + `Label` headers when set (falls back to

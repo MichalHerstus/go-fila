@@ -418,6 +418,15 @@ func (e *Editor) resolveResList(ridx int, base string, rest []string) (navTarget
 			}}, nil
 		}
 	}
+	if matchesSeg(rest[0], "Export") && len(rest) == 1 {
+		l := e.cfg.Resources[ridx].List
+		path := base + "/List/Export"
+		return navTarget{path, func() tview.Primitive {
+			return e.stringListPage(path, "Export columns",
+				func() []string { return l.Export },
+				func(v []string) { l.Export = v })
+		}}, nil
+	}
 	return navTarget{}, navErr(strings.Join(rest, "/"))
 }
 
@@ -854,7 +863,7 @@ func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 		switch foldSeg(rest[0]) {
 		case "list":
 			if len(rest) == 1 {
-				return []string{"Columns"}, true
+				return []string{"Columns", "Export"}, true
 			}
 			if matchesSeg(rest[1], "Columns") {
 				if len(rest) == 2 {

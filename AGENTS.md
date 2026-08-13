@@ -310,6 +310,47 @@ Config block `audit: {enabled, table (default audit_log), include_values, policy
 - **Imports to add conditionally**: create.go `encoding/json` (include_values only); delete.go/actions.go `auth` (audited only); update.go `encoding/json`. create.go/update.go already import `fmt`/`auth`; delete/actions already import `strconv`.
 - **Gotchas**: `values_json` for password fields holds the bcrypt output (documented, not plaintext). The tx `err` interplay differs per handler (see above) — `if _, err := tx.ExecContext(...)` is legal anywhere (if-init shadows). For curl e2e, the login session-rotation emits TWO `Set-Cookie` for the same name and curl's naive cookie jar ends up empty (POSTs 403); use an RFC 6265 jar (Python `http.cookiejar`). Demo enables audit (`include_values: true, policy: "admin"`) with `audit_log` in `demoSchema()`.
 
+## CSV export subset + import (D3)
+
+- **`list.export`** (`[]string`, optional) — when set, `generateCSVHandler` (export.go)
+  SELECTs only those columns (still through `listSelectFrom` for FK joins) and writes a
+  header row of `Label` headers (`csvSafe(label)` fallback to the column name). Empty →
+  historical behavior (all list columns, raw `rows.Columns()` headers).
+- **`import_csv: true`** — `generateImportHandler` (import.go) emits
+  `ImportCSV(db) http.HandlerFunc`; the router registers
+  `{rbacPrefix("create")}Post("/{res}/import/csv", …)`. Pipeline: `r.ParseMultipartForm`
+  → `r.FormFile("file")` → `csv.NewReader` → header cells trimmed into a
+  `map[string]int` → one `tx, err := db.BeginTx` around every row's
+  `buildCreateParams(m)` + `tx.ExecContext(INSERT)` (row errors are counted as skipped,
+  not fatal) → `tx.Commit` → redirect to the list with
+  `"<list>?flash="+url.QueryEscape("Imported N, Skipped M: row R: error; …")`.
+- **`buildCreateParams(m map[string]string) ([]interface{}, error)`** is emitted in
+  create.go and shared by the Create POST and ImportCSV: it maps create-form field names
+  onto the INSERT column order, bcrypt-hashes password fields (propagating the error) and
+  coerces booleans. **File/image fields cannot go through it** (uploads are request-bound):
+  when the resource has one, the Create POST keeps the legacy inline
+  `vals := []interface{}{saveUploadedFile(r, …), …}` path and `buildCreateParams` becomes
+  a stub returning `file/image uploads are not supported in CSV import` (emitted only when
+  `import_csv` is also set). When the POST uses it, the hookless exec line becomes
+  `_, err = db.ExecContext` (err already declared — `:=` would fail to compile).
+- **Flash**: the import redirect carries `?flash=…`; the emitted router runs a
+  `flashHandler` middleware that stashes it in the request context via
+  `viewmodels.SetFlash`; `Base` renders it as a green topbar bar via
+  `viewmodels.FlashMessage(ctx)` (`ctx` is accessible inside templ bodies). The flash
+  survives the 302 redirect (urllib/curl -L follow it); GET navigations without
+  `?flash=` render no bar.
+- **List templ**: when `import_csv` is set the header gains an "Import CSV" button and a
+  `#import-modal` (outside the bulk `<form>`, `enctype="multipart/form-data"`) is
+  appended after pagination in BOTH the normal and hasBulk templ variants.
+- **Gotchas**: imports are NOT audited (audit weaving only covers the
+  create/update/delete/action handlers). The CSV header must name the create fields
+  exactly (trimmed); missing columns become empty strings. `$N` placeholders work on all
+  drivers. Sprintf args: the `?flash=` redirects build the path as
+  `%q+"?flash="+url.QueryEscape(…)` — pass the bare list path as `%q`, never with
+  `?flash=` appended, or you get a double `?flash=`.
+- Editor: "Import CSV" yes/no on the resource page; "Export" string-list on the list
+  page (`Resources/<res>/List/Export`, registered in `nav.go`).
+
 ## Security hardening (Phase A of SPEC_future_enhancement.md)
 
 The generated app ships security defaults. Keep them intact when editing the emitters:

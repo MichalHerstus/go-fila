@@ -63,6 +63,7 @@ func (e *Editor) resourcePage(idx int) tview.Primitive {
 		e.addButton(f, "Detail", func() { e.showPage(e.resDetailPath(idx), e.detailPage(idx)) })
 		e.addButton(f, "Form", func() { e.showPage(e.resFormPath(idx), e.formPage(idx)) })
 		e.head(f, "Behavior")
+		e.yesno(f, "Import CSV", r.ImportCSV, func(v bool) { r.ImportCSV = v })
 		e.addButton(f, "Actions", func() { e.showPage(e.resActionsPath(idx), e.actionsPage(idx)) })
 		e.addButton(f, "Policies", func() { e.showPage(e.resPoliciesPath(idx), e.policiesPage(idx)) })
 		e.head(f, "Queries")
@@ -165,6 +166,12 @@ func (e *Editor) listPage(idx int) tview.Primitive {
 		renderCQ = qc.addRow(f, "", func() string { return l.CountQuery })
 		e.num(f, "Per page", l.PerPage, func(v int) { l.PerPage = v })
 		e.str(f, "Default sort", l.DefaultSort, func(v string) { l.DefaultSort = v })
+		e.addButton(f, "Export", func() {
+			path := e.resListPath(idx) + "/Export"
+			e.showPage(path, e.stringListPage(path, "Export columns", func() []string {
+				return l.Export
+			}, func(v []string) { l.Export = v }))
+		})
 		qc.reloadButton(f)
 		e.addButton(f, "Columns", func() {
 			e.showPage(e.resColumnsPath(idx), e.columnsPage(idx))

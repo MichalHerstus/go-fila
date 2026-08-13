@@ -42,12 +42,32 @@ func (g *Generator) generateViewModels() error {
 	code := fmt.Sprintf(`package viewmodels
 
 import (
+    "context"
     "database/sql"
     "encoding/json"
     "fmt"
     "html/template"
     "time"
 )
+
+type flashKey struct{}
+
+// SetFlash stashes a one-shot message (e.g. a CSV import result) in the request
+// context so the Base layout can render it in the topbar area.
+func SetFlash(ctx context.Context, msg string) context.Context {
+    if msg == "" {
+        return ctx
+    }
+    return context.WithValue(ctx, flashKey{}, msg)
+}
+
+// FlashMessage returns the flash message stashed in the context, if any.
+func FlashMessage(ctx context.Context) string {
+    if s, ok := ctx.Value(flashKey{}).(string); ok {
+        return s
+    }
+    return ""
+}
 
 type ThemeConfig struct {
 	DarkMode            bool

@@ -38,6 +38,21 @@ func TestDemoYAMLValid(t *testing.T) {
 	if !strings.Contains(demoSchema(), "CREATE TABLE audit_log") {
 		t.Fatal("demo schema must define the audit_log table")
 	}
+	foundCSV := false
+	for _, r := range cfg.Resources {
+		if r.Name == "Customer" {
+			if !r.ImportCSV {
+				t.Fatal("demo Customer must enable import_csv")
+			}
+			if len(r.List.Export) != 4 {
+				t.Fatal("demo Customer must set a list.export subset")
+			}
+			foundCSV = true
+		}
+	}
+	if !foundCSV {
+		t.Fatal("demo config must contain the Customer resource")
+	}
 }
 
 // TestRandomPassword ensures the generated one-time admin password has the

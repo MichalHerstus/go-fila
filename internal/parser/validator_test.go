@@ -293,3 +293,50 @@ func TestParseAuditRejectsUnknownExcludedResource(t *testing.T) {
 		t.Fatal("expected error for unknown audit.exclude_resources resource")
 	}
 }
+
+const csvResourceYAML = `
+version: "1"
+panel:
+  name: Admin
+  path: /admin
+resources:
+  - name: User
+    list:
+      columns:
+        - name: name
+        - name: email
+      export: [name, email]
+    form:
+      create:
+        fields:
+          - name: name
+          - name: email
+    import_csv: true
+`
+
+func TestParseCsvImportValid(t *testing.T) {
+	cfg, err := Parse([]byte(csvResourceYAML))
+	if err != nil {
+		t.Fatalf("expected valid config, got error: %v", err)
+	}
+	if !cfg.Resources[0].ImportCSV {
+		t.Error("import_csv must parse true")
+	}
+	if len(cfg.Resources[0].List.Export) != 2 || cfg.Resources[0].List.Export[0] != "name" {
+		t.Errorf("list.export = %v, want [name email]", cfg.Resources[0].List.Export)
+	}
+}
+
+func TestParseCsvExportRejectsUnknownColumn(t *testing.T) {
+	yaml := strings.ReplaceAll(csvResourceYAML, "export: [name, email]", "export: [name, nope]")
+	if _, err := Parse([]byte(yaml)); err == nil {
+		t.Fatal("expected error for unknown list.export column")
+	}
+}
+
+func TestParseCsvImportRequiresCreate(t *testing.T) {
+	yaml := strings.ReplaceAll(csvResourceYAML, "form:\n      create:\n        fields:\n          - name: name\n          - name: email\n", "")
+	if _, err := Parse([]byte(yaml)); err == nil {
+		t.Fatal("expected error for import_csv without a create form")
+	}
+}

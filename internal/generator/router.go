@@ -28,6 +28,7 @@ func (g *Generator) generateRouter() error {
 	importPaths = append(importPaths, `"github.com/go-chi/chi/v5"`, `"github.com/go-chi/chi/v5/middleware"`)
 	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/auth")))
 	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/panel/pages")))
+	importPaths = append(importPaths, fmt.Sprintf("%q", g.moduleImport("internal/viewmodels")))
 
 	for _, r := range g.Config.Resources {
 		name := strings.ToLower(r.Name)
@@ -51,6 +52,7 @@ func (g *Generator) generateRouter() error {
 	r.Use(middleware.Recoverer)
 	r.Use(auth.SessionMiddleware)
 	r.Use(securityHeaders)
+	r.Use(flashHandler)
 
 	fileServer := http.FileServer(http.Dir("static"))
 	r.Handle("/static/*", http.StripPrefix("/static/", fileServer))
@@ -111,6 +113,9 @@ func (g *Generator) generateRouter() error {
 		if res.List != nil {
 			code += fmt.Sprintf("\t\t%sGet(\"/%s/export/csv\", %s.ExportCSV(db))\n", rbacPrefix("view_any"), name, name)
 		}
+		if res.ImportCSV {
+			code += fmt.Sprintf("\t\t%sPost(\"/%s/import/csv\", %s.ImportCSV(db))\n", rbacPrefix("create"), name, name)
+		}
 	}
 
 	for _, p := range g.Config.Pages {
@@ -160,6 +165,18 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// flashHandler surfaces a one-shot ?flash= query message (set by redirects
+// such as the CSV import result) to every rendered layout via the request
+// context; Base renders it in the topbar area.
+func flashHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f := r.URL.Query().Get("flash"); f != "" {
+			r = r.WithContext(viewmodels.SetFlash(r.Context(), f))
+		}
 		next.ServeHTTP(w, r)
 	})
 }
