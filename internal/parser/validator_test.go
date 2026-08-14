@@ -410,3 +410,84 @@ func TestParseProceduresRejectsDuplicateNames(t *testing.T) {
 		t.Fatalf("expected duplicate-name error, got: %v", err)
 	}
 }
+
+func TestValidateClampsColumnCounts(t *testing.T) {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{Name: "Admin", Path: "/admin"},
+		Resources: []types.Resource{
+			{Name: "Card", Card: &types.CardConfig{Columns: 30, Rows: 3}},
+		},
+		Pages: []types.Page{{
+			Name: "Dash",
+			Widgets: []types.Widget{
+				{Type: "stats_grid", Columns: 99, Widgets: []types.Widget{{Type: "stats_grid", Columns: -5}}},
+			},
+		}},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate must not fail on clamps (warnings only), got: %v", err)
+	}
+	if cfg.Resources[0].Card.Columns != 12 {
+		t.Errorf("card.columns clamped to 12, got %d", cfg.Resources[0].Card.Columns)
+	}
+	if cfg.Pages[0].Widgets[0].Columns != 12 {
+		t.Errorf("stats_grid columns clamped to 12, got %d", cfg.Pages[0].Widgets[0].Columns)
+	}
+	if cfg.Pages[0].Widgets[0].Widgets[0].Columns != 1 {
+		t.Errorf("nested stats_grid columns clamped to 1, got %d", cfg.Pages[0].Widgets[0].Widgets[0].Columns)
+	}
+}
+
+func TestValidateMaxContentWidthAllowlist(t *testing.T) {
+	mkCfg := func(width string) *types.Config {
+		return &types.Config{Version: "1", Panel: types.Panel{Name: "A", Path: "/a",
+			Layout: types.Layout{MaxContentWidth: width}},
+			Resources: []types.Resource{{Name: "User"}}}
+	}
+
+	valid := mkCfg("7xl")
+	errs := ValidateAll(valid)
+	if len(errs) != 0 {
+		t.Fatalf("valid max_content_width must produce no findings, got: %v", errs)
+	}
+	if valid.Panel.Layout.MaxContentWidth != "7xl" {
+		t.Errorf("7xl kept, got %q", valid.Panel.Layout.MaxContentWidth)
+	}
+
+	bad := mkCfg("9xl")
+	errs = ValidateAll(bad)
+	if len(errs) != 1 {
+		t.Fatalf("unknown max_content_width produces exactly one warning, got %d: %v", len(errs), errs)
+	}
+	if _, ok := errs[0].(Warning); !ok {
+		t.Errorf("expected Warning type, got %T: %v", errs[0], errs[0])
+	}
+	if bad.Panel.Layout.MaxContentWidth != "none" {
+		t.Errorf("unknown max_content_width falls back to none, got %q", bad.Panel.Layout.MaxContentWidth)
+	}
+}
+
+func TestValidateWarningsNotBlocking(t *testing.T) {
+	cfg := &types.Config{Version: "1", Panel: types.Panel{Name: "A", Path: "/a",
+		Layout: types.Layout{MaxContentWidth: "bogus"}},
+		Resources: []types.Resource{{Name: "R", Card: &types.CardConfig{Columns: 40}}}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("warnings must not fail Validate, got: %v", err)
+	}
+	cfg2 := &types.Config{Version: "1", Panel: types.Panel{Name: "A", Path: "/a",
+		Layout: types.Layout{MaxContentWidth: "bogus"}},
+		Resources: []types.Resource{{Name: "R", Card: &types.CardConfig{Columns: 40}}}}
+	all := ValidateAll(cfg2)
+	if len(all) != 2 {
+		t.Fatalf("expected 2 warnings (card columns + max width), got %d: %v", len(all), all)
+	}
+	for _, w := range all {
+		if _, ok := w.(Warning); !ok {
+			t.Errorf("expected Warning type, got %T: %v", w, w)
+		}
+	}
+	if cfg2.Resources[0].Card.Columns != 12 || cfg2.Panel.Layout.MaxContentWidth != "none" {
+		t.Errorf("clamps applied: columns=%d max_width=%q", cfg2.Resources[0].Card.Columns, cfg2.Panel.Layout.MaxContentWidth)
+	}
+}

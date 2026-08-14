@@ -40,6 +40,10 @@ func (e *Editor) runValidation() []finding {
 		return []finding{{kind: "error", label: "yaml.Unmarshal failed", detail: err.Error()}}
 	}
 	for _, verr := range parser.ValidateAll(&copyCfg) {
+		if _, ok := verr.(parser.Warning); ok {
+			out = append(out, finding{kind: "warning", label: verr.Error()})
+			continue
+		}
 		out = append(out, finding{kind: "error", label: verr.Error(), goTo: e.structuralGoTo(verr.Error())})
 	}
 

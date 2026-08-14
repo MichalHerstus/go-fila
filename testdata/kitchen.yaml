@@ -1,0 +1,324 @@
+version: "1"
+panel:
+  id: admin
+  path: /admin
+  name: Admin
+  brand:
+    colors:
+      primary: "#6366f1"
+      secondary: "#8b5cf6"
+  layout:
+    sidebar:
+      collapsible: true
+      width: 256
+      collapsed_width: 64
+    topbar:
+      sticky: true
+    max_content_width: 7xl
+  theme:
+    dark_mode: true
+    font:
+      family: "Inter, sans-serif"
+      mono: "JetBrains Mono, monospace"
+connections:
+  default:
+    driver: postgres
+    dsn: postgres://localhost/kitchen
+auth:
+  guard: web
+  provider: session
+  table: users
+  login:
+    fields: [email, password]
+    redirect: /admin/dashboard
+    rate_limit:
+      max_attempts: 5
+      window_seconds: 300
+schema:
+  tables:
+    - name: categories
+      pk: id
+      columns:
+        - { name: id, type: integer, primary_key: true }
+        - { name: name, type: string }
+    - name: customers
+      pk: id
+      columns:
+        - { name: id, type: integer, primary_key: true }
+        - { name: name, type: string }
+        - { name: email, type: string }
+        - { name: status, type: string }
+        - { name: category_id, type: integer }
+        - { name: avatar, type: string }
+        - { name: notes, type: string }
+        - { name: created_at, type: datetime }
+      foreign_keys:
+        - { column: category_id, foreign_table: categories, foreign_column: id, label: name }
+    - name: products
+      pk: id
+      columns:
+        - { name: id, type: integer, primary_key: true }
+        - { name: name, type: string }
+        - { name: price, type: float }
+        - { name: sku, type: string }
+        - { name: photo, type: string }
+        - { name: spec, type: json }
+    - name: orders
+      pk: id
+      columns:
+        - { name: id, type: integer, primary_key: true }
+        - { name: customer_id, type: integer }
+        - { name: product_id, type: integer }
+        - { name: total, type: float }
+        - { name: status, type: string }
+        - { name: meta, type: json }
+        - { name: location, type: string }
+        - { name: created_at, type: datetime }
+        - { name: shipped_at, type: datetime }
+      foreign_keys:
+        - { column: customer_id, foreign_table: customers, foreign_column: id, label: name }
+        - { column: product_id, foreign_table: products, foreign_column: id, label: name }
+navigation:
+  - group: Shop
+    icon: cart
+    sort: 10
+    items:
+      - { page: Dashboard }
+      - { resource: Customer }
+      - { resource: Order }
+      - { type: link, label: Help, url: "https://example.com", opens_in_new_tab: true }
+  - group: Catalog
+    icon: box
+    sort: 20
+    items:
+      - { resource: Product }
+resources:
+  - name: Customer
+    label: Customers
+    icon: users
+    table: customers
+    list:
+      query: ListCustomers
+      count_query: CountCustomers
+      columns:
+        - { name: id, label: "ID", type: integer, sortable: true }
+        - { name: name, label: "Name", type: string, sortable: true, searchable: true }
+        - { name: email, label: "Email", type: email, searchable: true }
+        - { name: status, label: "Status", type: badge }
+        - { name: category_id_label, label: "Category", type: string }
+        - { name: created_at, label: "Created", type: datetime }
+      per_page: 15
+      default_sort: -created_at
+      export: [id, name, email, status]
+    card:
+      fields:
+        - { name: name, label: "Name", type: text }
+        - { name: status, label: "Status", type: badge }
+        - { name: email, label: "Email", type: email }
+      columns: 12
+      rows: 2
+      kanban_field: status
+      searchable: [name, email]
+      default_sort: -created_at
+    detail:
+      query: GetCustomer
+      fields:
+        - { name: id, label: "ID" }
+        - { name: name, label: "Name" }
+        - { name: email, label: "Email" }
+        - { name: status, label: "Status" }
+        - { name: category_id_label, label: "Category" }
+        - { name: notes, label: "Notes", type: json }
+        - { name: created_at, label: "Created", type: datetime }
+    form:
+      create:
+        query: CreateCustomer
+        fields:
+          - { name: name, label: "Name", type: text, required: true }
+          - { name: email, label: "Email", type: email, required: true }
+          - { name: password, label: "Password", type: password }
+          - { name: status, label: "Status", type: select, options: { active: Active, pending: Pending, archived: Archived } }
+          - { name: category_id, label: "Category", type: relation, options_value: id, options_label: name }
+          - { name: avatar, label: "Avatar", type: image }
+          - { name: notes, label: "Notes", type: text }
+          - { name: gps_field, label: "GPS", type: gps }
+        hooks:
+          after:
+            - name: log_customer_create
+              sql: "INSERT INTO customer_log (customer_id, msg) VALUES ($1, 'created')"
+      update:
+        query: UpdateCustomer
+        populate_query: GetCustomer
+        fields:
+          - { name: name, label: "Name", type: text }
+          - { name: email, label: "Email", type: email }
+          - { name: status, label: "Status", type: select, options: { active: Active, pending: Pending, archived: Archived } }
+      delete:
+        query: DeleteCustomer
+    actions:
+      - name: approve
+        label: "Approve"
+        icon: check
+        color: success
+        requires_confirmation: true
+        query: "UPDATE customers SET status = 'active' WHERE id = $1"
+      - name: archive
+        label: "Archive"
+        icon: archive
+        color: danger
+        query: "UPDATE customers SET status = 'archived' WHERE id = $1"
+        bulk: true
+      - name: notify
+        label: "Notify"
+        icon: mail
+        color: info
+        query: "UPDATE customers SET status = 'pending' WHERE id = $1"
+        policy: "admin|manager"
+        hooks:
+          after:
+            - name: log_customer_action
+              sql: "INSERT INTO customer_log (customer_id, msg) VALUES ($1, 'notified')"
+    policies:
+      view_any: "admin|manager"
+      view: "admin|manager|user"
+      create: "admin"
+      update: "admin|manager"
+      delete: "admin"
+    import_csv: true
+  - name: Order
+    label: Orders
+    icon: cart
+    table: orders
+    list:
+      columns:
+        - { name: id, label: "Order", type: integer }
+        - { name: customer_id_label, label: "Customer", type: string, sortable: true }
+        - { name: product_id_label, label: "Product", type: string }
+        - { name: total, label: "Total", type: float }
+        - { name: status, label: "Status", type: badge }
+        - { name: shipped_at, label: "Shipped", type: date }
+      per_page: 20
+      default_sort: -created_at
+    detail:
+      query: GetOrder
+      fields:
+        - { name: id, label: "Order" }
+        - { name: customer_id_label, label: "Customer" }
+        - { name: product_id_label, label: "Product" }
+        - { name: total, label: "Total", type: float }
+        - { name: status, label: "Status" }
+        - { name: meta, label: "Metadata", type: json }
+        - { name: location, label: "Location", type: gps }
+        - { name: shipped_at, label: "Shipped", type: datetime }
+    form:
+      create:
+        fields:
+          - { name: customer_id, label: "Customer", type: relation, options_sql: "SELECT id, name FROM customers ORDER BY name" }
+          - { name: product_id, label: "Product", type: relation, options_value: id, options_label: name }
+          - { name: total, label: "Total", type: float, required: true }
+          - { name: status, label: "Status", type: select, options: { new: New, shipped: Shipped, done: Done, cancelled: Cancelled } }
+          - { name: meta, label: "Metadata", type: json }
+          - { name: location, label: "Location", type: gps }
+          - { name: shipped_at, label: "Shipped", type: datetime }
+      update:
+        populate_query: GetOrder
+        fields:
+          - { name: total, label: "Total", type: float }
+          - { name: status, label: "Status", type: select, options: { new: New, shipped: Shipped, done: Done, cancelled: Cancelled } }
+          - { name: shipped_at, label: "Shipped", type: datetime }
+      delete: {}
+    actions:
+      - name: cancel
+        label: "Cancel"
+        color: warning
+        requires_confirmation: true
+        query: "UPDATE orders SET status = 'cancelled' WHERE id = $1"
+        bulk: true
+  - name: Product
+    label: Products
+    icon: box
+    table: products
+    list:
+      columns:
+        - { name: id, label: "ID", type: integer }
+        - { name: name, label: "Name", type: string, searchable: true }
+        - { name: price, label: "Price", type: float }
+        - { name: sku, label: "SKU", type: string }
+        - { name: photo, label: "Photo", type: image }
+        - { name: spec, label: "Spec", type: json }
+      default_sort: name
+    card:
+      fields:
+        - { name: name, label: "Name", type: text }
+        - { name: price, label: "Price", type: float }
+        - { name: photo, label: "Photo", type: image }
+      columns: 3
+      rows: 2
+    detail:
+      query: GetProduct
+      fields:
+        - { name: id, label: "ID" }
+        - { name: name, label: "Name" }
+        - { name: price, label: "Price", type: float }
+        - { name: sku, label: "SKU" }
+        - { name: spec, label: "Spec", type: json }
+    form:
+      create:
+        fields:
+          - { name: name, label: "Name", type: text, required: true }
+          - { name: price, label: "Price", type: float }
+          - { name: sku, label: "SKU", type: text }
+          - { name: photo, label: "Photo", type: file }
+          - { name: spec, label: "Spec", type: json }
+      update:
+        populate_query: GetProduct
+        fields:
+          - { name: name, label: "Name", type: text }
+          - { name: price, label: "Price", type: float }
+          - { name: spec, label: "Spec", type: json }
+      delete: {}
+pages:
+  - name: Dashboard
+    path: /dashboard
+    default: true
+    widgets:
+      - type: stat
+        label: "Total revenue"
+        query: "SELECT SUM(total) FROM orders"
+        icon: dollar
+        color: green
+        prefix: "$"
+      - type: stats_grid
+        columns: 12
+        widgets:
+          - { type: stat, label: "Customers", query: "SELECT COUNT(*) FROM customers", icon: users, color: blue }
+          - { type: stat, label: "Orders", query: "SELECT COUNT(*) FROM orders", icon: cart, color: indigo }
+      - type: chart
+        label: "Revenue by month"
+        chart:
+          type: line
+          query: "SELECT date_trunc('month', created_at) AS x, SUM(total) AS y FROM orders GROUP BY x ORDER BY x"
+          x: x
+          y: y
+      - type: chart
+        label: "Order status"
+        chart:
+          type: pie
+          query: "SELECT status, COUNT(*) AS count FROM orders GROUP BY status"
+          x: status
+          y: count
+      - type: table
+        label: "Recent orders"
+        query: "SELECT id, customer_id, total FROM orders ORDER BY id DESC LIMIT 10"
+        data_columns: [id, customer_id, total]
+      - type: list
+        label: "Top products"
+        query: "SELECT name, price FROM products ORDER BY price DESC LIMIT 5"
+      - type: html
+        label: "Note"
+        query: "SELECT '<p>Hello</p>' AS html"
+audit:
+  enabled: true
+  table: audit_log
+  include_values: true
+  policy: admin

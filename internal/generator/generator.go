@@ -244,7 +244,7 @@ func (g *Generator) ensureDirs() error {
 		"internal/views/widgets",
 		"internal/views/components",
 		"internal/viewmodels",
-		"internal/assets/css",
+		"static/css",
 		"static/js",
 		"sql/migrations",
 	}

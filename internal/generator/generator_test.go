@@ -1966,8 +1966,10 @@ func TestGenerateWidgetErrorLogging(t *testing.T) {
 }
 
 // TestGenerateChartJSAsset ensures generateAssets writes the embedded Chart.js
-// bundle to static/js/chart.js (byte-identical to the embedded copy) and stops
-// emitting package.json — the generated dashboard no longer needs npm.
+// bundle to static/js/chart.js and the pre-built stylesheet to
+// static/css/styles.css (both byte-identical to the embedded copies) and stops
+// emitting package.json — the generated dashboard no longer needs npm or
+// Tailwind.
 func TestGenerateChartJSAsset(t *testing.T) {
 	dir := t.TempDir()
 	g := New(poolConfig(), dir)
@@ -1987,18 +1989,31 @@ func TestGenerateChartJSAsset(t *testing.T) {
 	if !strings.HasPrefix(string(chart), "/*!") {
 		t.Error("static/js/chart.js must keep the Chart.js license banner intact")
 	}
+	css, err := os.ReadFile(filepath.Join(dir, "static/css/styles.css"))
+	if err != nil {
+		t.Fatalf("read static/css/styles.css: %v", err)
+	}
+	if len(css) == 0 {
+		t.Fatal("static/css/styles.css is empty")
+	}
+	if string(css) != string(stylesCSS) {
+		t.Errorf("static/css/styles.css does not match the embedded stylesheet (embedded %d bytes, written %d)", len(stylesCSS), len(css))
+	}
 	if _, err := os.Stat(filepath.Join(dir, "package.json")); !os.IsNotExist(err) {
 		t.Error("package.json must not be emitted (npm build is gone)")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "tailwind.config.js")); err != nil {
-		t.Errorf("tailwind.config.js must still be emitted: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "tailwind.config.js")); !os.IsNotExist(err) {
+		t.Error("tailwind.config.js must not be emitted (stylesheet is pre-built)")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "internal/assets/css")); !os.IsNotExist(err) {
+		t.Error("internal/assets/css must not be emitted (no tailwind input dir)")
 	}
 }
 
-// TestGenerateMakefileNoNPM ensures the generated Makefile contains no npm and
-// its css target invokes $(TAILWIND); the get-tailwind target pins the
-// standalone binary download.
-func TestGenerateMakefileNoNPM(t *testing.T) {
+// TestGenerateMakefileNoTailwind ensures the generated Makefile contains no npm
+// and no Tailwind targets — the stylesheet is pre-built and vendored at
+// generation time, so the dashboard builds with templ + go build only.
+func TestGenerateMakefileNoTailwind(t *testing.T) {
 	dir := t.TempDir()
 	g := New(poolConfig(), dir)
 	if err := g.Generate(); err != nil {
@@ -2009,20 +2024,18 @@ func TestGenerateMakefileNoNPM(t *testing.T) {
 		t.Fatalf("read Makefile: %v", err)
 	}
 	mkStr := string(mk)
-	for _, forbidden := range []string{"npm", "npx", "node_modules", "package.json"} {
+	for _, forbidden := range []string{"npx", "node_modules", "package.json", "css:", "TAILWIND", "tailwindcss", "$(BINARY) run", "npm run"} {
 		if strings.Contains(mkStr, forbidden) {
 			t.Errorf("Makefile must not reference %q\n--- generated:\n%s", forbidden, mkStr)
 		}
 	}
 	for _, want := range []string{
-		`TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`,
-		`TAILWIND_VERSION ?= ` + tailwindStandaloneVersion,
-		`build: css templ`,
-		`css:`,
-		`$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify`,
-		`get-tailwind:`,
-		`https://github.com/tailwindlabs/tailwindcss/releases/download/$(TAILWIND_VERSION)/$$file`,
-		`make css/build will now use it automatically`,
+		`build: templ`,
+		`go tool templ generate`,
+		`go build -o $(BINARY) .`,
+		`run: build`,
+		`package: build`,
+		`.PHONY: all build templ tidy run package clean`,
 	} {
 		if !strings.Contains(mkStr, want) {
 			t.Errorf("Makefile missing %q\n--- generated:\n%s", want, mkStr)

@@ -763,17 +763,22 @@ Phase 1 lets legacy `sqlc:` YAML still parse (ignored), removed cleanly in Phase
 
 ### D12 — Embed pre-built CSS into the yaga binary (drop the Tailwind build step)
 
-**Status: planned (2026-08-14), not started.** Follows D11 (v2.0.0, no sqlc). Same pattern
+**Status: implemented (2026-08-14).** Follows D11 (v2.0.0, no sqlc). Same pattern
 as D8's vendored Chart.js: a single pre-built, CSS-variable-based Tailwind stylesheet is
 committed into `internal/generator/assets/styles.css`, embedded via `//go:embed`, and
 written to the generated project's `static/css/styles.css` at generation time — so the
 dashboard builds with no Tailwind binary (and, post-D11, no sqlc): `make build` = `templ`
 + `go build`, fully offline. Decisions taken (2026-08-14): **embed, not hybrid** — no
 optional `css`/`get-tailwind` escape hatch in the generated Makefile; **CSS-variable
-theming** — the prebuilt CSS is generated with `colors.brand.primary → var(--brand-primary)`
-/ `secondary → var(--brand-secondary)` (both `:root` vars are already emitted at runtime by
-`Base`/`LoginPage`), so one baked stylesheet serves any brand theme; **fonts stay inline** —
-`Base`/`LoginPage` already apply `body { font-family }` / `code, pre { font-family }` via
+theming** — the prebuilt CSS is generated with `colors.brand.primary`
+→ `rgb(var(--brand-primary-rgb) / <alpha-value>)` (and the same for secondary), where the
+`--brand-primary-rgb` channel triplet is emitted alongside the existing `--brand-primary`
+hex in `:root` by both `Base` and `LoginPage` (`viewmodels.BrandChannels` at runtime for
+Base; the generator-side `hexChannels` for the baked login page). The channel-triplet form
+(not a bare `var(--brand-primary)`) is what lets alpha modifiers like
+`bg-brand-primary/10` and `hover:text-brand-primary/80` resolve at runtime — a bare
+`var()` color silently drops every `/alpha` utility from the compiled CSS; **fonts stay
+inline** — `Base`/`LoginPage` already apply `body { font-family }` / `code, pre { font-family }` via
 inline `<style>` (not Tailwind utilities), so custom fonts keep working untouched and the
 prebuilt config adds no `fontFamily` extend (`font-mono` comes from Tailwind defaults);
 **bounded grid/max-w knobs** — the three config-driven class names (`lg:grid-cols-N` card

@@ -11,15 +11,51 @@ import (
 	"github.com/MichalHerstus/yaga/internal/types"
 )
 
+// Warning is a non-fatal validation notice, e.g. a value silently clamped to a
+// supported range (grid columns [1,12]) or a max_content_width fallback. It
+// renders as a yellow row on the editor's Validate screen and never blocks a
+// config save or generation (Validate skips warnings).
+type Warning struct{ msg string }
+
+// Error implements the error interface.
+func (w Warning) Error() string { return w.msg }
+
+// warn builds a Warning.
+func warn(format string, a ...interface{}) error {
+	return Warning{msg: fmt.Sprintf(format, a...)}
+}
+
+// maxWidths is the allowlist of max_content_width values that map onto a real
+// Tailwind max-w-{V} class. Anything else (including empty) falls back to
+// "none" (max-w-none) with a warning — the pre-built stylesheet only safelists
+// these values.
+var maxWidths = []string{
+	"none", "xs", "sm", "md", "lg", "xl", "2xl", "3xl", "4xl", "5xl", "6xl", "7xl",
+	"full", "min", "max", "fit", "prose",
+	"screen-sm", "screen-md", "screen-lg", "screen-xl", "screen-2xl",
+}
+
+func inMaxWidths(v string) bool {
+	for _, m := range maxWidths {
+		if m == v {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks a parsed config for required fields and applies defaults. It
-// returns the first validation problem (or nil); callers that need every
-// problem at once (e.g. the editor's Validate screen) use ValidateAll.
+// returns the first validation problem (or nil), ignoring non-fatal warnings;
+// callers that need every problem at once (e.g. the editor's Validate screen)
+// use ValidateAll.
 // Params: cfg (the config to validate; may be mutated to set defaults).
 // Returns: an error describing the first validation problem, or nil.
 func Validate(cfg *types.Config) error {
 	errs := ValidateAll(cfg)
-	if len(errs) > 0 {
-		return errs[0]
+	for _, e := range errs {
+		if _, ok := e.(Warning); !ok {
+			return e
+		}
 	}
 	return nil
 }
@@ -48,6 +84,10 @@ func ValidateAll(cfg *types.Config) []error {
 	}
 	if cfg.Panel.ID == "" {
 		cfg.Panel.ID = "admin"
+	}
+	if cfg.Panel.Layout.MaxContentWidth != "" && !inMaxWidths(cfg.Panel.Layout.MaxContentWidth) {
+		add(warn("panel.layout.max_content_width %q is not a supported width, falling back to \"none\"", cfg.Panel.Layout.MaxContentWidth))
+		cfg.Panel.Layout.MaxContentWidth = "none"
 	}
 	if cfg.SQLC.Config == "" {
 		cfg.SQLC.Config = "sqlc.yaml"
@@ -102,8 +142,9 @@ func ValidateAll(cfg *types.Config) []error {
 			cfg.Resources[i].Label = r.Name
 		}
 		if r.Card != nil {
-			if r.Card.Columns < 1 {
-				r.Card.Columns = 4
+			if r.Card.Columns < 1 || r.Card.Columns > 12 {
+				add(warn("resources[%d] (%s) card.columns %d is out of range [1,12], clamping to %d", i, r.Name, r.Card.Columns, clampColumns(r.Card.Columns)))
+				r.Card.Columns = clampColumns(r.Card.Columns)
 			}
 			if r.Card.Rows < 1 {
 				r.Card.Rows = 4
@@ -141,8 +182,44 @@ func ValidateAll(cfg *types.Config) []error {
 		if p.Path == "" {
 			cfg.Pages[i].Path = "/" + p.Name
 		}
+		clampWidgetColumns(&cfg.Pages[i], i, add)
 	}
 	return errs
+}
+
+// clampColumns clamps a grid column count into the supported [1,12] range that
+// the pre-built stylesheet safelists (lg:grid-cols-1..12). Values >12 previously
+// emitted arbitrary tailwind classes.
+func clampColumns(v int) int {
+	if v < 1 {
+		return 1
+	}
+	if v > 12 {
+		return 12
+	}
+	return v
+}
+
+// clampWidgetColumns clamps every stats_grid widget's Columns into [1,12] (see
+// clampColumns), recursing into nested widgets. Each out-of-range value is
+// recorded as a non-fatal warning.
+func clampWidgetColumns(p *types.Page, pageIdx int, add func(error)) {
+	var walk func(w *types.Widget, path string)
+	walk = func(w *types.Widget, path string) {
+		if w == nil {
+			return
+		}
+		if w.Type == "stats_grid" && (w.Columns < 1 || w.Columns > 12) {
+			add(warn("pages[%d] %s columns %d is out of range [1,12], clamping to %d", pageIdx, path, w.Columns, clampColumns(w.Columns)))
+			w.Columns = clampColumns(w.Columns)
+		}
+		for j := range w.Widgets {
+			walk(&w.Widgets[j], fmt.Sprintf("%s[%d]", path, j))
+		}
+	}
+	for j := range p.Widgets {
+		walk(&p.Widgets[j], fmt.Sprintf("widgets[%d]", j))
+	}
 }
 
 // validateResourceHooks checks that every hook declared on a resource's form

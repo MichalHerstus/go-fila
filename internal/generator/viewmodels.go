@@ -97,6 +97,21 @@ func DefaultTheme() ThemeConfig {
     }
 }
 
+// BrandChannels converts a "#rrggbb" hex color into the "r g b" channel triplet
+// the pre-built stylesheet expects. Brand colors are emitted as CSS variables of
+// the form rgb(var(--brand-primary-rgb) / <alpha-value>) so opacity modifiers
+// like bg-brand-primary/10 resolve at runtime; this helper feeds the -rgb
+// variables from the same hex the --brand-* variables carry.
+func BrandChannels(hex string) string {
+    if len(hex) == 7 && hex[0] == '#' {
+        var r, g, b int
+        if _, err := fmt.Sscanf(hex[1:], "%%02x%%02x%%02x", &r, &g, &b); err == nil {
+            return fmt.Sprintf("%%d %%d %%d", r, g, b)
+        }
+    }
+    return "99 102 241"
+}
+
 type ColumnDef struct {
 	Name       string
 	Label      string

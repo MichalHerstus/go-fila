@@ -676,6 +676,8 @@ templ LoginPage(data LoginPageData) {
             :root {
                 --brand-primary: %s;
                 --brand-secondary: %s;
+                --brand-primary-rgb: %s;
+                --brand-secondary-rgb: %s;
             }%s
         </style>
     </head>
@@ -725,7 +727,7 @@ templ LoginPage(data LoginPageData) {
     </body>
     </html>
 }
-`, htmlClass, panelName, primary, secondary, styleFonts, panelName, panelPath)
+`, htmlClass, panelName, primary, secondary, hexChannels(primary), hexChannels(secondary), styleFonts, panelName, panelPath)
 
 	return os.WriteFile(filepath.Join(dir, "login.templ"), []byte(code), 0644)
 }

@@ -226,17 +226,9 @@ func cmdGenerate() {
 	fmt.Println("Admin panel generated in", outDir)
 	fmt.Println("")
 
-	// Attempt to run Tailwind build (non-fatal if it fails)
-	if err := gen.RunTailwind(); err != nil {
-		fmt.Printf("Warning: Tailwind build failed: %v\n", err)
-		fmt.Println("  Make sure the Tailwind CSS standalone binary is installed.")
-		fmt.Println("  You can run 'make get-tailwind' then 'make css' manually later.")
-	}
-
-	fmt.Println("")
 	fmt.Println("Next steps:")
 	fmt.Println("  1. cd", outDir)
-	fmt.Println("  2. make css        (or: make get-tailwind && make css)")
-	fmt.Println("  3. go mod tidy")
+	fmt.Println("  2. go mod tidy")
+	fmt.Println("  3. go tool templ generate")
 	fmt.Println("  4. go build ./...")
 }

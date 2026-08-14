@@ -79,18 +79,25 @@ Flags: `init --db <dsn> --config <yaml> --out <dir> --force` (short variants `-d
 
 **Preview screen** (`preview.go`): ASCII-frame mock of the dashboard (topbar + sidebar from `cfg.Navigation` + per-page widget boxes) and per-resource list mock. The grid chrome (`│ ├ ┬ ┤ ┌ ┐ └ ┘ ─`) is drawn in light blue (`[lightblue]`) while the cell text is white (`[white]`), and every row is padded to the exact same total width (`previewWidth`=78) via `padVisual` (tag-aware: `tview.TaggedStringWidth`) — content row widths are `previewSideWidth`=26 / `previewContentWidth`=49 so the chrome rows (top/bottom borders, column separator) all add up to `previewWidth`. `colorStable` rewrites full color resets (`[-:-:-]`/`[:]`) from content into attribute-only `[::-]` so neither grid nor text color survives emphasis tags intact. No DB, no generated app.
 
-The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `css` (Tailwind via the standalone binary) → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `css`, `templ`, `tidy`, `get-tailwind` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`. **No npm/node is required** (D8): Chart.js is embedded into the yaga binary and vendored to `static/js/chart.js` at generation time, and Tailwind runs via the `tailwindcss` standalone binary (`TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`, so `make get-tailwind` is enough — the `css` target then uses `.tools/tailwindcss` automatically and only falls back to a PATH `tailwindcss`; override with `make TAILWIND=/path/to/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` standalone binary for the current OS/arch — linux/macos × x64/arm64 — via `uname -s/-m` mapping and curl).
+The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `templ`, `tidy` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`. **No npm/node, no sqlc and no Tailwind are required** (D8 + D12): Chart.js is embedded into the yaga binary and vendored to `static/js/chart.js` at generation time, and the Tailwind stylesheet is **pre-built** and vendored to `static/css/styles.css` — the generated project never runs a Tailwind binary.
 
 Equivalent manual steps:
 
 ```sh
 cd admin
-make css   # or: make get-tailwind && make css
 go tool templ generate              # compile .templ -> *_templ.go (required before go build)
 go mod tidy && go build -o admin .
 ```
 
-`tailwindcss` failures are **non-fatal** — re-run `make css`. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
+`templ generate` is never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
+
+### Pre-built stylesheet (D12)
+
+The pre-built Tailwind stylesheet lives at `internal/generator/assets/styles.css`, embedded via `//go:embed` (`stylesCSS` in `tailwind.go`) and written to `static/css/styles.css` by `generateAssets()`. It is compiled from the kitchen-sink fixture (`testdata/kitchen.yaml`) by the repo target `make styles` → `scripts/build-styles.sh`, which pins the Tailwind **v3.4.19** standalone binary (same OS/arch mapping as the old `make get-tailwind`), generates a kitchen project offline, drops in `scripts/styles.tailwind.config.js` + a `@tailwind` input, and copies the minified output into the embedded asset. Runtime-dynamic classes are **safelisted** in the config because Tailwind's content scan never sees them as literals: `lg:grid-cols-1..12` (card view + stats_grid, `variants: ['sm','md','lg']`), the `max-w-*` allowlist (from `max_content_width`), and the gray badge set (`renderBadge` builds them via `fmt.Sprintf`). The **coverage guard** `TestGenerateStylesEmbedded` (`styles_test.go`) regenerates the kitchen fixture and fails loudly if any literal `class="…"` token in the scanned templ sources (or any safelist entry) is missing from `stylesCSS` — run `make styles` after adding a class.
+
+**Brand colors are RGB channel variables**, not bare `var(--brand-primary)`: the config defines `brand.{primary,secondary}` as `rgb(var(--brand-primary-rgb) / <alpha-value>)`, and both `Base` (`viewmodels.BrandChannels(theme.BrandPrimary)`) and `LoginPage` (generator-side `hexChannels`) emit a `--brand-primary-rgb: r g b;` alongside the existing `--brand-primary: #hex;` in `:root`. A bare `var()` color makes Tailwind silently drop every `/alpha` utility (`bg-brand-primary/10`, `hover:text-brand-primary/80`), so the channel form is required to keep those working. `--brand-*` hex vars are still emitted (Chart.js + the theme JS read them).
+
+**Bounded knobs** (`internal/parser/validator.go`): `card.columns` and stats_grid widget `columns` are clamped to [1,12], and `max_content_width` is validated against the `maxWidths` allowlist (unknown → fall back to `"none"`), all as a non-fatal `parser.Warning` (muted: rendered yellow on the editor's Validate screen, never blocks a save or `generate`). `Validate` skips `Warning`s; `ValidateAll` returns them alongside errors.
 
 Flags: `generate --config <yaml> --out <dir> --force --verbose` (short variants `-c`, `-o`, `-f`, `-v`). `--out` basename becomes the module name.
 
@@ -509,10 +516,11 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 | `cmd/yaga/editor/` | tview TUI editor: 3-pane shell, section editors, sync + validate + preview screens (18 files, see `edit` above) |
 | `internal/types/` | YAML-tagged Go structs for config schema (7 files: config.go, panel.go, resource.go, field.go, hook.go, procedure.go, schema.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (see above; `assets/` holds the embedded Chart.js 4.4.1 bundle) |
+| `internal/generator/` | Code generation pipeline (see above; `assets/` holds the embedded Chart.js 4.4.1 bundle + pre-built `styles.css`) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`), unused |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
-| `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |
+| `testdata/` | `kitchen.yaml` — the kitchen-sink fixture that regenerates the pre-built stylesheet (`make styles`) and drives `TestGenerateStylesEmbedded`; no longer empty |
+| `pkg/auth/` | Empty placeholder (.gitkeep only), unused |
 
 ## Generated app dependencies
 

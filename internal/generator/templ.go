@@ -1355,6 +1355,8 @@ templ Base(title string, panelPath string, theme viewmodels.ThemeConfig, userNam
             :root {
                 --brand-primary: {theme.BrandPrimary};
                 --brand-secondary: {theme.BrandSecondary};
+                --brand-primary-rgb: { viewmodels.BrandChannels(theme.BrandPrimary) };
+                --brand-secondary-rgb: { viewmodels.BrandChannels(theme.BrandSecondary) };
             }%s
         </style>
     </head>
