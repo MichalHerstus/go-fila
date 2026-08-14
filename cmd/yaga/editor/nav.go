@@ -349,8 +349,10 @@ func (e *Editor) resPath(i int) string {
 }
 
 func (e *Editor) resListPath(i int) string         { return e.resPath(i) + "/List" }
+func (e *Editor) resListFilterPath(i int) string   { return e.resListPath(i) + "/Filter" }
 func (e *Editor) resColumnsPath(i int) string      { return e.resListPath(i) + "/Columns" }
 func (e *Editor) resCardPath(i int) string         { return e.resPath(i) + "/Card" }
+func (e *Editor) resCardFilterPath(i int) string   { return e.resCardPath(i) + "/Filter" }
 func (e *Editor) resCardFieldsPath(i int) string   { return e.resCardPath(i) + "/Fields" }
 func (e *Editor) resDetailPath(i int) string       { return e.resPath(i) + "/Detail" }
 func (e *Editor) resDetailFieldsPath(i int) string { return e.resDetailPath(i) + "/Fields" }
@@ -473,6 +475,16 @@ func (e *Editor) resolveResList(ridx int, base string, rest []string) (navTarget
 				func(v []string) { l.Export = v })
 		}}, nil
 	}
+	if matchesSeg(rest[0], "Filter") {
+		path := base + "/List/Filter"
+		if len(rest) == 1 {
+			return navTarget{path, func() tview.Primitive { return e.filterPage(ridx, "list") }}, nil
+		}
+		if matchesSeg(rest[1], "Params") && len(rest) == 2 {
+			f := e.cfg.Resources[ridx].List.Filter
+			return navTarget{path + "/Params", func() tview.Primitive { return e.filterParamsPage(f) }}, nil
+		}
+	}
 	return navTarget{}, navErr(strings.Join(rest, "/"))
 }
 
@@ -500,6 +512,20 @@ func (e *Editor) resolveResCard(ridx int, base string, rest []string) (navTarget
 				func() []string { return r.Card.Searchable },
 				func(v []string) { r.Card.Searchable = v })
 		}}, nil
+	}
+	if matchesSeg(rest[0], "Filter") {
+		path := base + "/Card/Filter"
+		if len(rest) == 1 {
+			return navTarget{path, func() tview.Primitive { return e.filterPage(ridx, "card") }}, nil
+		}
+		if matchesSeg(rest[1], "Params") && len(rest) == 2 {
+			r := e.cfg.Resources[ridx]
+			if r.Card == nil {
+				r.Card = &types.CardConfig{Columns: 4, Rows: 4}
+			}
+			f := r.Card.Filter
+			return navTarget{path + "/Params", func() tview.Primitive { return e.filterParamsPage(f) }}, nil
+		}
 	}
 	return navTarget{}, navErr(strings.Join(rest, "/"))
 }

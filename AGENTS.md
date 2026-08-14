@@ -99,6 +99,10 @@ The pre-built Tailwind stylesheet lives at `internal/generator/assets/styles.css
 
 **Bounded knobs** (`internal/parser/validator.go`): `card.columns` and stats_grid widget `columns` are clamped to [1,12], and `max_content_width` is validated against the `maxWidths` allowlist (unknown → fall back to `"none"`), all as a non-fatal `parser.Warning` (muted: rendered yellow on the editor's Validate screen, never blocks a save or `generate`). `Validate` skips `Warning`s; `ValidateAll` returns them alongside errors.
 
+### List/Card filter section (D13)
+
+A YAML-defined collapsible filter on list/card views. `list.filter`/`card.filter: {label, where, params}` — the `where` expression is compiled at generation time by `internal/filterexpr` (mini-DSL: `and`/`or`/parentheses, ops `= != <> < <= > >= contains not_contains is_null is_not_null`, literal values or `$N` params). `$N` values are collected via labeled inputs and travel as `fp_<name>` query params; empty params skip the filter. The handler builds filter WHERE fragments **first** in SQL-text order (so sqlite positional `?` binds correctly), then the search block, joined as `(<filter>) AND (<search>)". Pagination echoes `filter=1&fp_...` via `filterQS`. Touch points: types, filterexpr, handler (filterListCore/filterCardCore), viewmodels (FilterData/FilterParamData), templ (filterBar component), schema refs, parser validation, editor filter page. Tested by `TestGenerateFilter` + `TestGenerateNoFilterRegression`.
+
 Flags: `generate --config <yaml> --out <dir> --force --verbose` (short variants `-c`, `-o`, `-f`, `-v`). `--out` basename becomes the module name.
 
 ## Driver support (postgres default, sqlite opt-in, mssql opt-in)

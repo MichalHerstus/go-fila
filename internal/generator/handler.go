@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/MichalHerstus/yaga/internal/filterexpr"
 	"github.com/MichalHerstus/yaga/internal/types"
 )
 
@@ -321,6 +323,278 @@ func (g *Generator) listSelectFrom(r types.Resource, tName string, colNames []st
 	return strings.Join(sel, ", "), strings.Join(fromParts, " "), "t.", tName + " t", true
 }
 
+// filterCompile parses and compiles a list/card filter's `where` expression
+// into a dialect-correct SQL fragment for the configured driver.
+// Params: f (the filter config), colPrefix (table alias prefix, "" or "t.").
+// Returns: the compiled fragment + bindings.
+func (g *Generator) filterCompile(f *types.FilterConfig, colPrefix string) (*filterexpr.Compiled, error) {
+	expr, err := filterexpr.Parse(f.Where)
+	if err != nil {
+		return nil, err
+	}
+	return expr.SQL(g.driver(), colPrefix)
+}
+
+// filterParamName returns the URL query param name for a $N-referenced filter
+// param (0-based index). It honours the declared params list, falling back to
+// the p<N> convention.
+// Params: f (the filter config), idx (0-based param index).
+// Returns: the param name used in the fp_<name> query key.
+func filterParamName(f *types.FilterConfig, idx int) string {
+	if idx < len(f.Params) && f.Params[idx].Name != "" {
+		return f.Params[idx].Name
+	}
+	return fmt.Sprintf("p%d", idx+1)
+}
+
+// filterParamLabel returns the displayed label for a $N-referenced filter
+// param (0-based index), falling back to "Value N".
+// Params: f (the filter config), idx (0-based param index).
+// Returns: the label text.
+func filterParamLabel(f *types.FilterConfig, idx int) string {
+	if idx < len(f.Params) && f.Params[idx].Label != "" {
+		return f.Params[idx].Label
+	}
+	return fmt.Sprintf("Value %d", idx+1)
+}
+
+// refParamIndices returns the distinct 0-based param indices referenced by a
+// compiled filter's bindings, sorted ascending. Used to drive the form inputs
+// and the filterQS echo.
+// Params: compiled (the compiled filter fragment).
+// Returns: a sorted slice of referenced param indices.
+func refParamIndices(compiled *filterexpr.Compiled) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, b := range compiled.Bindings {
+		if !seen[b.Param] {
+			seen[b.Param] = true
+			out = append(out, b.Param)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// filterRuntimeBlock emits the Go statements that read the filter's $N params
+// from the request and, when every referenced param is non-empty, append the
+// bound args (in SQL-text order) and add the compiled WHERE fragment to the
+// `parts` slice while setting `filterApplied`. The surrounding handler core
+// declares `parts`, `filterApplied`, `args` and (on pg/mssql) `argIdx`.
+// Params: f (the filter config), compiled (the compiled fragment + bindings).
+// Returns: the runtime filter-apply Go source block.
+func (g *Generator) filterRuntimeBlock(f *types.FilterConfig, compiled *filterexpr.Compiled) string {
+	var sb strings.Builder
+	binds := compiled.Bindings
+	if len(binds) == 0 {
+		// Literal-only filter: always applied, no runtime args.
+		fmt.Fprintf(&sb, "        frag := %s\n", strconv.Quote(compiled.Frag))
+		sb.WriteString("        parts = append(parts, \"(\"+frag+\")\")\n")
+		sb.WriteString("        filterApplied = true\n")
+		return sb.String()
+	}
+	for i, b := range binds {
+		fmt.Fprintf(&sb, "        f%d := r.URL.Query().Get(\"fp_%s\")\n", i, filterParamName(f, b.Param))
+	}
+	var conds []string
+	for i := range binds {
+		conds = append(conds, fmt.Sprintf("f%d != \"\"", i))
+	}
+	fmt.Fprintf(&sb, "        if %s {\n", strings.Join(conds, " && "))
+	fmt.Fprintf(&sb, "            frag := %s\n", strconv.Quote(compiled.Frag))
+	for i, b := range binds {
+		if g.isSQLite() {
+			sb.WriteString("            frag = strings.Replace(frag, \"__GFP__\", \"?\", 1)\n")
+		} else {
+			sb.WriteString("            frag = strings.Replace(frag, \"__GFP__\", fmt.Sprintf(\"$%d\", argIdx), 1)\n")
+			sb.WriteString("            argIdx++\n")
+		}
+		sb.WriteString("            {\n")
+		fmt.Fprintf(&sb, "                v := f%d\n", i)
+		if b.Contains {
+			sb.WriteString("                v = \"%\" + v + \"%\"\n")
+		}
+		sb.WriteString("                args = append(args, v)\n")
+		sb.WriteString("            }\n")
+	}
+	sb.WriteString("            parts = append(parts, \"(\"+frag+\")\")\n")
+	sb.WriteString("            filterApplied = true\n")
+	sb.WriteString("        }\n")
+	return sb.String()
+}
+
+// filterViewmodelCode emits the Go statements that build the viewmodels
+// FilterData (echoing current param values) and the filterQS string used by
+// pagination, given the declared filter and the already-computed
+// `filterApplied`. It declares `filterData` and `filterQS`.
+// Params: f (the filter config), compiled (the compiled fragment + bindings).
+// Returns: the Go source block, or "" when the resource has no filter.
+func (g *Generator) filterViewmodelCode(f *types.FilterConfig, compiled *filterexpr.Compiled) string {
+	if f == nil {
+		return ""
+	}
+	refIdx := refParamIndices(compiled)
+	var sb strings.Builder
+	sb.WriteString("        filterQS := \"\"\n")
+	sb.WriteString("        if filterApplied {\n")
+	sb.WriteString("            qs := \"filter=1\"\n")
+	for _, idx := range refIdx {
+		name := filterParamName(f, idx)
+		sb.WriteString(fmt.Sprintf("            if v := r.URL.Query().Get(\"fp_%s\"); v != \"\" {\n", name))
+		sb.WriteString(fmt.Sprintf("                qs += \"&fp_%s=\" + url.QueryEscape(v)\n", name))
+		sb.WriteString("            }\n")
+	}
+	sb.WriteString("            filterQS = \"&\" + qs\n")
+	sb.WriteString("        }\n")
+	var params []string
+	for _, idx := range refIdx {
+		name := filterParamName(f, idx)
+		params = append(params, fmt.Sprintf("viewmodels.FilterParamData{Key: %q, Label: %q, Value: r.URL.Query().Get(\"fp_%s\")}",
+			name, filterParamLabel(f, idx), name))
+	}
+	sb.WriteString("        filterData := &viewmodels.FilterData{}\n")
+	sb.WriteString(fmt.Sprintf("        filterData = &viewmodels.FilterData{Label: %q, Applied: filterApplied, Params: []viewmodels.FilterParamData{%s}}\n",
+		f.Label, strings.Join(params, ", ")))
+	sb.WriteString("        _ = filterData\n")
+	return sb.String()
+}
+
+// filterListCore builds the args/WHERE/ORDER/query region of a filtered list
+// handler. The filter block is emitted first on sqlite (positional ? binding
+// matches WHERE text order) and numbered first on pg/mssql (argIdx continues
+// into the search block). A `parts` slice holds the ANDed WHERE operands,
+// degrading to the plain search-only WHERE when the filter is not applied.
+// Params: searchableColsLiteral, colPrefix, selectFrag, fromFrag (query parts),
+// filterRT (the runtime filter block).
+// Returns: the handler core source for the configured driver.
+func (g *Generator) filterListCore(searchableColsLiteral, colPrefix, selectFrag, fromFrag, filterRT string) string {
+	if g.isSQLite() {
+		return fmt.Sprintf(`        var args []interface{}
+        var parts []string
+        filterApplied := false
+
+%[1]s
+        var whereClauses []string
+        if search != "" {
+            searchableCols := []string{%[2]s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, col+" LIKE ?")
+                args = append(args, "%%"+search+"%%")
+            }
+            parts = append(parts, "("+strings.Join(whereClauses, " OR ")+")")
+        }
+
+        whereSQL := ""
+        if len(parts) > 0 {
+            whereSQL = " WHERE " + strings.Join(parts, " AND ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %[3]s, sort, order)
+        }
+
+        var total int64
+        totalSet := false
+        dataQuery := "SELECT %[4]s, COUNT(*) OVER() AS _total FROM %[5]s" + whereSQL + orderSQL + " LIMIT ? OFFSET ?"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
+        fullArgs = append(fullArgs, perPage, offset)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+        defer rows.Close()
+`, filterRT, searchableColsLiteral, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
+	}
+	if g.isMSSQL() {
+		return fmt.Sprintf(`        var args []interface{}
+        args = append(args, perPage, offset)
+        argIdx := 3
+        var parts []string
+        filterApplied := false
+
+%[1]s
+        var whereClauses []string
+        if search != "" {
+            searchableCols := []string{%[2]s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, fmt.Sprintf("%%s LIKE $%%d", col, argIdx))
+                args = append(args, "%%"+search+"%%")
+                argIdx++
+            }
+            parts = append(parts, "("+strings.Join(whereClauses, " OR ")+")")
+        }
+
+        whereSQL := ""
+        if len(parts) > 0 {
+            whereSQL = " WHERE " + strings.Join(parts, " AND ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %[3]s, sort, order)
+        }
+        if orderSQL == "" {
+            orderSQL = " ORDER BY (SELECT NULL)"
+        }
+
+        var total int64
+        totalSet := false
+        dataQuery := "SELECT %[4]s, COUNT(*) OVER() AS _total FROM %[5]s" + whereSQL + orderSQL + " OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+        defer rows.Close()
+`, filterRT, searchableColsLiteral, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
+	}
+	return fmt.Sprintf(`        var args []interface{}
+        args = append(args, perPage, offset)
+        argIdx := 3
+        var parts []string
+        filterApplied := false
+
+%[1]s
+        var whereClauses []string
+        if search != "" {
+            searchableCols := []string{%[2]s}
+            for _, col := range searchableCols {
+                whereClauses = append(whereClauses, fmt.Sprintf("%%s ILIKE $%%d", col, argIdx))
+                args = append(args, "%%"+search+"%%")
+                argIdx++
+            }
+            parts = append(parts, "("+strings.Join(whereClauses, " OR ")+")")
+        }
+
+        whereSQL := ""
+        if len(parts) > 0 {
+            whereSQL = " WHERE " + strings.Join(parts, " AND ")
+        }
+
+        orderSQL := ""
+        if sort != "" {
+            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %[3]s, sort, order)
+        }
+
+        var total int64
+        totalSet := false
+        dataQuery := "SELECT %[4]s, COUNT(*) OVER() AS _total FROM %[5]s" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"
+        var fullArgs []interface{}
+        fullArgs = append(fullArgs, args...)
+        rows, err := db.QueryContext(r.Context(), dataQuery, fullArgs...)
+        if err != nil {
+            httperr.Internal(w, err)
+            return
+        }
+        defer rows.Close()
+`, filterRT, searchableColsLiteral, fmt.Sprintf("%q", colPrefix), selectFrag, fromFrag)
+}
+
 // generateListHandler writes list.go for a resource: a List(db) handler that
 // reads page/search/sort/order query parameters, builds a dynamic WHERE/ORDER
 // BY/LIMIT query against the plural table name, counts the total rows for
@@ -353,6 +627,24 @@ func (g *Generator) generateListHandler(dir string, r types.Resource) error {
 
 	var sb strings.Builder
 
+	// Compile the optional filter once so the runtime block, viewmodel and
+	// imports can all be derived from it.
+	var compiled *filterexpr.Compiled
+	var filterRT string
+	hasFilter := r.List.Filter != nil
+	if hasFilter {
+		var cerr error
+		compiled, cerr = g.filterCompile(r.List.Filter, colPrefix)
+		if cerr != nil {
+			return cerr
+		}
+		filterRT = g.filterRuntimeBlock(r.List.Filter, compiled)
+	}
+	urlImport := ""
+	if hasFilter {
+		urlImport = "    \"net/url\"\n"
+	}
+
 	// Package declaration and imports
 	sb.WriteString(fmt.Sprintf(`package %s
 
@@ -363,7 +655,7 @@ import (
     "net/http"
     "strconv"
     "strings"
-
+%s
     %q
     %q
     auth %q
@@ -403,7 +695,7 @@ func List(db *sql.DB) http.HandlerFunc {
             order = "asc"
         }
 
-        validSorts := map[string]bool{`, pkgName,
+        validSorts := map[string]bool{`, pkgName, urlImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), perPage))
 
@@ -426,7 +718,9 @@ func List(db *sql.DB) http.HandlerFunc {
 	// positionally in SQL text order, so search args must come before the
 	// LIMIT/OFFSET args; postgres uses numbered $N so order does not matter.
 	var listCore string
-	if g.isSQLite() {
+	if hasFilter {
+		listCore = g.filterListCore(searchableColsLiteral, colPrefix, selectFrag, fromFrag, filterRT)
+	} else if g.isSQLite() {
 		listCore = fmt.Sprintf(`        var args []interface{}
 
         var whereClauses []string
@@ -555,7 +849,19 @@ func List(db *sql.DB) http.HandlerFunc {
 
         totalPages := int(math.Ceil(float64(total) / float64(perPage)))
 
-        vd := &viewmodels.ListData{
+`)
+	if hasFilter {
+		sb.WriteString(g.filterViewmodelCode(r.List.Filter, compiled))
+		sb.WriteString("\n")
+	}
+	filterVdFields := ""
+	if hasFilter {
+		filterVdFields = `            FilterQS:  filterQS,
+            Filter:    filterData,
+            Applied:   filterApplied,
+`
+	}
+	sb.WriteString(`        vd := &viewmodels.ListData{
             Items:      items,
             Page:       page,
             PerPage:    perPage,
@@ -570,7 +876,7 @@ func List(db *sql.DB) http.HandlerFunc {
             Resource:  ` + fmt.Sprintf("%q", r.Name) + `,
             PanelPath: ` + fmt.Sprintf("%q", g.Config.Panel.Path) + `,
             CSRFToken: auth.CSRFToken(r, w),
-        }
+` + filterVdFields + `        }
 
         ` + fmt.Sprintf("layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sList(vd)).Render(r.Context(), w)", resourceTitle(r), g.Config.Panel.Path, r.Name) + `
     }
@@ -670,6 +976,22 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 	selectFrag, fromFrag, colPrefix, _, _ := g.listSelectFrom(r, tName, fieldNames)
 	searchable := quoteList(searchCols, colPrefix)
 
+	hasFilter := card.Filter != nil
+	var compiled *filterexpr.Compiled
+	var filterRT string
+	if hasFilter {
+		var cerr error
+		compiled, cerr = g.filterCompile(card.Filter, colPrefix)
+		if cerr != nil {
+			return cerr
+		}
+		filterRT = g.filterRuntimeBlock(card.Filter, compiled)
+	}
+	urlImport := ""
+	if hasFilter {
+		urlImport = "    \"net/url\"\n"
+	}
+
 	kanban := card.KanbanField != ""
 	perPage, rows, cols := card.Rows*card.Columns, card.Rows, card.Columns
 
@@ -688,7 +1010,9 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 	}
 
 	var queryCore string
-	if g.isSQLite() {
+	if hasFilter {
+		queryCore = g.filterListCore(searchable, colPrefix, selectFrag, fromFrag, filterRT)
+	} else if g.isSQLite() {
 		queryCore = fmt.Sprintf(`        var args []interface{}
 
         var whereClauses []string
@@ -861,7 +1185,7 @@ import (
     "net/http"
     "strconv"
     "strings"
-
+%s
     %q
     %q
     auth %q
@@ -892,6 +1216,7 @@ func Cards(db *sql.DB) http.HandlerFunc {
 %s
         var items []map[string]interface{}
 %s
+%s
         totalPages := int(math.Ceil(float64(total) / float64(perPage)))
 
 %s
@@ -914,12 +1239,12 @@ func Cards(db *sql.DB) http.HandlerFunc {
             KanbanColumns: %s,
             Resource:      %q,
             PanelPath:     %q,
-        }
+%s        }
 
         layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sCards(vd)).Render(r.Context(), w)
     }
 }
-`, pkgName,
+`, pkgName, urlImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		perPage,
@@ -927,10 +1252,23 @@ func Cards(db *sql.DB) http.HandlerFunc {
 		queryCore,
 		itemsAssignment,
 		kanbanCode,
+		func() string {
+			if hasFilter {
+				return g.filterViewmodelCode(card.Filter, compiled) + "\n"
+			}
+			return ""
+		}(),
 		fieldDefsStr(card.Fields),
 		cols, rows, kanban, card.KanbanField,
 		kanbanColumnsExpr,
-		r.Name, panelPath, resourceTitle(r), panelPath, r.Name)
+		r.Name, panelPath,
+		func() string {
+			if hasFilter {
+				return "            FilterQS: filterQS,\n            Filter:   filterData,\n            Applied:  filterApplied,\n"
+			}
+			return ""
+		}(),
+		resourceTitle(r), panelPath, r.Name)
 
 	return os.WriteFile(filepath.Join(dir, "card.go"), []byte(code), 0644)
 }

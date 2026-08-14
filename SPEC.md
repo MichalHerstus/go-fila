@@ -194,6 +194,13 @@ resources:
           sortable: true
       default_sort: -created_at
       export: [id, name, email]   # optional: CSV export emits only these columns (Label headers)
+      # ── FILTER (optional) ─────────────────────────
+      filter:
+        label: "Advanced filter"    # collapsible header label
+        where: "status = $1"        # filterexpr mini-DSL expression (AND/OR/parens, = != <> < <= > >= contains not_contains is_null is_not_null, literal values or $N params)
+        params:                     # runtime $N param declarations (default: p<N> / "Value N" when absent)
+          - name: status_val
+            label: "Status"
 
     # ── DETAIL VIEW ────────────────────────────────
     detail:
@@ -232,6 +239,13 @@ resources:
       searchable:
         - title
       default_sort: -created_at
+      # ── FILTER (optional) ─────────────────────────
+      filter:
+        label: "Card filter"
+        where: "status = $1"
+        params:
+          - name: status_val
+            label: "Status"
         - name: status
           type: badge
           options:

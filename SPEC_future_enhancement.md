@@ -221,7 +221,9 @@ regression guard does not apply — assert via `assertGeneratedGoParses` + snipp
 Status: partially implemented (2026-08-13). Implementation order D2 → D3 →
 D5 → D6 (D1 — auth features — and D4 — API mode — are excluded from the plan).
 D2 (audit log), D3 (CSV import + export column selection), D5 (plugin fn hooks)
-and D6 (SQLite stored procedures) are done.
+and D6 (SQLite stored procedures) are done. Mobile device support and Lua
+scripting moved to **Phase E** below as **E1** and **E2** (their former D14/D15
+numbers were freed so **D14** is now the master-detail roadmap item below).
 Decisions already taken: sqlite procedures are **YAML-seeded only** (no runtime
 editor UI). Assumptions flagged ⚠️ below are open to veto before implementation.
 
@@ -238,8 +240,8 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Drop sqlc & make the DB the sole schema source (`schema:` block, mandatory `--db`) | Planned (D11) |
 | Embed pre-built CSS into the yaga binary (drop the Tailwind build step) | Planned (D12) |
 | List/Card filter section (`list.filter` / `card.filter`, collapsible, `$N` params) | Planned (D13) |
-| Mobile device support (server-side UA detection, `visible_on_mobile` nav filter, mobile list/card/detail/form views, load-more, kanban column pages) | Planned (D14) |
-| Lua scripting for actions & hooks (gopher-lua, `script:` body, `ctx` scope, `db.*`/`abort`/`log` host API) | Planned (D15) |
+| Mobile device support (server-side UA detection, `visible_on_mobile` nav filter, mobile list/card/detail/form views, load-more, kanban column pages) | Moved to Phase E (E1) |
+| Lua scripting for actions & hooks (gopher-lua, `script:` body, `ctx` scope, `db.*`/`abort`/`log` host API) | Moved to Phase E (E2) |
 
 ---
 
@@ -851,7 +853,7 @@ output stays byte-identical except the CSS asset + Makefile.
 
 ### D13 — List/Card filter section
 
-**Status: planned (2026-08-11), not started.** A YAML-defined filter on list and card
+**Status: implemented (2026-08-14).** A YAML-defined filter on list and card
 views: a collapsible filter section above the table/cards that builds an arbitrary
 AND/OR filtering combination over the resource's columns, with runtime-valued
 `$N` parameters. Decisions taken (2026-08-11): **one filter per view** (`list.filter`,
@@ -943,7 +945,125 @@ byte-identical.
 
 ---
 
-### D14 — Mobile device support
+### D14 — Master-detail (header + child lines) navigation
+
+**Status: planned (2026-08-14), not started.** Opt-in master-detail support for
+document-oriented resources (Order/Invoice etc.) built from two related tables with a
+1 → many relation: one header table (e.g. `orders`) plus many child-line records that
+carry an FK to the header (e.g. `order_lines.order_id → orders.id`). The header's
+**detail** and **edit** views embed a read-only table of the header's lines; each line
+links to the child's own pre-bound detail/edit; "Add line" opens a pre-bound child
+create form. Decisions taken (2026-08-14): **nested navigation** (not an inline
+editable grid in the same form — each POST stays a single record, keeping the form
+engine and per-record hooks/audit/bulk untouched); relationships are declared by an
+**explicit `children:` block** on the header resource **and auto-emitted by
+`init --db`** (`--demo` no longer exists — it was removed in D11, `init --db` is the
+only init path); the child resource **stays fully independent** — it keeps its own
+list/detail/form, appears in navigation, and its FK is only locked when opened from a
+parent context.
+
+**YAML schema** (`internal/types/resource.go`: `Children []ChildResource` on
+`Resource`):
+
+```yaml
+- name: Order
+  label: Orders
+  table: orders
+  children:
+    - name: Lines                # optional section heading (default: child Label)
+      resource: OrderLine        # required: child resource name
+      column: order_id           # optional; auto-derived from schema reverse-FK
+      columns:                   # optional; default = child's list.columns
+        - { name: product_id_label, label: "Product" }
+        - { name: qty, label: "Qty", type: integer }
+        - { name: total, label: "Total", type: float }
+```
+
+The parent→child relationship is **derived** at generation time from the existing
+`schema:` block — there is no new schema metadata. `SchemaTable.ForeignKeys`
+(`types/schema.go`) already records the child→parent FK (`order_lines.order_id →
+orders.id`), so the generator scans every `schema.tables[].foreign_keys` for an FK
+whose `ForeignTable`/`ForeignColumn` match the parent's table/primary key.
+
+**Behaviour**
+- **Detail view (a):** header fields, then a `<section>` titled "Lines" listing the
+  child rows (`SELECT <cols>, <childID> FROM <childTable> WHERE <fk> = <headerId>`,
+  driver-aware placeholder). Each row links to the child's detail ("View").
+- **Edit form (b):** header fields, then the "Lines" table with per-line **Edit**
+  (→ child edit, FK locked) and **Delete** (→ child delete, postback returns to this
+  header edit), plus an **"Add Line"** button (→ child create with
+  `<column>=<headerId>`). When adding a new line the FK is auto-sourced from the header
+  id (hidden value); when editing an existing line the FK is preserved (rendered
+  read-only, hidden value still submitted, Browse suppressed).
+- **Create form:** lines section is unavailable (no header id yet) — emits only an
+  informational note "Save the header, then add lines.".
+- **Child independence:** opened from its own list, the child FK remains an editable
+  picker; opened from a parent context it is seeded + locked.
+- **Return navigation:** child create/update/delete POST handlers accept an optional
+  `?return=<panel>/<child>/<id>/edit` (or raw URL) used as the redirect target;
+  default behaviour (redirect to the child list) is unchanged when absent.
+
+**Touch points:**
+1. `internal/types/resource.go` — `ChildResource{Name, Resource, Column, Columns
+   []Column}`; `Children []ChildResource` on `Resource`.
+2. `internal/generator/handler.go` — reverse-FK helper `childRels(parent)` (scan
+   `schema.tables[].foreign_keys` for target = parent table/pk → child resource, FK
+   column, child table); `generateDetailHandler` + `generateUpdateHandler` GET load
+   child lines into the viewmodel (raw `SELECT … WHERE fk = ?`, `scanFields`-style, no
+   windowed `_total`); `generateCreateHandler`/`generateUpdateHandler`/`generateDeleteHandler`
+   seed + lock the FK field when `?<column>=<parentId>` is present and honor `?return=`.
+3. `internal/generator/viewmodels.go` — `ChildLinesData{Heading, Resource,
+   ResourceLower, IDColumn, FKColumn, ParentID, PanelPath, CSRFToken, Fields
+   []ColumnDef, Rows []map[string]interface{}, Count int}`; `Lines []ChildLinesData`
+   on both `DetailData` and `FormData`; `Locked bool` on `ColumnDef`.
+4. `internal/generator/templ.go` — child-lines `<section>` in `generateDetailTempl`
+   and `generateFormTempl` (edit only; informational note on create);
+   `pickerMarkup` skips the Browse button + script when the field def is `Locked`
+   (still emits the hidden input + read-only display). Reuse existing Tailwind classes
+   only so `TestGenerateStylesEmbedded` stays green (no `make styles`).
+5. `internal/parser/validator.go` — `children.resource` must exist; `column` (or the
+   derived FK) must be an FK on the child's schema table pointing at the parent's
+   table/pk; `columns` must reference child schema columns.
+6. `cmd/yaga/introspect.go` — in `writeResourceYAML` (after the update block, ~line
+   1077): for each non-view table with an FK targeting this table emit a `children:`
+   entry (`resource: toSingularPascal(child.name)`, `column: <local FK column>`);
+   default column list omitted so the generator derives it from the child resource.
+7. `cmd/yaga/editor/` — per-resource **Lines / Children** screen (keyed `tview.List`
+   by `name`; column sub-editor reuses the column-page patterns; `mergeYAML` already
+   keys item lists by `name`); canonical path `Resources/<res>/Children` + resolver in
+   `nav.go`.
+8. Docs — `SPEC.md` (schema), `README.md`, `AGENTS.md`, `cmd/yaga/ai_spec.md`; add an
+   `OrderLine` child to `testdata/kitchen.yaml`.
+
+**Tests / exit criteria:** generator tests — children-free output stays byte-identical
+(regression guard) + a child-lines config exercising the derived `SELECT…WHERE fk`,
+FK seed/lock emission and `?return=` redirect; parser validation tests (valid + invalid
+`children:` blocks); editor nav test for `Resources/<res>/Children`; an
+`introspect_test` asserting `init --db` emits a `children:` block for a table with an FK
+targeting it. Gates: `go build ./...`, `go vet ./...`, `go test ./...`,
+`gofmt -l .`; E2E — `init --db` on a header/line schema → `generate` → `make` →
+login, exercise header detail with lines, edit-lines pre-bound FK, add-line, delete-line
+returning to the header edit (sqlite; driver-aware placeholders for postgres/mssql).
+
+Out of scope: inline multi-row grid editing, delete-cascade of lines on header delete
+(DB-enforced FK), and CSV export of a header together with its lines.
+
+---
+
+**Phase E — Mobile & scripting roadmap**
+
+Status: planned (2026-08-14). Mobile device support (**E1**) and Lua scripting
+(**E2**) were moved out of Phase D into their own phase (implementation order
+E1 → E2; each is independent — no sqlc, DB or layout coupling).
+
+| Item | Status |
+|---|---|
+| Mobile device support (server-side UA detection, `visible_on_mobile` nav filter, mobile list/card/detail/form views, load-more, kanban column pages) | Planned (E1) |
+| Lua scripting for actions & hooks (gopher-lua, `script:` body, `ctx` scope, `db.*`/`abort`/`log` host API) | Planned (E2) |
+
+---
+
+### E1 — Mobile device support
 
 **Status: planned (2026-08-14), not started.** Mobile browsers are auto-detected
 server-side and get distinct mobile views instead of the desktop variants: navigation
@@ -1035,7 +1155,7 @@ desktop variant.
 
 ---
 
-### D15 — Lua scripting for actions & hooks (gopher-lua)
+### E2 — Lua scripting for actions & hooks (gopher-lua)
 
 **Status: planned (2026-08-14), not started.** Actions and hooks gain a YAML-embedded
 scripting language so admin logic (conditional DB ops, default values, validation
@@ -1151,11 +1271,11 @@ removes the last external toolchain step from the generated Makefile (`build: cs
 `build: templ`) and touches the same asset/build/`makefile.go` surfaces; it also fits the D8
 asset-tooling precedent. **D13 (list/card filters) is independent of D2–D12; it should land
 after D10 since its docs/code references and example YAML (demo/ai_spec) touch the renamed
-paths.** **D14 (mobile device support) is independent of D2–D13 and builds on D11**: its
+paths.** **E1 (mobile device support) is independent of D2–D13 and builds on D11**: its
 detection middleware, mobile templ views and nav filtering touch the same generated-handler/
 layout surfaces as D11's v2 model but share no sqlc dependency; the `mobile bool` threading
 into `layoutviews.Base(...)` should land after D11's layout rework to avoid churn.
-**D15 (Lua scripting) is independent of D2–D14**: it adds a generated runtime package
+**E2 (Lua scripting) is independent of D2–D13 and E1**: it adds a generated runtime package
 (`internal/panel/luascript`), a conditional go.mod dependency and new `script:` fields on
 hooks/actions — no sqlc, DB, or layout coupling — so it can slot in alongside any other
 milestone; it mirrors the D5 (plugin hook sources) and D6 (procedures) precedent of
@@ -1170,3 +1290,239 @@ attr, no `style={}`/conditional `class={}`, IIFE-wrapped inline scripts, driver-
 placeholders + sqlite arg order, `idColumn(r)` everywhere, no comments in generated code.
 Each milestone carries a **regression guard**: feature-off output stays byte-identical
 (snippet-asserted in `generator_test.go`).
+
+---
+
+### E3 — TUI editor polish (color palette, SQL highlighting, input enhancements)
+
+**Status: planned (2026-08-14), not started.** Three targeted improvements to the
+terminal-based editor (`cmd/yaga/editor/`) that require no architectural changes: a
+modern dark-theme color palette (Catppuccin Mocha), syntax-highlighted SQL in the
+query viewer, and enhanced form input widgets (Tab-completion on string fields. 
+Each is independent; order: style → sqlview
+→ widgets.
+
+**E3a — Color palette (`style.go`)**
+
+Replace the current zinc/warm-gray palette with Catppuccin Mocha colors:
+
+| Variable | Current | New |
+|----------|---------|-----|
+| `colAccent` | `#6366f1` (indigo) | `#89b4fa` (blue) |
+| `colAccentHi` | `#8b5cf6` (violet) | `#b4befe` (lavender) |
+| `colText` | `#d4d4d8` (zinc-300) | `#cdd6f4` (text) |
+| `colMuted` | `#71717a` (zinc-500) | `#6c7086` (overlay0) |
+| `colBorder` | `#3f3f46` (zinc-700) | `#45475a` (surface1) |
+| `colBg` | `#1c1917` (warm gray-900) | `#1e1e2e` (base) |
+| `colOk` | `#22c55e` (green) | `#a6e3a1` (green) |
+| `colWarn` | `#eab308` (yellow) | `#f9e2af` (yellow) |
+| `colErr` | `#ef4444` (red) | `#f38ba8` (red) |
+
+Add `colFormBg = #313244` (surface0) and replace the 3 hardcoded `0x27272a`
+`SetFieldBackgroundColor` calls in `lists.go`/`menu.go` → `colFormBg`.
+
+Mechanical: 43 color references across 8 files — no logic change, just hex values.
+
+**E3b — SQL syntax highlighting (`sqlview.go`)**
+
+Add `sqlHighlight(raw string) string` that injects tview `[color]...[-:-:-]` tags via
+simple regex-based tokenization:
+1. Strings: `'...'` (incl. `''` escapes) → `[green]...[-:-:-]`
+2. `--`/`/* */` comments → `[#585b70]...[-:-:-]`
+3. SQL keywords (SELECT, FROM, WHERE, JOIN, AND, OR, INSERT, UPDATE, DELETE, etc.) →
+   `[teal]KEYWORD[-:-:-]`
+4. Placeholders (`$N`, `?`) → `[yellow]...[-:-:-]`
+
+Used in `sqlManifest` instead of `tview.Escape` — the existing `SetDynamicColors(true)`
+on the `TextView` renders the tags. `sqlRowHeight` uses `tview.TaggedStringWidth` which
+strips color tags, so the height estimate stays correct.
+
+**E3c — Input enhancements (`widgets.go`)**
+
+- **`strWithCompletion(form, label, value, set, completions []string)`** — same as `str`
+  but also captures Tab key to auto-complete from the provided list (first prefix match).
+  Used for: driver field (`"postgres"`, `"sqlite"`, `"mssql"`), icon field (from
+  `iconOptions`), table name fields.
+
+**Touch points:** `cmd/yaga/editor/style.go`, `sqlview.go`, `widgets.go`, plus
+`SetFieldBackgroundColor` replacements in `lists.go` and `menu.go`. No test changes
+needed for colors (no test asserts hex values); add `TestSqlHighlight` for tokenizer;
+widget tests are covered by existing sim-screen tests.
+
+**Tests / exit criteria:** `TestSqlHighlight` — keyword coloring, string literal
+coloring, comment skipping, placeholder coloring; `TestNumCtrlIncrement` — Ctrl+↑
+increments, Ctrl+↓ decrements, stays ≥ 0; go test pass, no regressions in existing
+editor tests.
+
+---
+
+### E4 — `yaga serve`: web-based config editor
+
+**Status: planned (2026-08-14), not started.** A new `yaga serve` subcommand that
+starts a local HTTP server with a REST API and an embedded single-page-application
+frontend (vanilla HTML/CSS/JS, no bundler or npm) for editing `yaga.yaml` in a
+browser. The server reuses all existing Go logic (`parser.ValidateAll`,
+`schema.ParseQueries`, `schema.CollectReferences`, `schema.GenerateQueries`, etc.)
+— the same functions the TUI editor calls — wrapped in JSON endpoints.
+
+**Command shape:**
+```
+yaga serve              # default :9090, yaga.yaml
+yaga serve --port 9091  --config path/to/yaga.yaml
+yaga serve --open       # open browser automatically
+```
+
+**Architecture:**
+```
+yaga serve
+  └─ internal/serve/Server
+       ├─ GET  /api/config              → full config JSON
+       ├─ PUT  /api/config              → JSON body, validate, return errors
+       ├─ GET  /api/validate            → ValidateAll + analyze → findings JSON
+       ├─ POST /api/save                → yaml.Marshal + WriteFile to disk
+       ├─ GET  /api/analyze             → sync analysis (tables, queries, refs)
+       ├─ POST /api/generate-queries    → generate missing SQL query files
+       └─ GET  /static/*                → embedded SPA (index.html, app.js, style.css)
+```
+
+**Go server (`internal/serve/serve.go` + `handlers.go`):**
+
+- `Server` struct holds in-memory `*types.Config`, `configPath`, `sync.RWMutex`, and
+  `pendingSQL map[string]string` (staged SQL edits, same pattern as the TUI's
+  `pendingSQL`).
+- Routes use Go 1.22+ `http.ServeMux` method patterns (`"GET /api/config"`,
+  `"PUT /api/config"`) — no chi dependency needed.
+- Handlers call the same functions as the TUI editor: `parser.ValidateAll`,
+  `schema.ParseQueries(e.queriesDir())`, `schema.CollectReferences(e.cfg)`,
+  `schema.GenerateQueries(rep.tables, driver)`. Zero logic duplication.
+- Save writes `yaml.Marshal(e.cfg)` to `configPath` and flushes staged SQL files.
+- Static files served via `//go:embed internal/serve/static/*` → `embed.FS`.
+
+**Frontend (`internal/serve/static/`, embedded SPA):**
+
+Three files, no framework, no bundler:
+
+- **`index.html`** (~80 lines) — shell with `<header>` (title, save indicator),
+  `<nav id="sidebar">` (tabs matching the TUI nav items), `<main id="content">`,
+  `<footer>` (shortcuts hint).
+- **`app.js`** (~500 lines) — vanilla JS: `fetch()` calls to the REST API,
+  page-rendering functions (one per section: panel, auth, resources list, resource
+  detail, pages, validate, sync), DOM manipulation via `innerHTML`. Pattern:
+  ```js
+  let config = null;
+  async function loadConfig() { /* GET /api/config */ }
+  function showPage(name) { /* switch(name) { case 'panel': renderPanel(); ... } */ }
+  function saveConfig() { /* PUT /api/config + POST /api/save */ }
+  ```
+  Field rendering helpers: `textField()`, `numField()`, `boolField()`, `pickField()`.
+  Resource list with add/edit/delete using `listSpec`-like callbacks.
+  Validate screen: `GET /api/validate` → red/yellow finding rows.
+  SQL queries: `GET /api/analyze` → click query name → edit `<textarea>` → staged.
+- **`style.css`** (~250 lines) — Catppuccin Mocha dark theme (same palette as E3a),
+  flex layout (sidebar 220px + content), form field styling, status colors.
+
+**What v1 does NOT do** (deferred to follow-up):
+- No file watcher — click "Reload" to re-fetch config after external edits.
+- No cd-navigation dialog — sidebar tabs are the only navigation.
+- No ASCII preview — the TUI's `preview.go` is terminal-specific; web preview is
+  a separate topic.
+- No Monaco editor — raw YAML tab uses a plain `<textarea>`; vendoring Monaco's UMD
+  bundle (like Chart.js) is a future add-on.
+
+**Touch points:**
+1. `cmd/yaga/main.go` — add `case "serve":` + usage line.
+2. `cmd/yaga/serve.go` (~60 lines) — entry point, `--port`/`--config`/`--open` flags,
+   `parser.ParseFile`, `serve.New(cfg, configPath, port).Start()`.
+3. `internal/serve/serve.go` (~80 lines) — `Server` struct, route registration,
+   `Start()`/`Stop()`, static file serving via `embed.FS`.
+4. `internal/serve/handlers.go` (~500 lines) — 6 REST handlers + validation helpers.
+5. `internal/serve/static/index.html` (~80 lines) — SPA shell.
+6. `internal/serve/static/app.js` (~500 lines) — vanilla JS frontend.
+7. `internal/serve/static/style.css` (~250 lines) — Catppuccin Mocha theme.
+
+New Go code: ~640 lines. Frontend: ~830 lines.
+
+**Tests / exit criteria:** `go vet ./...` / `go build ./...` — compilation and
+embed integrity. No e2e in v1 (manual smoke: `yaga serve --config testdata/kitchen.yaml
+--open` → browser loads, panel/auth/resources pages render, edit a field → save →
+YAML file updated). Existing `go test ./...` stays green (no generated code changes).
+
+---
+
+### E5 — `yaga mcp`: MCP server for AI agent config editing
+
+**Status: drafted (2026-08-14), not started.** An MCP (Model Context Protocol) server
+that exposes the yaga config and editing operations as structured tools, resources,
+and prompts over JSON-RPC 2.0 (stdio transport). AI agents like Opencode can call
+these tools to read, edit, validate, and save `yaga.yaml` — no third-party API
+calls, no full-config serialization to an LLM.
+
+**Command shape:**
+```
+yaga mcp                          # loads yaga.yaml, starts stdio MCP server
+yaga mcp --config path/to/other.yaml
+```
+
+**Transport:** JSON-RPC 2.0 over stdin/stdout — the standard MCP CLI-server pattern.
+The agent spawns `yaga mcp` as a subprocess and communicates line-delimited JSON.
+
+**Tool categories:**
+
+| Category | Tools | Purpose |
+|----------|-------|---------|
+| Lifecycle | `open {path}`, `save`, `validate` | Load/switch configs, pre-save check, persist |
+| Read | `get_config`, `get_value {path}`, `list_resources`, `list_navigation` | Targeted queries |
+| Edit (scalar) | `set_value {path, value}` | Single field change |
+| Edit (structural) | `add_resource`, `remove_resource`, `add_column`, `add_field`, `add_nav_item`, `remove_nav_item` | List mutations |
+| Edit (bulk) | `merge_yaml_fragment {yaml}` | AI-generated multi-key edit |
+| Utility | `analyze` | Schema/query sync check |
+
+**Path resolution** uses the same case-insensitive matching as the TUI editor's
+`nav.go` — `resources/Customer` resolves to the `Customer` resource,
+`navigation/0/items/1` to the second item of the first group. Resource names, group
+names, and item identity keys match via `matchesSeg`/`foldSeg`.
+
+**Example agent workflow:**
+```
+Agent → open {path: "../other/yaga.yaml"}
+     → get_value {path: "panel/name"}             → "My Admin"
+     → set_value {path: "panel/name", value: "CRM"}
+     → validate                                    → "OK"
+     → save                                        → "Written to ../other/yaga.yaml"
+```
+
+**Agent prompts mapped to tool calls:**
+
+| "change dashboard icon to newlogo.jpg" | `set_value {path: "panel/brand/logo", value: "newlogo.jpg"}` |
+| "List available resources" | `list_resources` → `[{name, label, icon, table}]` |
+| "show me columns in list view for Customers" | `get_value {path: "resources/Customer/list/columns"}` |
+| "remove topic Order List from navigation" | `get_value {path: "navigation"}` → find → `remove_nav_item {group: "Sales", label: "Order List"}` |
+
+**Refactoring needed** — extract `mergeYAML`, `changedPaths`, `extractYAMLBlock` and
+their helpers from `cmd/yaga/ai.go` (unexported `package main`) into
+`internal/mcp/merge.go`. These are pure functions (zero I/O) and `ai.go` already has
+test coverage for them.
+
+**New files:**
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `cmd/yaga/mcp.go` | ~40 | Entry point, `--config` flag, `parser.ParseFile`, start server |
+| `internal/mcp/mcp.go` | ~150 | `Server` struct, JSON-RPC 2.0 dispatch over stdio, capabilities |
+| `internal/mcp/tools.go` | ~350 | 15 tool handler implementations |
+| `internal/mcp/resources.go` | ~80 | Resource URI handlers (`yaga://config`, `yaga://resources/{name}`, etc.) |
+| `internal/mcp/merge.go` | ~350 | Extracted from `ai.go`: `mergeYAML`, `changedPaths`, `extractYAMLBlock` |
+| `internal/mcp/prompts.go` | ~50 | Prompt templates (e.g. `validate_and_fix`) |
+| `cmd/yaga/main.go` | +3 | `case "mcp":` + usage line |
+| `cmd/yaga/ai.go` | `-0` | Stripped merge/diff/changedPaths; imports `internal/mcp` |
+| **Total new** | **~1,020** | |
+
+**Dependencies:** zero new. `encoding/json` is stdlib. JSON-RPC 2.0 is a trivial
+protocol (`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_config","arguments":{}}}`).
+
+**Tests / exit criteria:** `internal/mcp/mcp_test.go` — unit tests calling each tool
+handler with JSON-RPC request structs, asserting response shape; `merge_test.go` —
+carried over from existing `ai_test.go` merge/diff tests. Integration:
+`go test ./internal/mcp/...` with a real config file. Existing `editAI` integration
+tests in `ai_test.go` stay green (same functions, imported package).
+`go vet ./...` / `go build ./...` / `go test ./...` all clean.

@@ -343,6 +343,8 @@ templ %s(data *viewmodels.ListData) {
             </div>
         </div>
 
+        @filterBar(data.Filter, data.Search, data.Sort, data.Order)
+
         @searchBar(data.Search, data.Resource)
 
         <div class="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden">
@@ -360,7 +362,7 @@ templ %s(data *viewmodels.ListData) {
                 </tbody>
             </table>
 
-            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order)
+            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order, data.FilterQS)
         </div>
 %s    </div>
 }
@@ -379,6 +381,8 @@ templ %s(data *viewmodels.ListData) {
                 %s
             </div>
         </div>
+
+        @filterBar(data.Filter, data.Search, data.Sort, data.Order)
 
         @searchBar(data.Search, data.Resource)
 
@@ -402,7 +406,7 @@ templ %s(data *viewmodels.ListData) {
 %s                </div>
             </form>
 
-            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order)
+            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order, data.FilterQS)
         </div>
 %s    </div>
 }
@@ -1001,12 +1005,14 @@ templ %s(data *viewmodels.CardData) {
             </div>
         </div>
 
+        @filterBar(data.Filter, data.Search, data.Sort, data.Order)
+
         @searchBar(data.Search, data.Resource)
 
         %s
 
         if !data.Kanban {
-            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order)
+            @pagination(data.Page, data.TotalPages, data.Total, data.Search, data.Sort, data.Order, data.FilterQS)
         }
     </div>
 }
@@ -1025,6 +1031,8 @@ templ %s(data *viewmodels.CardData) {
                 %s
             </div>
         </div>
+
+        @filterBar(data.Filter, data.Search, data.Sort, data.Order)
 
         @searchBar(data.Search, data.Resource)
 
@@ -1702,7 +1710,47 @@ func sortOrder(currentSort string, field string, currentOrder string) string {
     return "asc"
 }
 
-templ pagination(page int, totalPages int, total int, search string, sort string, order string) {
+func filterPanelClass(f *viewmodels.FilterData) string {
+    if f.Applied {
+        return "mt-2 bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded-lg p-4"
+    }
+    return "mt-2 bg-gray-50 dark:bg-gray-900 border dark:border-gray-700 rounded-lg p-4 hidden"
+}
+
+templ filterBar(f *viewmodels.FilterData, search string, sort string, order string) {
+    if f != nil {
+        <div class="mb-4">
+            <button type="button" onclick="document.getElementById('filter-panel').classList.toggle('hidden')" class="flex items-center gap-1 text-sm font-medium text-gray-700 dark:text-gray-200 border dark:border-gray-600 px-3 py-2 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700">
+                { f.Label }
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+            </button>
+            <div id="filter-panel" class={ filterPanelClass(f) }>
+                <form method="GET">
+                    <input type="hidden" name="filter" value="1" />
+                    <input type="hidden" name="search" value={ search } />
+                    <input type="hidden" name="sort" value={ sort } />
+                    <input type="hidden" name="order" value={ order } />
+                    <div>
+                        for _, p := range f.Params {
+                            <div class="mb-2">
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400">{ p.Label }</label>
+                                <input type="text" name={ "fp_" + p.Key } value={ p.Value } placeholder={ p.Label } class="w-64 rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2" />
+                            </div>
+                        }
+                    </div>
+                    <div class="flex gap-2">
+                        <button type="submit" class="bg-brand-primary text-white px-4 py-2 rounded-md text-sm hover:opacity-90">Apply</button>
+                        <a href="?" class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 px-4 py-2 text-sm">Clear</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    }
+}
+
+templ pagination(page int, totalPages int, total int, search string, sort string, order string, filterQS string) {
     if totalPages > 0 {
         <div class="bg-white dark:bg-gray-800 px-4 py-3 flex items-center justify-between border-t dark:border-gray-700">
             <div class="text-sm text-gray-700 dark:text-gray-300">
@@ -1710,17 +1758,17 @@ templ pagination(page int, totalPages int, total int, search string, sort string
             </div>
             <div class="flex gap-1">
                 if page > 1 {
-                    <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", page-1, search, sort, order)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600">Previous</a>
+                    <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s%s", page-1, search, sort, order, filterQS)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600">Previous</a>
                 }
                 for i := 1; i <= totalPages; i++ {
                     if i == page {
                         <span class="px-3 py-1 border rounded text-sm bg-brand-primary text-white">{ fmt.Sprintf("%d", i) }</span>
                     } else {
-                        <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", i, search, sort, order)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600">{ fmt.Sprintf("%d", i) }</a>
+                        <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s%s", i, search, sort, order, filterQS)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600">{ fmt.Sprintf("%d", i) }</a>
                     }
                 }
                 if page < totalPages {
-                    <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s", page+1, search, sort, order)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600">Next</a>
+                    <a href={ templ.SafeURL(fmt.Sprintf("?page=%d&search=%s&sort=%s&order=%s%s", page+1, search, sort, order, filterQS)) } class="px-3 py-1 border rounded text-sm hover:bg-gray-50 dark:hover:bg-gray-700 dark:border-gray-600">Next</a>
                 }
             </div>
         </div>

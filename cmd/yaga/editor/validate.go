@@ -179,6 +179,12 @@ func (e *Editor) sectionJump(resource string, ref schema.ColumnRef) (string, tvi
 	case "list.columns":
 		name = e.resColumnsPath(idx)
 		prim = e.columnsPage(idx)
+	case "list.filter":
+		name = e.resListFilterPath(idx)
+		prim = e.filterPage(idx, "list")
+	case "card.filter":
+		name = e.resCardFilterPath(idx)
+		prim = e.filterPage(idx, "card")
 	case "card.fields":
 		name = e.resCardFieldsPath(idx)
 		prim = e.cardFieldsPage(idx)

@@ -39,6 +39,11 @@ type ListConfig struct {
 	// the export emits only those columns (with Label headers); when empty the
 	// export falls back to all list columns with raw column-name headers.
 	Export []string `yaml:"export"`
+	// Filter is an optional collapsible filter section above the list table. The
+	// where expression is a mini-DSL compiled at generation time into
+	// dialect-correct SQL; runtime-valued $N params are collected from labeled
+	// inputs on the filter form and travel in URL query params.
+	Filter *FilterConfig `yaml:"filter"`
 }
 
 // CardConfig defines a card-grid view of the resource: display fields (cards
@@ -53,6 +58,27 @@ type CardConfig struct {
 	KanbanField string   `yaml:"kanban_field"`
 	Searchable  []string `yaml:"searchable"`
 	DefaultSort string   `yaml:"default_sort"`
+	// Filter is an optional collapsible filter section above the card grid,
+	// with the same shape and runtime behavior as list.filter.
+	Filter *FilterConfig `yaml:"filter"`
+}
+
+// FilterConfig defines a collapsible filter section on a list or card view: a
+// label for the collapsible header and a `where` expression (the filterexpr
+// mini-DSL) plus the ordered runtime params ($N tokens) it references. The
+// expression and params are trusted YAML compiled to SQL at generation time.
+type FilterConfig struct {
+	Label  string        `yaml:"label"`
+	Where  string        `yaml:"where"`
+	Params []FilterParam `yaml:"params"`
+}
+
+// FilterParam names a runtime-valued $N token in a filter `where` expression.
+// Each param renders as a labeled input on the filter form; a missing or empty
+// value on Apply skips the filter entirely.
+type FilterParam struct {
+	Name  string `yaml:"name"`
+	Label string `yaml:"label"`
 }
 
 // Column is a single list column: its name, label, type, sortable/searchable

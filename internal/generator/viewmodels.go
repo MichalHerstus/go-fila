@@ -140,6 +140,9 @@ type ListData struct {
 	Resource   string
 	PanelPath  string
 	CSRFToken  string
+	FilterQS   string
+	Filter     *FilterData
+	Applied    bool
 }
 
 type DetailData struct {
@@ -173,6 +176,26 @@ type CardData struct {
 	KanbanColumns []CardColumnData
 	Resource   string
 	PanelPath  string
+	FilterQS   string
+	Filter     *FilterData
+	Applied    bool
+}
+
+// FilterData describes the collapsible filter section on a list/card view:
+// its header label, whether it is currently applied, and the labeled param
+// inputs with their current (echoed) values.
+type FilterData struct {
+	Label   string
+	Applied bool
+	Params  []FilterParamData
+}
+
+// FilterParamData is a single labeled input on a filter form: the URL query
+// key (fp_<Key>), its label and the current value to prefill.
+type FilterParamData struct {
+	Key   string
+	Label string
+	Value string
 }
 
 type FormData struct {

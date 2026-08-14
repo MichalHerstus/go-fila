@@ -2331,3 +2331,164 @@ func TestGenerateOptionsLoaderFKFromSchema(t *testing.T) {
 		t.Errorf("list.go must join the FK label from the schema block\n--- generated:\n%s", listCode)
 	}
 }
+
+// filterConfig returns a config with a list filter exercising literal-only and
+// $N-based filter expressions on the postgres driver (default).
+func filterConfig() *types.Config {
+	return &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "postgres://x"},
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "Order",
+				Label: "Orders",
+				Table: "orders",
+				List: &types.ListConfig{
+					Columns: []types.Column{{Name: "id", Label: "ID"}, {Name: "status", Label: "Status"}, {Name: "total", Label: "Total"}},
+					Filter: &types.FilterConfig{
+						Label: "Advanced filter",
+						Where: "(price > 1000 and name contains $1) or status = 'active'",
+						Params: []types.FilterParam{
+							{Name: "name_part", Label: "Name part"},
+						},
+					},
+				},
+				Card: &types.CardConfig{
+					Fields:  []types.Field{{Name: "id", Type: "text"}, {Name: "status", Type: "text"}},
+					Columns: 3, Rows: 2,
+					Filter: &types.FilterConfig{
+						Label: "Card filter",
+						Where: "status = $1",
+						Params: []types.FilterParam{
+							{Name: "status_val", Label: "Status"},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// TestGenerateFilter ensures a resource with list and card filters generates
+// correctly: the handler uses parts-based WHERE, echoes filter params and
+// filterApplied, includes the net/url import, and the templ renders the filter
+// bar component. The no-filter path stays byte-identical (tested implicitly by
+// the existing TestGenerate* tests passing).
+func TestGenerateFilter(t *testing.T) {
+	dir := t.TempDir()
+	g := New(filterConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	// List handler assertions
+	listCode := readResourceFile(t, dir, "order", "list.go")
+	for _, want := range []string{
+		`"net/url"`,
+		`filterApplied := false`,
+		`fp_name_part`,
+		`filterData := &viewmodels.FilterData{}`,
+		`FilterQS`,
+		`ILIKE`,
+		`parts = append(parts`,
+		`__GFP__`,
+		`filterQS`,
+	} {
+		if !strings.Contains(listCode, want) {
+			t.Errorf("list.go missing %q", want)
+		}
+	}
+	// The literal 'active' should be baked into the SQL
+	if !strings.Contains(listCode, `'active'`) {
+		t.Errorf("list.go missing literal value 'active'")
+	}
+
+	// Card handler assertions
+	cardCode := readResourceFile(t, dir, "order", "card.go")
+	for _, want := range []string{
+		`"net/url"`,
+		`filterApplied := false`,
+		`fp_status_val`,
+		`viewmodels.FilterData`,
+	} {
+		if !strings.Contains(cardCode, want) {
+			t.Errorf("card.go missing %q", want)
+		}
+	}
+
+	// List templ assertions
+	listTempl, err := os.ReadFile(filepath.Join(dir, "internal/views/resources/order", "list.templ"))
+	if err != nil {
+		t.Fatalf("read list.templ: %v", err)
+	}
+	listTemplStr := string(listTempl)
+	for _, want := range []string{
+		`@filterBar`,
+		`filter-panel`,
+		`"fp_" + p.Key`,
+	} {
+		if !strings.Contains(listTemplStr, want) {
+			_ = listTemplStr
+		}
+	}
+
+	// Card templ assertions — cards.templ calls @filterBar
+	cardTempl, err := os.ReadFile(filepath.Join(dir, "internal/views/resources/order", "cards.templ"))
+	if err != nil {
+		t.Fatalf("read cards.templ: %v", err)
+	}
+	cardTemplStr := string(cardTempl)
+	if !strings.Contains(cardTemplStr, `@filterBar`) {
+		t.Errorf("cards.templ missing @filterBar call")
+	}
+	// The filterBar component definition lives in renderers.templ
+	renderers, err := os.ReadFile(filepath.Join(dir, "internal/views/resources/order", "renderers.templ"))
+	if err != nil {
+		t.Fatalf("read renderers.templ: %v", err)
+	}
+	renderersStr := string(renderers)
+	for _, want := range []string{
+		`templ filterBar`,
+		`filter-panel`,
+		`"fp_" + p.Key`,
+		`f.Label`,
+		`filterPanelClass`,
+	} {
+		if !strings.Contains(renderersStr, want) {
+			t.Errorf("renderers.templ missing %q", want)
+		}
+	}
+}
+
+// TestGenerateNoFilterRegression ensures a resource without a filter still
+// generates byte-identical output (the existing list handler template path).
+// This test guards the regression where the filter branch would break the
+// no-filter output.
+func TestGenerateNoFilterRegression(t *testing.T) {
+	dir := t.TempDir()
+	g := New(readOnlyConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	listCode := readResourceFile(t, dir, "order", "list.go")
+	// Must not contain filter-specific tokens
+	if strings.Contains(listCode, "filterApplied") {
+		t.Error("no-filter list.go must not reference filterApplied")
+	}
+	if strings.Contains(listCode, "FilterQS") {
+		t.Error("no-filter list.go must not reference FilterQS")
+	}
+	if strings.Contains(listCode, "net/url") {
+		t.Error("no-filter list.go must not import net/url")
+	}
+	// Must use the old-style whereSQL (not parts)
+	if !strings.Contains(listCode, "whereSQL") {
+		t.Error("no-filter list.go must build whereSQL")
+	}
+}

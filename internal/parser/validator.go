@@ -7,6 +7,8 @@ package parser
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 
 	"github.com/MichalHerstus/yaga/internal/types"
 )
@@ -43,6 +45,10 @@ func inMaxWidths(v string) bool {
 	}
 	return false
 }
+
+// paramRefRE matches runtime $N tokens in a filter where expression. The N is
+// used to check that every referenced param position has a matching declaration.
+var paramRefRE = regexp.MustCompile(`\$(\d+)`)
 
 // Validate checks a parsed config for required fields and applies defaults. It
 // returns the first validation problem (or nil), ignoring non-fatal warnings;
@@ -169,6 +175,16 @@ func ValidateAll(cfg *types.Config) []error {
 		}
 		if r.ImportCSV && (r.Form == nil || r.Form.Create == nil) {
 			add(fmt.Errorf("resources[%d] (%s) import_csv requires a form.create section", i, r.Name))
+		}
+		if r.List != nil {
+			for _, fe := range validateFilter(r.List.Filter) {
+				add(fmt.Errorf("resources[%d] (%s) list.filter: %w", i, r.Name, fe))
+			}
+		}
+		if r.Card != nil {
+			for _, fe := range validateFilter(r.Card.Filter) {
+				add(fmt.Errorf("resources[%d] (%s) card.filter: %w", i, r.Name, fe))
+			}
 		}
 		if err := validateResourceHooks(r); err != nil {
 			add(fmt.Errorf("resources[%d]: %w", i, err))
@@ -348,6 +364,51 @@ func procRefs(r types.Resource) map[string]string {
 // lists and checking each hook's name and fn/sql/proc combination.
 // Params: h (the hooks block; nil is valid).
 // Returns: an error describing the first invalid hook, or nil.
+// validateFilter checks a list/card filter config:
+//   - where is required (non-empty) when a filter config is present;
+//   - every $N token referenced by where must have a matching runtime param:
+//     the highest $N must not exceed len(params) — a where expression using $N
+//     with no (or too few) declared params is an error;
+//   - every param must have a non-empty, unique name.
+//
+// Params: f (the filter config; nil is valid).
+// Returns: the validation problems found (empty when valid).
+func validateFilter(f *types.FilterConfig) []error {
+	if f == nil {
+		return nil
+	}
+	var errs []error
+	if f.Where == "" {
+		errs = append(errs, fmt.Errorf("where is required"))
+	} else {
+		maxN := 0
+		for _, m := range paramRefRE.FindAllStringSubmatch(f.Where, -1) {
+			if n, _ := strconv.Atoi(m[1]); n > maxN {
+				maxN = n
+			}
+		}
+		if maxN > len(f.Params) {
+			if len(f.Params) == 0 {
+				errs = append(errs, fmt.Errorf("where references $%d but no params are declared", maxN))
+			} else {
+				errs = append(errs, fmt.Errorf("where references $%d but only %d param(s) are declared", maxN, len(f.Params)))
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for i, p := range f.Params {
+		if p.Name == "" {
+			errs = append(errs, fmt.Errorf("params[%d].name is required", i))
+			continue
+		}
+		if seen[p.Name] {
+			errs = append(errs, fmt.Errorf("params[%d].name %q is duplicated", i, p.Name))
+		}
+		seen[p.Name] = true
+	}
+	return errs
+}
+
 func validateHooks(h *types.Hooks) error {
 	if h == nil {
 		return nil

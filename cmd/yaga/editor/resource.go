@@ -1,6 +1,7 @@
 package editor
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -176,6 +177,9 @@ func (e *Editor) listPage(idx int) tview.Primitive {
 		e.addButton(f, "Columns", func() {
 			e.showPage(e.resColumnsPath(idx), e.columnsPage(idx))
 		})
+		e.addButton(f, "Filter", func() {
+			e.showPage(e.resListFilterPath(idx), e.filterPage(idx, "list"))
+		})
 	})
 }
 
@@ -215,6 +219,9 @@ func (e *Editor) cardPage(idx int) tview.Primitive {
 			e.showPage(path, e.stringListPage(path, "Card searchable", func() []string {
 				return c.Searchable
 			}, func(v []string) { c.Searchable = v }))
+		})
+		e.addButton(f, "Filter", func() {
+			e.showPage(e.resCardFilterPath(idx), e.filterPage(idx, "card"))
 		})
 	})
 }
@@ -350,4 +357,79 @@ func (e *Editor) policiesPage(idx int) tview.Primitive {
 		e.str(f, "Delete", p.Delete, func(v string) { p.Delete = v })
 		e.head(f, "Roles are pipe-separated, e.g. admin|manager")
 	})
+}
+
+// filterPage edits a list or card filter config (label, where expression,
+// params list). `which` is "list" or "card".
+func (e *Editor) filterPage(idx int, which string) tview.Primitive {
+	r := &e.cfg.Resources[idx]
+	var f *types.FilterConfig
+	switch which {
+	case "list":
+		if r.List == nil {
+			r.List = &types.ListConfig{}
+		}
+		if r.List.Filter == nil {
+			r.List.Filter = &types.FilterConfig{}
+		}
+		f = r.List.Filter
+	case "card":
+		if r.Card == nil {
+			r.Card = &types.CardConfig{}
+		}
+		if r.Card.Filter == nil {
+			r.Card.Filter = &types.FilterConfig{}
+		}
+		f = r.Card.Filter
+	}
+	return e.formShell("Filter: "+r.Name, func(form *tview.Form) {
+		e.str(form, "Label", f.Label, func(v string) { f.Label = v })
+		e.long(form, "Where", f.Where, func(v string) { f.Where = v })
+		e.addButton(form, "Params", func() {
+			var path string
+			if which == "list" {
+				path = e.resListFilterPath(idx) + "/Params"
+			} else {
+				path = e.resCardFilterPath(idx) + "/Params"
+			}
+			e.showPage(path, e.filterParamsPage(f))
+		})
+	})
+}
+
+// filterParamsPage manages the runtime param list of a filter config.
+func (e *Editor) filterParamsPage(f *types.FilterConfig) tview.Primitive {
+	if f.Params == nil {
+		f.Params = []types.FilterParam{}
+	}
+	spec := listSpec{
+		title: "Filter params",
+		labels: func() []string {
+			out := make([]string, len(f.Params))
+			for i, p := range f.Params {
+				out[i] = p.Name
+			}
+			return out
+		},
+		sub: func(i int) string {
+			return f.Params[i].Label
+		},
+		add: func() {
+			f.Params = append(f.Params, types.FilterParam{Name: "p" + fmt.Sprintf("%d", len(f.Params)+1), Label: "Value " + fmt.Sprintf("%d", len(f.Params)+1)})
+			e.markModified()
+		},
+		edit: func(i int) {
+			p := &f.Params[i]
+			path := "filter-param-" + p.Name
+			e.showPage(path, e.formShell("Param: "+p.Name, func(form *tview.Form) {
+				e.str(form, "Name", p.Name, func(v string) { p.Name = v })
+				e.str(form, "Label", p.Label, func(v string) { p.Label = v })
+			}))
+		},
+		remove: func(i int) {
+			f.Params = append(f.Params[:i], f.Params[i+1:]...)
+			e.markModified()
+		},
+	}
+	return e.recordList("filter-params", spec)
 }

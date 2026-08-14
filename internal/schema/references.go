@@ -9,6 +9,7 @@ package schema
 import (
 	"strings"
 
+	"github.com/MichalHerstus/yaga/internal/filterexpr"
 	"github.com/MichalHerstus/yaga/internal/types"
 )
 
@@ -54,6 +55,13 @@ func CollectReferences(cfg *types.Config) *References {
 			if r.List.DefaultSort != "" {
 				refs.addColumnRef(name, "list.default_sort", 0, sortColumn(r.List.DefaultSort))
 			}
+			if r.List.Filter != nil && r.List.Filter.Where != "" {
+				if expr, err := filterexpr.Parse(r.List.Filter.Where); err == nil {
+					for _, col := range expr.Columns() {
+						refs.addColumnRef(name, "list.filter", 0, col)
+					}
+				}
+			}
 		}
 		if r.Card != nil {
 			for i, f := range r.Card.Fields {
@@ -67,6 +75,13 @@ func CollectReferences(cfg *types.Config) *References {
 			}
 			if r.Card.DefaultSort != "" {
 				refs.addColumnRef(name, "card.default_sort", 0, sortColumn(r.Card.DefaultSort))
+			}
+			if r.Card.Filter != nil && r.Card.Filter.Where != "" {
+				if expr, err := filterexpr.Parse(r.Card.Filter.Where); err == nil {
+					for _, col := range expr.Columns() {
+						refs.addColumnRef(name, "card.filter", 0, col)
+					}
+				}
 			}
 		}
 		if r.Detail != nil {
