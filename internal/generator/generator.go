@@ -2,8 +2,8 @@
 //
 // Orchestrates the code generation pipeline for the admin panel application.
 // The Generator type holds the parsed configuration and the output directory,
-// and Generate() runs each code-generation step in order (sqlc config, main,
-// router, auth, resource handlers, page handlers, views, go.mod, view models,
+// and Generate() runs each code-generation step in order (main, router, auth,
+// resource handlers, data queries, page handlers, views, go.mod, view models,
 // assets). It also creates the directory layout of the generated project.
 package generator
 
@@ -80,7 +80,7 @@ func (g *Generator) isSQLite() bool {
 // isMSSQL reports whether the configured database driver is Microsoft SQL
 // Server. MSSQL connections use the go-mssqldb "mssql" driver name so the
 // driver's loose placeholder parsing accepts the $N placeholders required by
-// the postgres-flavored SQL (sqlc's postgres engine cannot parse @name).
+// the emitted SQL.
 // Returns: true when the driver is "mssql" or "sqlserver".
 func (g *Generator) isMSSQL() bool {
 	d := g.driver()
@@ -111,7 +111,7 @@ func (g *Generator) likeOp() string {
 	return "ILIKE"
 }
 
-// idGoType returns the Go type used for primary key ids by the sqlc generated
+// idGoType returns the Go type used for primary key ids in the generated data
 // queries: sqlite INTEGER ids map to int64 while postgres INTEGER ids map to
 // int32.
 // Returns: "int32" for postgres, "int64" for sqlite.
@@ -123,9 +123,9 @@ func (g *Generator) idGoType() string {
 }
 
 // idGoTypeForResource returns the Go type used to cast the :id path parameter
-// when calling a resource's sqlc query. It honours the resource's optional
-// id_type override (emitted by init --db for e.g. BIGINT/SMALLINT identity
-// primary keys) and falls back to the driver default otherwise.
+// when reading a row. It honours the resource's optional id_type override
+// (emitted by init --db for e.g. BIGINT/SMALLINT identity primary keys) and
+// falls back to the driver default otherwise.
 // Params: r (the resource definition).
 // Returns: the Go type name, e.g. "int32", "int64" or "int16".
 func (g *Generator) idGoTypeForResource(r types.Resource) string {
@@ -136,31 +136,22 @@ func (g *Generator) idGoTypeForResource(r types.Resource) string {
 }
 
 // Generate runs the full generation pipeline in dependency order: it ensures
-// the directory layout exists, then writes the sqlc config, main.go, the
-// router, the auth package, one handler file set per resource, one page
-// handler per page, all templ views, go.mod, the view models and the static
-// assets. Returns an error if any step fails.
+// the directory layout exists, then writes internal/data (Get queries derived
+// from the captured schema block), main.go, the router, the auth package, one
+// handler file set per resource, one page handler per page, all templ views,
+// go.mod, the view models and the static assets. Runs fully offline: the
+// schema comes from the config's `schema:` block, never from sqlc. Returns an
+// error if any step fails.
 func (g *Generator) Generate() error {
 	if err := g.ensureDirs(); err != nil {
 		return fmt.Errorf("creating directories: %w", err)
 	}
 
-	if g.Config.SQLC.Config != "" {
-		if err := g.generateSQLCConfig(); err != nil {
-			return fmt.Errorf("generating sqlc config: %w", err)
-		}
-	}
-
-	if err := g.copySQLFiles(); err != nil {
-		return fmt.Errorf("copying sql files: %w", err)
-	}
-
-	// Plugins run after the user's SQL is copied (plugin SQL must land in the
-	// out dir before sqlc runs) and before any resource/page generation. The
-	// audit log augments the config after plugins (the AuditLog resource is
-	// itself list-only) but before the second ensureDirs so its handler/view
-	// dirs are created. The second ensureDirs call creates handler/view dirs
-	// for plugin- and audit-contributed resources.
+	// Plugins run before any resource/page generation. The audit log augments
+	// the config after plugins (the AuditLog resource is itself list-only) but
+	// before the second ensureDirs so its handler/view dirs are created. The
+	// second ensureDirs call creates handler/view dirs for plugin- and
+	// audit-contributed resources.
 	if err := g.loadPlugins(); err != nil {
 		return fmt.Errorf("loading plugins: %w", err)
 	}
@@ -173,6 +164,10 @@ func (g *Generator) Generate() error {
 	}
 	if err := g.generateProcedures(); err != nil {
 		return fmt.Errorf("generating procedures: %w", err)
+	}
+
+	if err := g.generateData(); err != nil {
+		return fmt.Errorf("generating data package: %w", err)
 	}
 
 	if err := g.generateMain(); err != nil {
@@ -231,15 +226,17 @@ func (g *Generator) Generate() error {
 }
 
 // ensureDirs creates the fixed directory layout of the generated project
-// (internal/panel, internal/views, internal/viewmodels, internal/assets,
-// static, sql) plus one resource handler and view subdirectory per resource.
-// Returns an error if a directory cannot be created.
+// (internal/panel, internal/data, internal/views, internal/viewmodels,
+// internal/assets, static, sql) plus one resource handler and view
+// subdirectory per resource. Returns an error if a directory cannot be
+// created.
 func (g *Generator) ensureDirs() error {
 	dirs := []string{
 		"internal/panel/auth",
 		"internal/panel/httperr",
 		"internal/panel/resources",
 		"internal/panel/pages",
+		"internal/data",
 		"internal/hooks",
 		"internal/views/layout",
 		"internal/views/resources",
@@ -249,7 +246,6 @@ func (g *Generator) ensureDirs() error {
 		"internal/viewmodels",
 		"internal/assets/css",
 		"static/js",
-		"sql/queries",
 		"sql/migrations",
 	}
 	for _, d := range dirs {
@@ -269,42 +265,5 @@ func (g *Generator) ensureDirs() error {
 		}
 	}
 
-	return nil
-}
-
-// copySQLFiles copies the user's sql/queries and sql/migrations trees from the
-// config directory into the generated output directory. This keeps the
-// generated project self-contained: sqlc runs against ./sql inside the output
-// dir, and options_query lookups resolve against the copied queries at
-// generation time. Source directories that do not exist are skipped.
-// Returns an error if a source directory exists but cannot be copied.
-func (g *Generator) copySQLFiles() error {
-	if g.ConfigDir == "" {
-		return nil
-	}
-	for _, sub := range []string{"queries", "migrations"} {
-		src := filepath.Join(g.ConfigDir, "sql", sub)
-		info, err := os.Stat(src)
-		if err != nil || !info.IsDir() {
-			continue
-		}
-		dst := filepath.Join(g.OutDir, "sql", sub)
-		entries, err := os.ReadDir(src)
-		if err != nil {
-			return err
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(src, e.Name()))
-			if err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(dst, e.Name()), data, 0644); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }

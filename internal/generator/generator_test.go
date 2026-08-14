@@ -322,12 +322,10 @@ func TestGenerateAuditSchemaEmitted(t *testing.T) {
 			t.Errorf("audit_log.sql missing %q", want)
 		}
 	}
-	queries, err := os.ReadFile(filepath.Join(dir, "sql", "queries", "audit_log.sql"))
-	if err != nil {
-		t.Fatalf("read queries/audit_log.sql: %v", err)
-	}
-	if !strings.Contains(string(queries), "-- name: ListAuditLogs :many") {
-		t.Error("queries/audit_log.sql missing ListAuditLogs")
+	// D11: no sqlc query file is produced — audit list/count run as raw SQL in
+	// the generated list handler.
+	if _, err := os.Stat(filepath.Join(dir, "sql", "queries", "audit_log.sql")); !os.IsNotExist(err) {
+		t.Error("must not emit a sqlc queries/audit_log.sql (D11)")
 	}
 }
 
@@ -1784,8 +1782,9 @@ func TestGenerateBulkTransaction(t *testing.T) {
 	}
 }
 
-// TestGenerateOptionsLoaderDedupe ensures fields sharing an options_query emit a
-// single options-load block whose variable is reused by both fields (no N+1).
+// TestGenerateOptionsLoaderDedupe ensures fields sharing the same resolved
+// option SQL (via options_sql) emit a single options-load block whose variable
+// is reused by both fields (no N+1).
 func TestGenerateOptionsLoaderDedupe(t *testing.T) {
 	cfg := &types.Config{
 		Version: "1",
@@ -1800,8 +1799,8 @@ func TestGenerateOptionsLoaderDedupe(t *testing.T) {
 				Form: &types.FormConfig{
 					Create: &types.FormAction{
 						Fields: []types.Field{
-							{Name: "role_id", Type: "relation", OptionsQuery: "ListRoles"},
-							{Name: "manager_id", Type: "relation", OptionsQuery: "ListRoles"},
+							{Name: "role_id", Type: "relation", OptionsValue: "id", OptionsLabel: "name", OptionsSQL: "SELECT id, name FROM roles"},
+							{Name: "manager_id", Type: "relation", OptionsValue: "id", OptionsLabel: "name", OptionsSQL: "SELECT id, name FROM roles"},
 						},
 					},
 				},
@@ -1819,8 +1818,8 @@ func TestGenerateOptionsLoaderDedupe(t *testing.T) {
 		t.Fatalf("read create.go: %v", err)
 	}
 	createStr := string(create)
-	if n := strings.Count(createStr, `ListRoles`) - 0; n < 1 {
-		t.Fatalf("create.go missing the options query reference: %d", n)
+	if n := strings.Count(createStr, `SELECT id, name FROM roles`); n < 1 {
+		t.Fatalf("create.go missing the options SQL reference: %d", n)
 	}
 	if got := strings.Count(createStr, `:= map[string]string{}`); got != 1 {
 		t.Errorf("expected 1 options-load block, got %d\n--- generated:\n%s", got, createStr)
@@ -2018,7 +2017,7 @@ func TestGenerateMakefileNoNPM(t *testing.T) {
 	for _, want := range []string{
 		`TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`,
 		`TAILWIND_VERSION ?= ` + tailwindStandaloneVersion,
-		`build: css sqlc templ`,
+		`build: css templ`,
 		`css:`,
 		`$(TAILWIND) -i ./internal/assets/css/styles.css -o ./static/css/styles.css --minify`,
 		`get-tailwind:`,
@@ -2167,5 +2166,155 @@ func TestCreateFileFieldKeepsLegacyPath(t *testing.T) {
 	}
 	if !strings.Contains(code, `file/image uploads are not supported in CSV import`) {
 		t.Errorf("import-enabled file resource must emit the buildCreateParams stub\n--- generated:\n%s", code)
+	}
+}
+
+// schemaConfig returns a config exercising the D11 schema block: a users table
+// with an FK to roles plus a User resource with list/detail/update so the
+// schema-derived Get query and FK option loading are exercised.
+func schemaConfig() *types.Config {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "x"},
+		},
+		Schema: &types.Schema{
+			Tables: []types.SchemaTable{
+				{
+					Name: "users",
+					PK:   "id",
+					Columns: []types.SchemaColumn{
+						{Name: "id", Type: "integer", PrimaryKey: true},
+						{Name: "name", Type: "string"},
+						{Name: "email", Type: "string"},
+						{Name: "role_id", Type: "integer"},
+					},
+					ForeignKeys: []types.SchemaFK{
+						{Column: "role_id", ForeignTable: "roles", ForeignColumn: "id", Label: "name"},
+					},
+				},
+				{
+					Name:    "roles",
+					PK:      "id",
+					Columns: []types.SchemaColumn{{Name: "id", Type: "integer", PrimaryKey: true}, {Name: "name", Type: "string"}},
+				},
+			},
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Label: "User",
+				List:  &types.ListConfig{Columns: []types.Column{{Name: "id"}, {Name: "name"}, {Name: "role_id_label"}}},
+				Detail: &types.DetailConfig{
+					Query:  "GetUser",
+					Fields: []types.Field{{Name: "id"}, {Name: "name"}, {Name: "email"}, {Name: "role_id"}},
+				},
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "name", Type: "text"},
+							{Name: "email", Type: "email"},
+							{Name: "role_id", Type: "relation", OptionsValue: "id", OptionsLabel: "name"},
+						},
+					},
+					Update: &types.FormAction{
+						PopulateQuery: "GetUser",
+						Fields:        []types.Field{{Name: "name", Type: "text"}, {Name: "email", Type: "email"}},
+					},
+				},
+			},
+		},
+	}
+	return cfg
+}
+
+// TestGenerateDataFromSchema ensures the schema-derived Get query carries every
+// table column, FK label LEFT JOINs and a driver-aware key placeholder.
+func TestGenerateDataFromSchema(t *testing.T) {
+	dir := t.TempDir()
+	g := New(schemaConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+	code, err := os.ReadFile(filepath.Join(dir, "internal", "data", "data.go"))
+	if err != nil {
+		t.Fatalf("read data.go: %v", err)
+	}
+	str := string(code)
+	for _, want := range []string{
+		"func New(db *sql.DB) *Querier",
+		"func (q *Querier) GetUser(ctx context.Context, id int32) (map[string]interface{}, error) {",
+		`SELECT t.id, t.name, t.email, t.role_id, f_roles.name AS role_id_label FROM users t LEFT JOIN roles f_roles ON f_roles.id = t.role_id WHERE t.id = $1`,
+	} {
+		if !strings.Contains(str, want) {
+			t.Errorf("data.go missing %q\n--- generated:\n%s", want, str)
+		}
+	}
+	// Detail + update share the query name but target the same table, so only
+	// one method is emitted.
+	if n := strings.Count(str, "GetUser("); n != 1 {
+		t.Errorf("expected exactly 1 GetUser method, got %d\n--- generated:\n%s", n, str)
+	}
+}
+
+// TestGenerateDataFallbackFields ensures a config without a schema block still
+// emits a Get from the resource's own detail/update fields + key column.
+func TestGenerateDataFallbackFields(t *testing.T) {
+	cfg := schemaConfig()
+	cfg.Schema = nil
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code, err := os.ReadFile(filepath.Join(dir, "internal", "data", "data.go"))
+	if err != nil {
+		t.Fatalf("read data.go: %v", err)
+	}
+	str := string(code)
+	if !strings.Contains(str, "SELECT id, name, email, role_id FROM users WHERE id = $1") {
+		t.Errorf("fallback Get must use detail/update fields + key column\n--- generated:\n%s", str)
+	}
+	if strings.Contains(str, "LEFT JOIN") {
+		t.Errorf("fallback Get must not emit FK joins without a schema block\n--- generated:\n%s", str)
+	}
+}
+
+// TestGenerateOptionsLoaderFKFromSchema ensures a relation field with
+// options_value/options_label resolves its option SQL from the schema block's
+// FK metadata when no options_sql is present.
+func TestGenerateOptionsLoaderFKFromSchema(t *testing.T) {
+	dir := t.TempDir()
+	g := New(schemaConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	code := readResourceFile(t, dir, "user", "create.go")
+	if !strings.Contains(code, `SELECT id, name FROM roles`) {
+		t.Errorf("create.go must derive role_id option SQL from the schema FK\n--- generated:\n%s", code)
+	}
+	if !strings.Contains(code, `role_idOpts := map[string]string{}`) {
+		t.Errorf("create.go must emit the role_id options var\n--- generated:\n%s", code)
+	}
+	if !strings.Contains(code, `{Name: "role_id", Label: "role_id", FieldType: "relation", Picker: true, Options: role_idOpts}`) {
+		t.Errorf("create.go must wire the relation field to role_idOpts as a picker\n--- generated:\n%s", code)
+	}
+	// The form templ must render the modal picker for the same field (the
+	// templ's isPickerField uses the same optionSQL resolution as the loader).
+	formTempl, err := os.ReadFile(filepath.Join(dir, "internal", "views", "resources", "user", "form.templ"))
+	if err != nil {
+		t.Fatalf("read form.templ: %v", err)
+	}
+	formStr := string(formTempl)
+	if !strings.Contains(formStr, `data-picker-options={ viewmodels.OptionsJS(data.Fields, "role_id") }`) {
+		t.Errorf("form.templ must render picker markup for the schema-FK relation field\n--- generated:\n%s", formStr)
+	}
+	// And the list/card handlers must join the FK label from the schema block
+	// even though no options_query exists on the relation field.
+	listCode := readResourceFile(t, dir, "user", "list.go")
+	if !strings.Contains(listCode, "LEFT JOIN roles f_roles ON f_roles.id = t.role_id") {
+		t.Errorf("list.go must join the FK label from the schema block\n--- generated:\n%s", listCode)
 	}
 }

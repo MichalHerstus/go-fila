@@ -603,7 +603,7 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
                 <label for="%s" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">%s</label>
 `, f.Name, label))
 
-		if isPickerField(f) {
+		if g.isPickerField(r, f) {
 			inputs.WriteString(pickerMarkup(f, label))
 		} else {
 			switch f.Type {
@@ -693,7 +693,7 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 
 	hasPicker := false
 	for _, e := range merged {
-		if isPickerField(e.f) {
+		if g.isPickerField(r, e.f) {
 			hasPicker = true
 			break
 		}
@@ -777,10 +777,14 @@ func visibleInContext(f types.Field, context string) bool {
 }
 
 // isPickerField reports whether a form field should render as a modal record
-// picker: a select/relation field backed by an options_query. Such fields get
-// a read-only display input plus a "Browse" button instead of a raw select.
-func isPickerField(f types.Field) bool {
-	return f.OptionsQuery != "" && (f.Type == "select" || f.Type == "relation")
+// picker: a select/relation field with a runtime option loader. The loader SQL
+// resolves via optionSQL (options_sql, then the schema block's FK metadata,
+// then legacy options_query), so this must agree with buildOptionsLoader.
+func (g *Generator) isPickerField(r types.Resource, f types.Field) bool {
+	if f.Type != "select" && f.Type != "relation" {
+		return false
+	}
+	return g.optionSQL(r, f) != ""
 }
 
 // pickerMarkup renders the options data (as a data attribute), the hidden

@@ -12,14 +12,18 @@ Single binary at `cmd/yaga/main.go` — stdlib flags, no cobra/viper.
 ## Init → Generate flow
 
 ```sh
-yaga init            # writes yaga.yaml + sql/{migrations,queries}/
-yaga init --demo     # same + seeds sqlite demo DB (roles/users/customers/products/orders/orderlines); login admin@demo.test / admin
-yaga init --db DSN   # introspects existing DB, generates yaga.yaml + SQL files from discovered tables
-yaga edit            # interactive TUI editor for yaga.yaml
-yaga generate        # generates admin/ app, runs sqlc + tailwind (non-fatal)
+yaga init --db DSN # introspects the DB, writes yaga.yaml with a captured `schema:` block + admin login
+yaga edit          # interactive TUI editor for yaga.yaml
+yaga generate      # generates admin/ app offline (no sqlc, no DB connection); tailwind non-fatal
 cd admin
-make                    # builds the dashboard binary + assets
+make               # builds the dashboard binary + assets (css + templ + go build)
 ```
+
+D11: the DB is the sole schema source. `init` without `--db` is an error (no
+scaffold/`--demo`); the introspected schema is captured into the YAML `schema:`
+block (tables, pk, view flag, columns with yaga field types, foreign_keys with
+label) and the generator derives list/detail/form/options SQL from it at
+generation time. The generated app never runs sqlc; `admin/sql/` is not produced.
 
 ### AI-assisted editing (D7)
 
@@ -31,7 +35,7 @@ make                    # builds the dashboard binary + assets
 
 ### `init --db` — Database introspection
 
-`yaga init --db {connection_string}` connects to an existing database, introspects its schema (tables, columns, primary keys, foreign keys), and generates `yaga.yaml` + SQL migration/query files from the discovered tables. Works for SQLite, Postgres and MSSQL (MSSQL DSN prefix `sqlserver://` or `mssql://`; see "MSSQL-specific gotchas" below).
+`yaga init --db {connection_string}` connects to an existing database, introspects its schema (tables, columns, primary keys, foreign keys), and generates `yaga.yaml` with a captured `schema:` block from the discovered tables. Works for SQLite, Postgres and MSSQL (MSSQL DSN prefix `sqlserver://` or `mssql://`; see "MSSQL-specific gotchas" below).
 
 **Driver detection:** DSN prefix `postgres://` or `postgresql://` → postgres; everything else (file path, `:memory:`) → sqlite. Uses `github.com/jackc/pgx/v5/stdlib` for postgres and `modernc.org/sqlite` for sqlite.
 
@@ -39,13 +43,12 @@ make                    # builds the dashboard binary + assets
 1. Connects to the DB, introspects schema via `information_schema` (postgres) or `PRAGMA` (sqlite)
 2. If `users`/`roles` tables are missing, creates them with default roles (admin/manager/user) and inserts an admin user (`admin@admin.test` / `admin`, bcrypt-hashed)
 3. If `users`/`roles` already exist with data, respects them as-is (no admin user inserted)
-4. Generates `yaga.yaml` with a resource per table (excluding `users`/`roles`) — list/detail/form sections, FK relation fields with `options_query`
-5. Generates SQLC query files with LEFT JOINs for FK label display
-6. Generates `schema.sql` only when auth tables were created
+4. Generates `yaga.yaml` with a resource per table (excluding `users`/`roles`) — list/detail/form sections, FK relation fields with `options_value`/`options_label`
+5. Emits the introspected schema as the `schema:` block — the sole schema source for the offline generator (no SQL query files, no `schema.sql`; only auth-table DDL when auth tables were created)
 
 **Type mapping:** `int`/`serial` → `integer`, `varchar`/`text` → `string`, `bool` → `boolean`, `timestamp`/`date` → `datetime`, `real`/`float`/`numeric` → `float`, `json`/`jsonb` → `json`, `bytea`/`blob` → `file`.
 
-**FK handling:** Foreign keys become `relation` fields in forms with `options_query: List{ForeignTable}`. In list views, FK columns are replaced with LEFT JOINs showing the foreign table's label column (preferred: `name`, then `title`, then `label`, then first non-PK text column).
+**FK handling:** Foreign keys become `relation` fields in forms with `options_value`/`options_label`; the option query is derived at generate time from the `schema:` FK metadata. In list views, FK columns are replaced with LEFT JOINs showing the foreign table's label column (preferred: `name`, then `title`, then `label`, then first non-PK text column).
 
 **Auth table DDL:** Postgres uses `SERIAL`/`TIMESTAMPTZ`; SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`/`datetime('now')`.
 
@@ -76,19 +79,18 @@ Flags: `init --db <dsn> --config <yaml> --out <dir> --force` (short variants `-d
 
 **Preview screen** (`preview.go`): ASCII-frame mock of the dashboard (topbar + sidebar from `cfg.Navigation` + per-page widget boxes) and per-resource list mock. The grid chrome (`│ ├ ┬ ┤ ┌ ┐ └ ┘ ─`) is drawn in light blue (`[lightblue]`) while the cell text is white (`[white]`), and every row is padded to the exact same total width (`previewWidth`=78) via `padVisual` (tag-aware: `tview.TaggedStringWidth`) — content row widths are `previewSideWidth`=26 / `previewContentWidth`=49 so the chrome rows (top/bottom borders, column separator) all add up to `previewWidth`. `colorStable` rewrites full color resets (`[-:-:-]`/`[:]`) from content into attribute-only `[::-]` so neither grid nor text color survives emphasis tags intact. No DB, no generated app.
 
-The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `css` (Tailwind via the standalone binary) → `sqlc generate` → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `css`, `sqlc`, `templ`, `tidy`, `get-tailwind` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`. **No npm/node is required** (D8): Chart.js is embedded into the yaga binary and vendored to `static/js/chart.js` at generation time, and Tailwind runs via the `tailwindcss` standalone binary (`TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`, so `make get-tailwind` is enough — the `css` target then uses `.tools/tailwindcss` automatically and only falls back to a PATH `tailwindcss`; override with `make TAILWIND=/path/to/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` standalone binary for the current OS/arch — linux/macos × x64/arm64 — via `uname -s/-m` mapping and curl).
+The generated `admin/` contains a `Makefile` (written by `generateMakefile()` in `makefile.go`). Its default `build` target runs every step needed to produce the dashboard binary, in order: `css` (Tailwind via the standalone binary) → `go mod tidy` → `go tool templ generate` → `go build -o <binary> .` (binary name = `--out` basename). Individual steps are also exposed as `css`, `templ`, `tidy`, `get-tailwind` targets, plus `run` (build + serve), `package` (bundle into a release tar.gz) and `clean`. **No npm/node is required** (D8): Chart.js is embedded into the yaga binary and vendored to `static/js/chart.js` at generation time, and Tailwind runs via the `tailwindcss` standalone binary (`TAILWIND ?= $(if $(wildcard .tools/tailwindcss),.tools/tailwindcss,tailwindcss)`, so `make get-tailwind` is enough — the `css` target then uses `.tools/tailwindcss` automatically and only falls back to a PATH `tailwindcss`; override with `make TAILWIND=/path/to/tailwindcss css`; `make get-tailwind` downloads the pinned `v3.4.19` standalone binary for the current OS/arch — linux/macos × x64/arm64 — via `uname -s/-m` mapping and curl).
 
 Equivalent manual steps:
 
 ```sh
 cd admin
 make css   # or: make get-tailwind && make css
-sqlc generate                       # retry if it failed during generate
 go tool templ generate              # compile .templ -> *_templ.go (required before go build)
 go mod tidy && go build -o admin .
 ```
 
-`sqlc generate` and `tailwindcss` failures are **non-fatal**. The user re-runs them manually. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
+`tailwindcss` failures are **non-fatal** — re-run `make css`. `templ generate` is also never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
 
 Flags: `generate --config <yaml> --out <dir> --force --verbose` (short variants `-c`, `-o`, `-f`, `-v`). `--out` basename becomes the module name.
 
@@ -98,12 +100,11 @@ Driver comes from the first `connections:.*.driver` value (default `"postgres"`)
 
 | Concern | postgres | sqlite | mssql |
 |---|---|---|---|
-| sqlc.yaml `engine` | `postgresql` | `sqlite` | `postgresql` (postgres-dialect schema.sql is the sqlc input) |
 | `sql.Open` driver | `pgx` + `_ "github.com/jackc/pgx/v5/stdlib"` | `sqlite3` + `github.com/mattn/go-sqlite3` | `mssql` + `_ "github.com/microsoft/go-mssqldb"` |
 | go.mod | adds `github.com/jackc/pgx/v5 v5.10.0` | adds `github.com/mattn/go-sqlite3 v1.14.24` | adds `github.com/microsoft/go-mssqldb v1.10.0` |
 | LIKE operator | `ILIKE` | `LIKE` | `LIKE` (case-insensitive default collation) |
 | bind placeholders | `$N` | `?` (positional, SQL-text order) | `$N` (go-mssqldb loose mode maps `$N`→`@pN`) |
-| sqlc id type | `int32` | `int64` | `int32` (unless `id_type` overrides; bigint → `int64`) |
+| data-query id type | `int32` | `int64` | `int32` (unless `id_type` overrides; bigint → `int64`) |
 | pagination | `LIMIT $1 OFFSET $2` | `LIMIT ? OFFSET ?` | `OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY` (REQUIRES an ORDER BY; no ORDER BY → emit `ORDER BY (SELECT NULL)`) |
 
 Helpers in `generator.go`: `driver()`, `isSQLite()`, `isMSSQL()`, `placeholder(n)`, `likeOp()`, `idGoType()`, `idGoTypeForResource(r)` (honors `id_type`), and `tableName(r)`/`idColumn(r)` in `handler.go` (honor `table`/`id_column` overrides). **`placeholder()` is still unused** — create/update/delete handlers hardcode `$N` (works on sqlite since mattn binds positionally, and on mssql via loose `$N` parsing). Only the list/card handlers are driver-aware.
@@ -111,11 +112,10 @@ Helpers in `generator.go`: `driver()`, `isSQLite()`, `isMSSQL()`, `placeholder(n
 ### MSSQL-specific gotchas
 
 - **`init --db` DSN**: prefix `sqlserver://` or `mssql://` → driver `mssql`. Introspection uses INFORMATION_SCHEMA + `sys.foreign_keys`, and `sys.columns.is_identity` for tables with no declared PRIMARY KEY (common on MSSQL line-of-business schemas — identity `ID` columns act as the key; they are marked `IsPrimaryKey` so routes key on them and INSERT/UPDATE omit them).
-- **sqlc must see postgres-dialect schema.sql**: `generateSchemaSQL()` now emits full DDL for ALL introspected tables (postgres dialect for postgres/mssql, sqlite dialect for sqlite). This is what lets sqlc infer types on mssql projects (and fixed pre-existing type inference for user tables on postgres). Never executed against the DB.
-- **`RETURNING` is emitted for mssql Create/Update** (driver != "sqlite") — the sqlc engine is `postgresql`, so this is required; the generated handlers use raw SQL at runtime anyway.
+- **`RETURNING` is emitted for mssql Create/Update** (driver != "sqlite") — the generated create/update handlers use raw SQL at runtime, and T-SQL has no `RETURNING` (create-hook id capture uses `OUTPUT INSERTED.<id>`).
 - **Postgres/MSSQL list/card pagination count comes from a windowed `COUNT(*) OVER()`**: the list/card data query emits `SELECT {cols}, COUNT(*) OVER() AS _total FROM {table} …` and scans `_total` into `total` per row — a single round trip, no separate COUNT query, so the old `countClauses`/$N-renumbering hack is gone. When the page is empty (rows beyond the last, or a search matching nothing) `totalSet` stays false and the handler falls back to `total = page*perPage` so `totalPages` renders as the current page instead of 0. mssql still needs the `ORDER BY (SELECT NULL)` fallback (see next bullet) and go-mssqldb still validates arg count against the HIGHEST `$N`, which is fine because there is only one query now.
-- **ORDER BY is omitted from generated list/options queries for mssql**: a derived table (the `options_query` wrapper) cannot have ORDER BY without TOP/OFFSET/FOR XML, and `TOP` cannot combine with `OFFSET` — so mssql list queries get `ORDER BY (SELECT NULL)` as a fallback only when no sort is set.
-- **MSSQL column names are PascalCase** (`CeleJmeno`, `ZamestnanecID`). sqlc lowercases the whole identifier and only splits on `_`, so yaga's `snakeToPascal` lowercases input first: `CeleJmeno`→`Celejmeno`, `ZamestnanecID`→`Zamestnanecid`, `role_id`→`RoleID` (still). Row maps are keyed by the raw selected column name, so introspection emits `id_column: ID` when the key column isn't literally `id`.
+- **ORDER BY is omitted from generated list/options queries for mssql**: a derived table (the `options_sql` wrapper) cannot have ORDER BY without TOP/OFFSET/FOR XML, and `TOP` cannot combine with `OFFSET` — so mssql list queries get `ORDER BY (SELECT NULL)` as a fallback only when no sort is set.
+- **MSSQL column names are PascalCase** (`CeleJmeno`, `ZamestnanecID`). The naming convention lowercases the whole identifier and only splits on `_`, so yaga's `snakeToPascal` lowercases input first: `CeleJmeno`→`Celejmeno`, `ZamestnanecID`→`Zamestnanecid`, `role_id`→`RoleID` (still). Row maps are keyed by the raw selected column name, so introspection emits `id_column: ID` when the key column isn't literally `id`.
 - **`table:` / `id_type:` / `id_column:` overrides** are emitted by introspection when the convention doesn't match the real schema (e.g. resource `Zamestnanec` → `table: Zamestnanec`; bigint PK → `id_type: int64`; `ID` column → `id_column: ID`). The generator's `tableName()`/`idColumn()`/`idGoTypeForResource()` fall back to the old conventions when the fields are absent.
 - Sanity check in generated main.go for mssql is `SELECT TOP 1 1 FROM {table}` (`TOP 1` replaces `LIMIT 1`).
 
@@ -125,26 +125,23 @@ Helpers in `generator.go`: `driver()`, `isSQLite()`, `isMSSQL()`, `placeholder(n
 ### sqlite list handler arg order (critical)
 mattn binds `?` args positionally in SQL-text order, so sqlite branch appends **search args first, then `LIMIT ? OFFSET ?`**, and uses `LIKE`. The postgres branch appends `perPage, offset` first with `ILIKE $N` + `LIMIT $1 OFFSET $2`. Mixing these up silently returns wrong rows on sqlite.
 
-### SQL files are copied into the output
-`Generate()` calls `copySQLFiles()` which copies `sql/{queries,migrations}/*` from the **config dir** into `g.OutDir/sql/`. Without this, sqlc fails (`no queries contained in paths`) and `options_query` lookups return empty. `ConfigDir` is set in `cmd/yaga/main.go` (`filepath.Dir(configPath)`); the generator has no other knowledge of where the YAML lives.
-
 ## Generator pipeline (files in `internal/generator/`)
 
 `generator.go` orchestrates calls to (in order):
 
-1. `ensureDirs()` — directory layout (also creates `sql/queries` + `sql/migrations` + `internal/hooks`)
-2. `generateSQLCConfig()` (`sqlc.go`) — sqlc.yaml, driver-aware engine
-3. `copySQLFiles()` (`generator.go`) — copies user SQL into the out dir
-4. `generateMain()` (`main.go`) — `main.go` with driver-aware `sql.Open`
-5. `generateRouter()` (`router.go`) — chi routes + RBAC wiring, page handlers
-6. `generateAuth()` (`auth.go`) — login/logout, session, RBAC middleware
-7. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, bulk, CSV export** (hooks wired into create/update/delete/action)
-8. `generatePage()` — page handlers with widget DB queries
-9. `generateViews()` (`templ.go`) — all `.templ` views
-10. `generateHooks()` (`hooks.go`) — shared `internal/hooks/hooks.go` (Scope + stubs)
+1. `ensureDirs()` — directory layout (also creates `internal/hooks`)
+2. `generateMain()` (`main.go`) — `main.go` with driver-aware `sql.Open`
+3. `generateRouter()` (`router.go`) — chi routes + RBAC wiring, page handlers
+4. `generateAuth()` (`auth.go`) — login/logout, session, RBAC middleware
+5. `generateData()` (`data.go`) — `internal/data` Get queries derived from the `schema:` block
+6. `generateResource()` → per-resource handlers (`handler.go`): list, **card**, detail, create, update, **delete, action, bulk, CSV export** (hooks wired into create/update/delete/action)
+7. `generatePage()` — page handlers with widget DB queries
+8. `generateViews()` (`templ.go`) — all `.templ` views
+9. `generateHooks()` (`hooks.go`) — shared `internal/hooks/hooks.go` (Scope + stubs)
+10. `generateProcedures()` (`procs.go`), `generateAuditSchema()` (`audit.go`)
 11. `generateGoMod()` (`mod.go`, declares the templ `tool` directive), `generateMakefile()` (`makefile.go`), `generateViewModels()` (`viewmodels.go`), `generateAssets()` (`tailwind.go`)
 
-All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
+All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`. Nothing touches the live DB or any sqlc tooling.
 
 ## Resource handler SQL strategy
 
@@ -152,21 +149,21 @@ All generation uses `os.WriteFile` + `fmt.Sprintf`, never `text/template`.
 |---|---|
 | List | Raw SQL with dynamic WHERE/ORDER BY/LIMIT |
 | Card | Raw SQL identical to list; `LIMIT = Rows*Columns`, grouped into kanban columns |
-| Detail | SQLC function (`data.GetUser(db, int64(id))`) |
+| Detail | Generated data query (`data.GetUser(db, int64(id))` → `map[string]interface{}`) |
 | Create POST | Raw SQL INSERT via `db.ExecContext` |
-| Update GET | SQLC populate query |
+| Update GET | Generated data query (`data.GetUser`) |
 | Update POST | Raw SQL UPDATE via `db.ExecContext` |
 | Delete | Raw SQL DELETE via `db.ExecContext` |
 | Action | Raw SQL per action name, or stored-proc call when `proc:` is set (switch dispatch) |
 | Bulk | Raw SQL per bulk action name, looped once per selected id, **inside one transaction** (see "Bulk actions") |
 | CSV Export | Raw SQL SELECT + `encoding/csv` |
 
-Create/update/delete SQL uses `idColumn(r)` (or the explicit column list) for the row key, honoring `id_column:` overrides on mssql. Create/update avoid SQLC params because `r.FormValue` returns `string` but SQLC generates typed structs (`int32` for `INTEGER`). Raw SQL `ExecContext` accepts `interface{}`. **Boolean fields are emitted as `r.FormValue(name) == "true"`** (a Go `bool`), not a raw `r.FormValue(name)` string — otherwise an unchecked checkbox posts `""` and Postgres fails with `invalid input syntax for type boolean: ""` (BUG-3). mssql/pgx/mattn accept a `bool` value directly.
+Create/update/delete SQL uses `idColumn(r)` (or the explicit column list) for the row key, honoring `id_column:` overrides on mssql. Create/update avoid typed params because `r.FormValue` returns `string`; raw SQL `ExecContext` accepts `interface{}`. **Boolean fields are emitted as `r.FormValue(name) == "true"`** (a Go `bool`), not a raw `r.FormValue(name)` string — otherwise an unchecked checkbox posts `""` and Postgres fails with `invalid input syntax for type boolean: ""` (BUG-3). mssql/pgx/mattn accept a `bool` value directly.
 
-Detail/update SQLC calls must cast the id to `idGoType()` — sqlite ids are `int64`, postgres `int32`. A literal `int32(id)` breaks the sqlite build.
+Detail/update data queries must cast the id to `idGoType()` — sqlite ids are `int64`, postgres `int32`. A literal `int32(id)` breaks the sqlite build.
 
 ### FK label columns need LEFT JOINs in the raw list/card/export SQL
-Introspection adds a `{fk}_label` list column per foreign key (and a LEFT JOIN in the SQLC queries), but the generated **list/card/export handlers build their own raw SQL** — a bare `SELECT …, {fk}_label FROM {table}` fails with `column "{fk}_label}" does not exist`. `listSelectFrom()` in `handler.go` reconstructs the JOINs at generation time: for each view column ending in `_label` it looks up a matching relation form field (`options_query: List{Foreign}`, `options_value`, `options_label`) and emits `LEFT JOIN {ftable} f_{ftable} ON f_{ftable}.{value} = t.{fk}` with `f_{ftable}.{label} AS {fk}_label` in the select. When joins exist, real columns are qualified with the `t.` alias (search/ORDER BY too) and the single windowed `COUNT(*) OVER() AS _total` runs inside the joined data query (the count reflects the joined row set). A `_label` column with no matching relation field falls back to the unjoined behavior.
+Introspection adds a `{fk}_label` list column per foreign key, and the generated **list/card/export handlers build their own raw SQL** — a bare `SELECT …, {fk}_label FROM {table}` fails with `column "{fk}_label}" does not exist`. `listSelectFrom()` in `handler.go` reconstructs the JOINs at generation time: for each view column ending in `_label` it prefers the schema block's FK metadata (`ForeignTable`/`ForeignColumn`/`Label`), falling back to a matching relation form field (`options_value`, `options_label`), and emits `LEFT JOIN {ftable} f_{ftable} ON f_{ftable}.{value} = t.{fk}` with `f_{ftable}.{label} AS {fk}_label` in the select. When joins exist, real columns are qualified with the `t.` alias (search/ORDER BY too) and the single windowed `COUNT(*) OVER() AS _total` runs inside the joined data query (the count reflects the joined row set). A `_label` column with no matching relation field falls back to the unjoined behavior.
 
 ## Card view (`card` section)
 
@@ -175,28 +172,28 @@ Optional per-resource view at `GET /{panel}/{resource}/cards` (reachable via a "
 ### Field renderer for `gps`
 `renderCell` maps `gps` → `@renderGPS` and the form emits a text input with `lat, lng` placeholder; `renderGPS` renders a link out to Google Maps. Registering a new field type means updating BOTH `renderCell`'s switch and the form-input switch in `templ.go`, plus `FieldTypes` in `types/field.go`.
 
-### Modal record picker (`select`/`relation` fields with `options_query`)
-A form field of type `select` or `relation` that has `options_query` set renders as a **modal record picker** instead of a plain select: a hidden input (name = field, value = option key) + a read-only display input (the option label) + a "Browse…" button. Clicking Browse opens a shared modal (emitted once per form by `pickerFooter()` when any field is a picker) listing all options as clickable rows; a search box filters rows client-side; selecting a row sets the hidden input and the display label and closes the modal. Generated pieces (all in `templ.go`): `isPickerField()` (guards rendering), `pickerMarkup()` (per-field markup + script), `pickerFooter()` (shared modal + search/close wiring), plus `viewmodels.OptionLabel()`/`ItemValue()`/`OptionsJS()` helpers in `viewmodels.go`. `ColumnDef.Picker` is set true on the form's field defs for picker fields (`formFieldDefsWithOpts` in handler.go). Gotchas:
+### Modal record picker (`select`/`relation` fields with `options_sql` or schema FK)
+A form field of type `select` or `relation` renders as a **modal record picker** instead of a plain select whenever the option SQL resolves (D11: `options_sql:`, else derived from the schema block's FK metadata via `g.optionSQL`; legacy `options_query:` still parses): a hidden input (name = field, value = option key) + a read-only display input (the option label) + a "Browse…" button. Clicking Browse opens a shared modal (emitted once per form by `pickerFooter()` when any field is a picker) listing all options as clickable rows; a search box filters rows client-side; selecting a row sets the hidden input and the display label and closes the modal. Generated pieces (all in `templ.go`): `isPickerField()` (guards rendering, uses the same `optionSQL` resolution as the loader so templ and handler always agree), `pickerMarkup()` (per-field markup + script), `pickerFooter()` (shared modal + search/close wiring), plus `viewmodels.OptionLabel()`/`ItemValue()`/`OptionsJS()` helpers in `viewmodels.go`. `ColumnDef.Picker` is set true on the form's field defs for picker fields (`formFieldDefsWithOpts` in handler.go). Gotchas:
 - **templ never evaluates `{ expr }` inside `<script>` content** — it writes the text literally. The option map must reach the JS via a data attribute (`data-picker-options={ viewmodels.OptionsJS(data.Fields, "field") }`) whose value is HTML-escaped JSON the browser decodes on `dataset` read, then `JSON.parse`d in the click handler.
 - **The modal element is rendered AFTER the per-field scripts** (`pickerFooter()` is appended at the end of the form). The `#record-picker-modal` lookup MUST happen inside the click handler, not at script parse time — otherwise `pickerModal` is `null` and the handler's `if (!pickerModal) return` silently no-ops (the button appears dead).
 - **Each per-field script must be wrapped in an IIFE** `(function() { ... })();` — top-level `const` in classic scripts lives in the shared global lexical environment, so the second picker script's `const pickerBtn` throws `Identifier 'pickerBtn' has already been declared` and the whole script block (and the product_id/role_id picker wiring) is discarded.
 - Multiple picker fields on one form (e.g. orderline: `order_id` + `product_id`) need per-field scoping — each options div and querySelector carries `data-field="<name>"`.
 - `viewmodels.OptionsJS` marshals the option map with `encoding/json` (sorted keys, `{}` fallback). `viewmodels.ItemValue` returns `""` for nil so the create form (empty `Item` map) doesn't render/Submit `"<nil>"`.
-- `formFieldDefsWithOpts` in handler.go sets `Picker` only for `select`/`relation` fields that resolved an `options_query` var; plain `select` fields with inline `options` keep the old `<select>` renderer.
+- `formFieldDefsWithOpts` in handler.go sets `Picker` only for `select`/`relation` fields that resolved an option SQL var; plain `select` fields with inline `options` keep the old `<select>` renderer.
 
 ## Critical gotchas
 
 ### Format specifier counting in Sprintf
 Every `%s`/`%q`/`%d` must have a matching arg. `%%` is escaped (produce `%` in output, no arg consumed). A mismatch silently produces garbled Go source (e.g. `%!s(MISSING)` literal in emitted templ). This is especially dangerous when a templ substring is built with its own `fmt.Sprintf` and then inserted into a parent one — any `%v`/`%d`/`%s` **inside** emitted `fmt.Sprintf(...)` calls must be doubled (`%%v`) in the generator source. `buildOptionsLoader`, `preHashCode`, `fileImport` insertions, the `cardBody`/`actions`/`gridView`/`kanbanView` strings in `templ.go`, the `pickerMarkup` format-arg list in `templ.go`, and the `hookCallsStr`/`scopeValuesStr`/postCode builders in `hooks.go`/`handler.go` are common drift points.
 
-### `snakeToPascal` matches sqlc's field naming
-`snakeToPascal` lowercases the whole input, splits only on `_`, and maps the `id` segment to `ID` — this is sqlc's exact algorithm, so:
+### `snakeToPascal` field naming convention
+`snakeToPascal` lowercases the whole input, splits only on `_`, and maps the `id` segment to `ID`:
 - `id` → `ID`
 - `role_id` → `RoleID`
 - `user_role_id` → `UserRoleID`
 - `CeleJmeno` → `Celejmeno`
 - `ZamestnanecID` → `Zamestnanecid`
-Any other pattern would produce `Id`/`RoleId`/`CeleJmeno` (wrong). Must match sqlc's output convention (sqlc lowercases unquoted identifiers then camel-cases per underscore segment).
+Any other pattern would produce `Id`/`RoleId`/`CeleJmeno` (wrong). The generated Go field names must follow this convention.
 
 ### `Options` field type
 Both `Column.Options` and `Field.Options` are `map[string]string` (key=value, value=label), never `[]string`.
@@ -239,7 +236,7 @@ Hooks attach to `FormAction` (create/update/delete) and `Action`. `internal/gene
 - `bulk.go` does NOT run hooks — bulk reuses the action SQL/proc without the before/after lifecycle.
 
 ### Select options render from `data.Fields`, not static HTML
-Form select options are rendered at runtime by looping `data.Fields` for the matching field and ranging its `Options`. The generated handler wires `options_query` into `ColumnDef.Options` (`formFieldDefsWithOpts`); the templ compares with `viewmodels.OptionValue(data.Item[f.Name])` because sqlc populates `sql.NullInt64`/`sql.NullString` (a bare `fmt.Sprintf("%v")` on `{1 true}` won't match key `"1"`).
+Form select options are rendered at runtime by looping `data.Fields` for the matching field and ranging its `Options`. The generated handler wires the option SQL into `ColumnDef.Options` (`formFieldDefsWithOpts`); the templ compares with `viewmodels.OptionValue(data.Item[f.Name])` because the row map may hold `sql.NullInt64`/`sql.NullString` (a bare `fmt.Sprintf("%v")` on `{1 true}` won't match key `"1"`).
 
 ### Value rendering is centralized in `viewmodels.Stringify`
 Every value-to-text render in the generated app routes through `viewmodels.Stringify(v)` (in `viewmodels/models.go`), which unwraps `nil`, plain scalars, `time.Time` and every `sql.Null*` type (`NullString`, `NullInt32`, `NullInt64`, `NullFloat64`, `NullBool`, `NullTime`) — returning `""` for `nil`/invalid NULL instead of Go struct text. This fixes two failure classes seen on mssql/postgres (nullable columns) and on every create form:
@@ -250,8 +247,8 @@ Every value-to-text render in the generated app routes through `viewmodels.Strin
 ### Shared create/update form renders the union of both field sets
 `generateFormTempl` builds the form from the **union** of `r.Form.Create.Fields` + `r.Form.Update.Fields` (deduped by name, create order first then update-only fields appended). Each field is emitted with `if data.IsCreate { … }` (create-only) or `if !data.IsCreate { … }` (update-only) guards honoring the field's `visible:` list, so update-only fields (e.g. `status`, `created_at`) are no longer dropped from the edit form. This fixes BUG-4: before, the shared template was generated from the create fields only, so a field present only in `update` was silently omitted and the edit POST submitted `""` (failing e.g. Postgres `invalid input syntax for type timestamp`). When only one of create/update exists the guards are omitted (behavior unchanged). `hasFile`/`hasPicker`/enctype are computed over the merged set.
 
-### options_query option rows
-`buildOptionsLoader` scans into `interface{}` then keys the map with `fmt.Sprintf("%v", val)` — the `id`/value column is usually an `INTEGER` (`int64`), scanning into `string` fails silently. `findSQLCQuery` strips a trailing `;` from the query body (it is embedded as `SELECT a,b FROM (... ) AS _opt`, a trailing `;` is a syntax error). **Options loading is batched per resource**: when multiple form fields share the same `options_query`, the generated handler loads each distinct query **once** into a shared `{name}Opts := map[string]string{}` var and every field's `ColumnDef.Options` references it — no N queries for N fields, no duplicate maps, and the load block only exists when at least one field actually resolved an options query (tested by `TestGenerateOptionsLoaderDedupe`).
+### Option loader rows
+`buildOptionsLoader` scans into `interface{}` then keys the map with `fmt.Sprintf("%v", val)` — the `id`/value column is usually an `INTEGER` (`int64`), scanning into `string` fails silently. `optionSQL` strips a trailing `;` from the resolved SQL (it is embedded as `SELECT a,b FROM (... ) AS _opt`, a trailing `;` is a syntax error). **Options loading is batched per resource**: when multiple form fields resolve to the same option SQL, the generated handler loads it **once** into a shared `{name}Opts := map[string]string{}` var and every field's `ColumnDef.Options` references it — no N queries for N fields, no duplicate maps, and the load block only exists when at least one field actually resolved an option SQL (tested by `TestGenerateOptionsLoaderDedupe`).
 
 ### Generated app is a separate Go module
 `admin/` has its own `go.mod`. Module name = basename of `--out` dir. Uses module-relative imports (`internal/data`, `internal/panel`).
@@ -277,9 +274,9 @@ Page handlers wrap `pageviews.X(pd)` in `layoutviews.Base(title, panelPath, ...)
 ### Sidebar layout: no `fixed` sidebar + `ml-64` on content
 The old base layout used `<aside class="w-64 … fixed left-0 top-0">` with `<main>` having no offset — since the sidebar is `position: fixed` it is out of the flex flow and the content (which had no `ml-64`, only the topbar did) slid underneath the nav, overlapping it. Correct layout (in `templ.go` `Base`): the sidebar is a normal flex child `<div class="flex h-screen"><aside class="w-64 … h-screen overflow-y-auto shrink-0">` next to a `<div class="flex-1 flex flex-col">` column holding the sticky topbar and `<main class="flex-1 overflow-y-auto p-6">`. No `ml-64` anywhere. Any new layout change must keep the sidebar in-flow (or add the margin offset to BOTH topbar and main) or the nav overlaps content again.
 
-## SQL queries (`options_query`)
+## SQL queries (`options_sql` / schema FKs)
 
-Fields with `options_query` (e.g. `ListRoles`) call `findSQLCQuery` in `sqlc.go` at generation time to extract raw SQL body from `-- name: QueryName` annotated `.sql` files. The handler GET code executes `SELECT options_value, options_label FROM (rawSQL) AS _opt` at request time. The queries are read from the **copied** files in the out dir (`g.OutDir` + `Config.SQLC.QueriesDir`), not the config dir — copySQLFiles must run first.
+Fields resolve their option SQL through `optionSQL` in `handler.go`: `options_sql:` (embedded as `SELECT options_value, options_label FROM (sql) AS _opt` at request time), else the schema block's FK metadata (`SELECT {options_value}, {options_label} FROM {foreign_table}` when the field's column matches an FK), else legacy `options_query:` (looked up via `findSQLCQuery`). No query files are read from the output dir — everything comes from the config.
 
 ## bcrypt + file uploads
 
@@ -305,7 +302,7 @@ When any form field has type `file` or `image`:
 Config block `audit: {enabled, table (default audit_log), include_values, policy, exclude_resources}` (parser validates the block; unknown excluded resources are an error; the editor's `Audit` screen edits it). Implementation lives in `internal/generator/audit.go`; orchestration in `Generate()`:
 
 - **`applyAudit()`** runs after `loadPlugins()` (before the second `ensureDirs` so the resource dirs are created). It appends a **list-only** `AuditLog` resource (`default_sort: -created_at`, `values_json` json column only when `include_values`, `policies.view_any` from `audit.policy`, `PerPage: 20` — the validator default does NOT apply post-parse) plus an "Audit Log" navigation group. Skipped when a resource named `AuditLog` already exists. The appended resource flows through the normal resource/router/views pipeline unchanged.
-- **`generateAuditSchema()`** writes driver-aware DDL (`sql/migrations/{table}.sql` — postgres/mssql `BIGSERIAL`+`JSONB`, sqlite `AUTOINCREMENT`+`TEXT`) and a sqlc List/Count file (`sql/queries/{table}.sql`). Both are **skipped when any `.sql` migration in the out dir already declares the table** (`auditTableInMigrations` / `containsCreateTable`, case-insensitive, `IF NOT EXISTS`-aware) — otherwise sqlc dies with `relation "audit_log" already exists` (the demo schema declares it, so the demo generates no audit files).
+- **`generateAuditSchema()`** writes driver-aware DDL (`sql/migrations/{table}.sql` — postgres/mssql `BIGSERIAL`+`JSONB`, sqlite `AUTOINCREMENT`+`TEXT`). The audit list/count queries are raw SQL in the generated list handler (no query files, D11). The DDL is **skipped when any `.sql` migration in the out dir already declares the table** (`auditTableInMigrations` / `containsCreateTable`, case-insensitive, `IF NOT EXISTS`-aware).
 - **`auditFor(r)`** returns the config when audit is on, the resource is not in `exclude_resources`, and it is not the generated `AuditLog` resource. `auditAnyResource()` gates the **emitted `auth.UserID(r)` helper** (middleware.go) — `fmt` import + `UserID` are only added when ≥1 resource is audited, keeping the auth output byte-identical otherwise.
 - **Handler weaving** (create/update/delete/action): the op + audit INSERT run inside ONE transaction — `tx, err := db.BeginTx(r.Context(), nil)` / `defer tx.Rollback()` / `tx.Commit()` (after-hooks still run on `db`, after commit; before-hooks before the tx). `auditTxBeginStr`/`auditTxCommitStr` emit the prologue/epilogue; `auditInsertStr(r, action, rowID, valuesArg, indent)` emits `if _, err := tx.ExecContext(r.Context(), "INSERT INTO {table} (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1,$2,$3,$4,$5,$6)", auth.UserID(r), auth.UserName(r), {table}, {action}, {rowID}, {valuesArg}); err != nil { ... }`. **The hookless `_, err := db.ExecContext` path is NOT emitted for audited resources** — the `RETURNING <id>`/`OUTPUT INSERTED.<id>` capture path is used on create even without hooks (`var newID int64` + `if err := tx.QueryRowContext(...).Scan(&newID)`; row_id = `fmt.Sprintf("%d", newID)`), update/delete use `_, err = tx.ExecContext` (reusing the outer `err`), actions use `_, err = tx.ExecContext` inside the case `{ }` block (where `err` is freshly declared by BeginTx's `:=`). Delete/action pass `""` for values; create/update pass `string(valuesJSON)` from `auditValuesStr(colNames, indent)` (`var valuesJSON []byte` + `json.Marshal(map[string]interface{}{...})` referencing `vals[i]` — `encoding/json` import added when `include_values`). Action cases only audit when the action actually executes SQL (`exec != ""`); proc-only-on-sqlite actions skip audit.
 - **Imports to add conditionally**: create.go `encoding/json` (include_values only); delete.go/actions.go `auth` (audited only); update.go `encoding/json`. create.go/update.go already import `fmt`/`auth`; delete/actions already import `strconv`.
@@ -442,7 +439,7 @@ The generated app ships security defaults. Keep them intact when editing the emi
   `generator.go` after `generateAuth`) provides `Internal(w, err)` / `NotFound(w, err)`
   that log server-side and return generic status text. Every resource handler and
   page handler imports `httperr` and MUST NOT emit `http.Error(w, err.Error(), ...)`.
-- **Admin password**: `init --demo` / `init --db` accept `--admin-password`
+- **Admin password**: `init --db` accepts `--admin-password`
   (threaded through `parseGlobalFlags`); when omitted, `randomPassword()`
   (introspect.go) generates a 14-char one-time password that is printed, not
   stored. `insertAdminUser` now returns `(bool, error)` (inserted or not).
@@ -507,14 +504,13 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 | Path | Purpose |
 |---|---|
 | `cmd/yaga/main.go` | CLI entry (init/generate/validate/version), hand-rolled flags |
-| `cmd/yaga/demo.go` | `init --demo` — full-featured sqlite demo scaffolding + seeding |
-| `cmd/yaga/introspect.go` | `init --db` — DB introspection, auth table creation, YAML/SQL generation |
+| `cmd/yaga/introspect.go` | `init --db` — DB introspection, auth table creation, YAML with `schema:` block generation |
 | `cmd/yaga/edit.go` | `edit` — entry point for interactive YAML config editor |
 | `cmd/yaga/editor/` | tview TUI editor: 3-pane shell, section editors, sync + validate + preview screens (18 files, see `edit` above) |
-| `internal/types/` | YAML-tagged Go structs for config schema (6 files: config.go, panel.go, resource.go, field.go, hook.go, procedure.go) |
+| `internal/types/` | YAML-tagged Go structs for config schema (7 files: config.go, panel.go, resource.go, field.go, hook.go, procedure.go, schema.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
-| `internal/generator/` | Code generation pipeline (17 files, see above; `assets/` holds the embedded Chart.js 4.4.1 bundle) |
-| `examples/` | Empty placeholder dirs (`full`, `minimal`) — working examples live in `cmd/yaga/main.go`'s `cmdInit` |
+| `internal/generator/` | Code generation pipeline (see above; `assets/` holds the embedded Chart.js 4.4.1 bundle) |
+| `examples/` | Empty placeholder dirs (`full`, `minimal`), unused |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
 | `testdata/`, `pkg/auth/` | Empty placeholders (.gitkeep only), unused |
 
@@ -522,4 +518,4 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 
 `github.com/a-h/templ`, `github.com/go-chi/chi/v5`, `github.com/gorilla/sessions`, `golang.org/x/crypto`. Plus `github.com/jackc/pgx/v5` (postgres, blank-imported in main.go), `github.com/mattn/go-sqlite3 v1.14.24` (sqlite, blank-imported in main.go), and `github.com/microsoft/go-mssqldb v1.10.0` (mssql, blank-imported in main.go) — the `pgx` stdlib driver registers the `"pgx"` database/sql name, so generated main.go calls `sql.Open("pgx", dsn)` for postgres.
 
-The generated `go.mod` also declares `tool github.com/a-h/templ/cmd/templ` so `go tool templ generate` works without a manual templ install, and `generateMakefile()` emits a `Makefile` whose `build` target runs all steps (Tailwind via the standalone binary, sqlc, tidy, templ, `go build -o <binary> .`) with no npm dependency.
+The generated `go.mod` also declares `tool github.com/a-h/templ/cmd/templ` so `go tool templ generate` works without a manual templ install, and `generateMakefile()` emits a `Makefile` whose `build` target runs all steps (Tailwind via the standalone binary, tidy, templ, `go build -o <binary> .`) with no npm dependency.

@@ -12,6 +12,7 @@ type Config struct {
 	Panel       Panel                 `yaml:"panel"`
 	Connections map[string]Connection `yaml:"connections"`
 	SQLC        SQLCConfig            `yaml:"sqlc"`
+	Schema      *Schema               `yaml:"schema"`
 	Auth        AuthConfig            `yaml:"auth"`
 	Navigation  []NavigationGroup     `yaml:"navigation"`
 	Resources   []Resource            `yaml:"resources"`
@@ -106,7 +107,9 @@ type PoolConfig struct {
 }
 
 // SQLCConfig points at the sqlc config file and the schema/queries directories,
-// plus the Go package the generated data layer is written into.
+// plus the Go package the generated data layer is written into. Parse-only and
+// inert since D11 (Phase 1): legacy `sqlc:` YAML still parses but the generator
+// no longer emits/uses it; removed in Phase 2.
 type SQLCConfig struct {
 	Config     string `yaml:"config"`
 	QueriesDir string `yaml:"queries_dir"`

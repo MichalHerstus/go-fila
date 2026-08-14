@@ -104,6 +104,7 @@ type Field struct {
 	OptionsQuery string            `yaml:"options_query"`
 	OptionsValue string            `yaml:"options_value"`
 	OptionsLabel string            `yaml:"options_label"`
+	OptionsSQL   string            `yaml:"options_sql"`
 	Options      map[string]string `yaml:"options"`
 }
 

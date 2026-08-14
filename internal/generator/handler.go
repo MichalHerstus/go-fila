@@ -209,11 +209,34 @@ type fkLabelJoin struct {
 // Returns: the join specs, possibly empty.
 func (g *Generator) labelJoins(r types.Resource, colNames []string) []fkLabelJoin {
 	var joins []fkLabelJoin
+	st := g.schemaTable(tableName(r))
 	for _, c := range colNames {
 		if !strings.HasSuffix(c, "_label") {
 			continue
 		}
 		base := strings.TrimSuffix(c, "_label")
+		// Prefer the schema block (D11): the FK metadata carries the foreign
+		// table, key column and label column directly.
+		if st != nil {
+			joined := false
+			for _, fk := range st.ForeignKeys {
+				if !strings.EqualFold(fk.Column, base) {
+					continue
+				}
+				ftable := fk.ForeignTable
+				joins = append(joins, fkLabelJoin{
+					colName:    c,
+					selectPart: fmt.Sprintf("f_%s.%s AS %s", ftable, fk.Label, c),
+					fromPart:   fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", ftable, ftable, ftable, fk.ForeignColumn, fk.Column),
+				})
+				joined = true
+				break
+			}
+			if joined {
+				continue
+			}
+		}
+		// Legacy fallback: a relation form field with options_query.
 		f := relationFormField(r, base)
 		if f == nil || f.OptionsQuery == "" {
 			continue
@@ -913,8 +936,8 @@ func Cards(db *sql.DB) http.HandlerFunc {
 }
 
 // generateDetailHandler writes detail.go for a resource: a Detail(db) handler
-// that parses the :id path parameter, calls the SQLC detail query, maps the
-// returned struct fields into a map and renders the detail view.
+// that parses the :id path parameter, calls the generated data.Get query
+// (which returns a column-keyed map) and renders the detail view.
 // Params: dir (resource package directory), r (the resource definition).
 // Returns: an error on write failure.
 func (g *Generator) generateDetailHandler(dir string, r types.Resource) error {
@@ -954,11 +977,8 @@ func Detail(db *sql.DB) http.HandlerFunc {
             return
         }
 
-        itemMap := map[string]interface{}{
-%s        }
-
         vd := &viewmodels.DetailData{
-            Item: itemMap,
+            Item: item,
             Fields: []viewmodels.ColumnDef{
                 %s,
             },
@@ -975,7 +995,6 @@ func Detail(db *sql.DB) http.HandlerFunc {
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		queryName,
 		g.idGoTypeForResource(r),
-		detailFieldMap(r.Detail.Fields),
 		fieldDefsFromDetail(r.Detail.Fields),
 		r.Name,
 		g.Config.Panel.Path,
@@ -984,20 +1003,6 @@ func Detail(db *sql.DB) http.HandlerFunc {
 		r.Name)
 
 	return os.WriteFile(filepath.Join(dir, "detail.go"), []byte(code), 0644)
-}
-
-// detailFieldMap generates the entries of the itemMap literal in the detail
-// handler, mapping each snake_case field name to the corresponding PascalCase
-// field of the SQLC result struct.
-// Params: fields (detail field definitions).
-// Returns: the indented Go source lines mapping field names to struct fields.
-func detailFieldMap(fields []types.Field) string {
-	var entries []string
-	for _, f := range fields {
-		goName := snakeToPascal(f.Name)
-		entries = append(entries, fmt.Sprintf("            %q: item.%s,", f.Name, goName))
-	}
-	return strings.Join(entries, "\n")
 }
 
 // snakeToPascal converts a column name to the PascalCase struct field name
@@ -1514,13 +1519,7 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 
 	var optLoadCode string
 	var optVars map[string]string
-	queryDir := g.Config.SQLC.QueriesDir
-	if queryDir == "" {
-		queryDir = filepath.Join(g.OutDir, "sql", "queries")
-	} else if !filepath.IsAbs(queryDir) {
-		queryDir = filepath.Join(g.OutDir, queryDir)
-	}
-	optVars, optLoadCode = buildOptionsLoader(queryDir, paramFields)
+	optVars, optLoadCode = g.buildOptionsLoader(r, paramFields)
 
 	var colNames []string
 	var valExprs []string
@@ -1822,30 +1821,30 @@ func Create(db *sql.DB) http.HandlerFunc {
 
 // buildOptionsLoader generates code to load dynamic select options from DB.
 // Returns: fieldName→goVarName map, and the code to load them at request time.
-// Params: queryDir (directory with the .sql files used to resolve each
-// options_query), fields (the form fields to inspect).
+// Params: r (the resource), fields (the form fields to inspect).
 // Returns: optVars (map from field name to the generated Go variable holding
 // its options) and loadCode (Go source that fills those variables at request
 // time by running "SELECT value, label FROM (rawSQL) AS _opt").
-func buildOptionsLoader(queryDir string, fields []types.Field) (optVars map[string]string, loadCode string) {
+// The SQL per field resolves in order: options_sql (explicit), FK-derived
+// SQL from the schema block (a field matching a foreign key with
+// options_value/options_label), else nothing. Fields sharing the same
+// resolved SQL reuse a single options variable (batched loader).
+func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (optVars map[string]string, loadCode string) {
 	optVars = make(map[string]string)
 	var loads []string
 	loaded := map[string]string{}
 	for _, f := range fields {
-		if f.OptionsQuery == "" {
+		sql := g.optionSQL(r, f)
+		if sql == "" {
 			continue
 		}
-		if varName, ok := loaded[f.OptionsQuery]; ok {
+		if varName, ok := loaded[sql]; ok {
 			optVars[f.Name] = varName
 			continue
 		}
 		varName := f.Name + "Opts"
 		optVars[f.Name] = varName
-		loaded[f.OptionsQuery] = varName
-		rawSQL := findSQLCQuery(queryDir, f.OptionsQuery)
-		if rawSQL == "" {
-			rawSQL = f.OptionsQuery
-		}
+		loaded[sql] = varName
 		optField := f.OptionsValue
 		if optField == "" {
 			optField = "id"
@@ -1855,14 +1854,38 @@ func buildOptionsLoader(queryDir string, fields []types.Field) (optVars map[stri
 			optLabel = "name"
 		}
 		loads = append(loads, fmt.Sprintf(`        %s := map[string]string{}
-        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, optField, optLabel, rawSQL, varName))
+        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, optField, optLabel, sql, varName))
 	}
 	return optVars, strings.Join(loads, "\n")
 }
 
+// optionSQL resolves the option-list SQL for a form field: options_sql wins,
+// then FK-derived SQL from the schema block (when the field names a foreign
+// key of the resource's table and carries options_value/options_label).
+// Returns "" when neither applies.
+func (g *Generator) optionSQL(r types.Resource, f types.Field) string {
+	if f.OptionsSQL != "" {
+		return strings.TrimRight(strings.TrimSpace(f.OptionsSQL), ";")
+	}
+	if f.OptionsValue == "" || f.OptionsLabel == "" {
+		return ""
+	}
+	st := g.schemaTable(tableName(r))
+	if st == nil {
+		return ""
+	}
+	for _, fk := range st.ForeignKeys {
+		if !strings.EqualFold(fk.Column, f.Name) {
+			continue
+		}
+		return fmt.Sprintf("SELECT %s, %s FROM %s", f.OptionsValue, f.OptionsLabel, fk.ForeignTable)
+	}
+	return ""
+}
+
 // formFieldDefsWithOpts renders the []viewmodels.ColumnDef literal for form
 // fields, wiring each field's Options to the runtime-loaded variable when the
-// field has an options_query, or to the inline static options map otherwise.
+// field has an option loader, or to the inline static options map otherwise.
 // Params: fields (form field definitions), optVars (map from field name to the
 // generated options variable, as returned by buildOptionsLoader).
 // Returns: the comma-joined Go source string for the field defs.
@@ -1925,13 +1948,7 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 
 	var optLoadCode string
 	var optVars map[string]string
-	queryDir := g.Config.SQLC.QueriesDir
-	if queryDir == "" {
-		queryDir = filepath.Join(g.OutDir, "sql", "queries")
-	} else if !filepath.IsAbs(queryDir) {
-		queryDir = filepath.Join(g.OutDir, queryDir)
-	}
-	optVars, optLoadCode = buildOptionsLoader(queryDir, paramFields)
+	optVars, optLoadCode = g.buildOptionsLoader(r, paramFields)
 
 	var colNames []string
 	var valExprs []string
@@ -2015,13 +2032,6 @@ func safeUploadExt(ext string) bool {
 	formParseCode := "r.ParseForm()"
 	if hasFile {
 		formParseCode = "r.ParseMultipartForm(32 << 20)"
-	}
-
-	var populateFields []string
-	populateFields = append(populateFields, `"id": item.ID,`)
-	for _, f := range paramFields {
-		goName := snakeToPascal(f.Name)
-		populateFields = append(populateFields, fmt.Sprintf("            %q: item.%s,", f.Name, goName))
 	}
 
 	postCode := fmt.Sprintf(`        cols := []string{%s}
@@ -2110,12 +2120,9 @@ func Update(db *sql.DB) http.HandlerFunc {
                 return
             }
 
-            itemMap := map[string]interface{}{
-%s            }
-
             %s
             vd := &viewmodels.FormData{
-                Item: itemMap,
+                Item: item,
                 Fields: []viewmodels.ColumnDef{
                     %s,
                 },
@@ -2148,7 +2155,6 @@ func Update(db *sql.DB) http.HandlerFunc {
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		populateQuery,
 		g.idGoTypeForResource(r),
-		strings.Join(populateFields, "\n"),
 		optLoadCode,
 		formFieldDefsWithOpts(paramFields, optVars),
 		fmt.Sprintf("fmt.Sprintf(\"%%s/%%s/%%d\", %q, %q, id)", g.Config.Panel.Path, pkgName),

@@ -2,8 +2,9 @@
 //
 // Implements `yaga init --db {dsn}`: connects to an existing database,
 // introspects its schema (tables, columns, primary keys, foreign keys),
-// generates yaga.yaml and SQL migration/query files from the discovered
-// tables. Creates users/roles auth tables + admin user when missing.
+// generates yaga.yaml — including the captured `schema:` block, the sole
+// source of schema truth for the generator (D11, no sqlc). Creates the
+// users/roles auth tables + admin user when missing.
 package main
 
 import (
@@ -14,9 +15,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/MichalHerstus/yaga/internal/types"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/microsoft/go-mssqldb"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -648,15 +651,6 @@ func viewKeyIsInt(ti TableInfo) bool {
 	return false
 }
 
-// placeholder returns the SQL bind placeholder for the given 1-based argument
-// position. Postgres uses $N; sqlite uses "?".
-func placeholder(n int, driver string) string {
-	if driver == "sqlite" {
-		return "?"
-	}
-	return fmt.Sprintf("$%d", n)
-}
-
 // ensureAuthTables checks whether "users" and "roles" tables exist in the
 // database. If either is missing, both are created with a driver-appropriate
 // DDL, default roles are seeded, and an admin user is inserted.
@@ -826,10 +820,62 @@ func randomPassword() string {
 	return string(buf)
 }
 
+// convertSchema converts the introspected []TableInfo into the *types.Schema
+// captured as the `schema:` block of yaga.yaml. Each column's yaga field type
+// is derived via mapDBTypeToFieldType; each foreign key records the label
+// column of its target table (used to build option SQL and list/detail label
+// joins offline).
+// Params: tables (introspected tables/views), driver (postgres/sqlite/mssql).
+// Returns: the schema block value.
+func convertSchema(tables []TableInfo, driver string) *types.Schema {
+	s := &types.Schema{}
+	for _, ti := range tables {
+		st := types.SchemaTable{
+			Name:        ti.Name,
+			PK:          findPKColumn(ti),
+			View:        ti.IsView,
+			Columns:     []types.SchemaColumn{},
+			ForeignKeys: []types.SchemaFK{},
+		}
+		for _, c := range ti.Columns {
+			st.Columns = append(st.Columns, types.SchemaColumn{
+				Name:       c.Name,
+				Type:       mapDBTypeToFieldType(c.DBType),
+				PrimaryKey: c.IsPrimaryKey,
+			})
+		}
+		for _, fk := range ti.ForeignKeys {
+			st.ForeignKeys = append(st.ForeignKeys, types.SchemaFK{
+				Column:        fk.Column,
+				ForeignTable:  fk.ForeignTable,
+				ForeignColumn: fk.ForeignColumn,
+				Label:         findLabelColumnByTable(tables, fk.ForeignTable),
+			})
+		}
+		s.Tables = append(s.Tables, st)
+	}
+	return s
+}
+
+// writeSchemaBlock appends the captured `schema:` block to the YAML builder,
+// indenting the marshaled schema under the top-level key.
+func writeSchemaBlock(b *strings.Builder, tables []TableInfo, driver string) {
+	var buf strings.Builder
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	_ = enc.Encode(convertSchema(tables, driver))
+	_ = enc.Close()
+	b.WriteString("schema:\n")
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+		b.WriteString("  " + line + "\n")
+	}
+}
+
 // generateYAML builds a yaga.yaml config string from the introspected
 // schema. It creates a resource for each table (excluding users/roles) with
-// list, detail and form sections. Foreign keys become relation fields with
-// options_query.
+// list, detail and form sections, plus the captured `schema:` block (the sole
+// schema source for the generator). Foreign keys become relation fields;
+// their option SQL is derived from the schema block at generation time.
 func generateYAML(tables []TableInfo, driver, dsn string) string {
 	var b strings.Builder
 
@@ -848,13 +894,9 @@ connections:
 	b.WriteString(fmt.Sprintf(`    dsn: %q
 `, dsn))
 
-	b.WriteString(`
-sqlc:
-  config: sqlc.yaml
-  queries_dir: ./sql/queries
-  schema_dir: ./sql/migrations
-  output_pkg: internal/data
+	writeSchemaBlock(&b, tables, driver)
 
+	b.WriteString(`
 auth:
   guard: web
   provider: session
@@ -980,7 +1022,7 @@ func writeResourceYAML(b *strings.Builder, ti TableInfo, allTables []TableInfo, 
 	// detail section. Views are read-only, so their detail ("view form") is
 	// only emitted when the key column is integer-typed — the generated detail
 	// handler casts the key to an int, so a text/non-integer key column would
-	// not compile against the sqlc Get query.
+	// not compile against the generated data Get query.
 	emitDetail := !ti.IsView || viewKeyIsInt(ti)
 	if emitDetail {
 		b.WriteString("    detail:\n")
@@ -1049,14 +1091,14 @@ func writeColumnYAML(b *strings.Builder, c ColumnInfo) {
 
 // writeFieldYAML writes a detail/form field definition with the given
 // indentation prefix. For foreign key columns in forms, it writes a relation
-// field with options_query.
+// field carrying options_value/options_label; the option SQL itself is derived
+// from the captured schema block at generation time (no options_query, D11).
 func writeFieldYAML(b *strings.Builder, c ColumnInfo, ti TableInfo, allTables []TableInfo, driver string, isForm bool, indent string) {
 	for _, fk := range ti.ForeignKeys {
 		if fk.Column == c.Name {
 			if isForm {
 				b.WriteString(fmt.Sprintf("%s- name: %s\n", indent, c.Name))
 				b.WriteString(indent + "  type: relation\n")
-				b.WriteString(fmt.Sprintf("%s  options_query: List%s\n", indent, toPascalCase(fk.ForeignTable)))
 				b.WriteString(fmt.Sprintf("%s  options_value: %s\n", indent, fk.ForeignColumn))
 				labelCol := findLabelColumnByTable(allTables, fk.ForeignTable)
 				b.WriteString(fmt.Sprintf("%s  options_label: %s\n", indent, labelCol))
@@ -1088,136 +1130,12 @@ func findDefaultSort(ti TableInfo) string {
 	return findPKColumn(ti)
 }
 
-// generateSchemaSQL produces the DDL for every introspected user table plus
-// the auth tables (roles + users) if they were created by ensureAuthTables.
-// The output is the sqlc schema input, so it is written in the dialect the
-// sqlc engine expects: postgres dialect for postgres and mssql projects (the
-// mssql engine is postgres-flavored by design), sqlite dialect for sqlite.
-func generateSchemaSQL(tables []TableInfo, hasRoles, hasUsers bool, driver string) string {
-	var b strings.Builder
-
-	for _, ti := range tables {
-		if ti.Name == "users" || ti.Name == "roles" {
-			continue
-		}
-		b.WriteString(tableDDL(ti, driver))
-		b.WriteString("\n")
-	}
-
-	if driver == "sqlite" {
-		if !hasRoles {
-			b.WriteString(`CREATE TABLE roles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL
-);
-
-INSERT INTO roles (name) VALUES ('admin'), ('manager'), ('user');
-
-`)
-		}
-		if !hasUsers {
-			b.WriteString(`CREATE TABLE users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    role_id INTEGER REFERENCES roles(id),
-    role_name TEXT DEFAULT 'user',
-    status TEXT DEFAULT 'active',
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
-`)
-		}
-	} else {
-		if !hasRoles {
-			b.WriteString(`CREATE TABLE roles (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(100) NOT NULL
-);
-
-INSERT INTO roles (name) VALUES ('admin'), ('manager'), ('user');
-
-`)
-		}
-		if !hasUsers {
-			b.WriteString(`CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password VARCHAR(255) NOT NULL,
-    role_id INT REFERENCES roles(id),
-    role_name VARCHAR(100) DEFAULT 'user',
-    status VARCHAR(20) DEFAULT 'active',
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-`)
-		}
-	}
-	return b.String()
-}
-
-// tableDDL renders a CREATE TABLE statement for one introspected table in the
-// dialect used as the sqlc schema input: postgres types for postgres/mssql
-// (MSSQL types are mapped via mssqlTypeToPostgres), native types for sqlite.
-func tableDDL(ti TableInfo, driver string) string {
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("CREATE TABLE %s (\n", ti.Name))
-	for i, c := range ti.Columns {
-		colType := c.DBType
-		if driver == "mssql" {
-			colType = mssqlTypeToPostgres(colType)
-		}
-		parts := []string{fmt.Sprintf("    %s %s", c.Name, colType)}
-		if !c.Nullable {
-			parts = append(parts, "NOT NULL")
-		}
-		if c.IsPrimaryKey {
-			parts = append(parts, "PRIMARY KEY")
-		}
-		comma := ","
-		if i == len(ti.Columns)-1 {
-			comma = ""
-		}
-		b.WriteString(strings.Join(parts, " ") + comma + "\n")
-	}
-	b.WriteString(");\n")
-	return b.String()
-}
-
-// mssqlTypeToPostgres maps a SQL Server column data type to the equivalent
-// postgres type used in the sqlc schema input for mssql projects. The mapping
-// only needs to be parseable by sqlc and type-inferable to the desired Go
-// types; it is not executed against a database.
-func mssqlTypeToPostgres(dbType string) string {
-	switch strings.ToLower(dbType) {
-	case "int", "smallint", "tinyint":
-		return "INTEGER"
-	case "bigint":
-		return "BIGINT"
-	case "bit":
-		return "BOOLEAN"
-	case "nvarchar", "varchar", "nchar", "char", "text", "ntext", "xml", "uniqueidentifier":
-		return "TEXT"
-	case "datetime", "datetime2", "smalldatetime", "date", "time", "datetimeoffset":
-		return "TIMESTAMP"
-	case "decimal", "numeric", "money", "smallmoney", "real", "float":
-		return "DOUBLE PRECISION"
-	case "varbinary", "binary", "image":
-		return "BYTEA"
-	default:
-		return "TEXT"
-	}
-}
-
-// pkGoType returns the Go type sqlc generates for the primary key column of a
-// table, matching sqlc's postgres engine mapping for the schema type emitted
-// by tableDDL (int32 for INTEGER, int16 for SMALLINT, int64 for BIGINT;
-// sqlite INTEGER always maps to int64). When the table declares no primary
-// key, the conventional "id" column (findPKColumn's fallback) is used so the
-// type of the column the generated app keys routes on is still inferred
-// correctly. Returns "" when no matching column is found.
+// pkGoType returns the Go type used for the primary key column of a table,
+// derived from its database type: sqlite INTEGER ids map to int64, BIGINT to
+// int64, SMALLINT to int16, everything else to int32. This drives the
+// `id_type` override emitted into the resource YAML so the generator's
+// detail/update/data handlers cast the row key correctly. Returns "" when no
+// matching column is found.
 func pkGoType(ti TableInfo, driver string) string {
 	pk := findPKColumn(ti)
 	for _, c := range ti.Columns {
@@ -1239,206 +1157,11 @@ func pkGoType(ti TableInfo, driver string) string {
 	return ""
 }
 
-// generateQueries produces SQLC-annotated query files for each table
-// (excluding users/roles). Returns a map of filename -> SQL content.
-func generateQueries(tables []TableInfo, driver string) map[string]string {
-	queries := make(map[string]string)
-	generatedFKTargets := map[string]bool{}
-
-	// generate queries for user-visible tables
-	for _, ti := range tables {
-		if ti.Name == "users" || ti.Name == "roles" {
-			continue
-		}
-		var b strings.Builder
-		pluralName := toPascalCase(ti.Name)
-		singularName := toSingularPascal(ti.Name)
-		pk := findPKColumn(ti)
-
-		// ListUsers-style: with LEFT JOINs for FK label columns
-		b.WriteString(fmt.Sprintf("-- name: List%s :many\n", pluralName))
-		b.WriteString("SELECT ")
-		for i, c := range ti.Columns {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(fmt.Sprintf("t.%s", c.Name))
-		}
-		for _, fk := range ti.ForeignKeys {
-			foreignTable := findTableByName(tables, fk.ForeignTable)
-			if foreignTable == nil {
-				continue
-			}
-			labelCol := findLabelColumn(*foreignTable)
-			b.WriteString(fmt.Sprintf(", f_%s.%s AS %s_label", fk.ForeignTable, labelCol, fk.Column))
-		}
-		b.WriteString(fmt.Sprintf("\nFROM %s t", ti.Name))
-		for _, fk := range ti.ForeignKeys {
-			foreignTable := findTableByName(tables, fk.ForeignTable)
-			if foreignTable == nil {
-				continue
-			}
-			b.WriteString(fmt.Sprintf("\nLEFT JOIN %s f_%s ON f_%s.%s = t.%s",
-				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, fk.ForeignColumn, fk.Column))
-		}
-		if driver != "mssql" {
-			b.WriteString(fmt.Sprintf("\nORDER BY t.%s DESC", pk))
-		}
-		b.WriteString(";\n\n")
-
-		// Count
-		b.WriteString(fmt.Sprintf("-- name: Count%s :one\n", pluralName))
-		b.WriteString(fmt.Sprintf("SELECT COUNT(*) FROM %s;\n\n", ti.Name))
-
-		// Get
-		b.WriteString(fmt.Sprintf("-- name: Get%s :one\n", singularName))
-		b.WriteString("SELECT ")
-		for i, c := range ti.Columns {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			b.WriteString(fmt.Sprintf("t.%s", c.Name))
-		}
-		for _, fk := range ti.ForeignKeys {
-			foreignTable := findTableByName(tables, fk.ForeignTable)
-			if foreignTable == nil {
-				continue
-			}
-			labelCol := findLabelColumn(*foreignTable)
-			b.WriteString(fmt.Sprintf(", f_%s.%s AS %s_label", fk.ForeignTable, labelCol, fk.Column))
-		}
-		b.WriteString(fmt.Sprintf("\nFROM %s t", ti.Name))
-		for _, fk := range ti.ForeignKeys {
-			foreignTable := findTableByName(tables, fk.ForeignTable)
-			if foreignTable == nil {
-				continue
-			}
-			b.WriteString(fmt.Sprintf("\nLEFT JOIN %s f_%s ON f_%s.%s = t.%s",
-				fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, fk.ForeignColumn, fk.Column))
-		}
-		b.WriteString(fmt.Sprintf("\nWHERE t.%s = %s;\n\n", pk, placeholder(1, driver)))
-
-		// Views are read-only: omit the Create/Update/Delete queries (the
-		// view is not writable; sqlc would also fail to infer write DML on it).
-		if !ti.IsView {
-			// Create
-			var insertCols []string
-			for _, c := range ti.Columns {
-				if c.IsPrimaryKey && driver != "sqlite" {
-					continue
-				}
-				insertCols = append(insertCols, c.Name)
-			}
-			b.WriteString(fmt.Sprintf("-- name: Create%s :one\n", singularName))
-			b.WriteString(fmt.Sprintf("INSERT INTO %s (", ti.Name))
-			for i, col := range insertCols {
-				if i > 0 {
-					b.WriteString(", ")
-				}
-				b.WriteString(col)
-			}
-			b.WriteString(")\nVALUES (")
-			for i := range insertCols {
-				if i > 0 {
-					b.WriteString(", ")
-				}
-				b.WriteString(placeholder(i+1, driver))
-			}
-			if driver != "sqlite" {
-				b.WriteString(")\nRETURNING *;\n\n")
-			} else {
-				b.WriteString(");\n\n")
-			}
-
-			// Update
-			b.WriteString(fmt.Sprintf("-- name: Update%s :one\n", singularName))
-			b.WriteString(fmt.Sprintf("UPDATE %s SET\n", ti.Name))
-			argN := 2
-			for i, c := range ti.Columns {
-				if c.IsPrimaryKey {
-					continue
-				}
-				comma := ","
-				if i == len(ti.Columns)-1 {
-					comma = ""
-				}
-				b.WriteString(fmt.Sprintf("    %s = %s%s\n", c.Name, placeholder(argN, driver), comma))
-				argN++
-			}
-			b.WriteString(fmt.Sprintf("WHERE %s = %s", pk, placeholder(1, driver)))
-			if driver != "sqlite" {
-				b.WriteString("\nRETURNING *;\n\n")
-			} else {
-				b.WriteString(";\n\n")
-			}
-
-			// Delete
-			b.WriteString(fmt.Sprintf("-- name: Delete%s :exec\n", singularName))
-			b.WriteString(fmt.Sprintf("DELETE FROM %s WHERE %s = %s;\n\n", ti.Name, pk, placeholder(1, driver)))
-		}
-
-		queries[ti.Name+".sql"] = b.String()
-	}
-
-	// generate List queries for FK target tables (used by relation options_query)
-	for _, ti := range tables {
-		for _, fk := range ti.ForeignKeys {
-			if fk.ForeignTable == "users" || fk.ForeignTable == "roles" {
-				continue
-			}
-			if generatedFKTargets[fk.ForeignTable] {
-				continue
-			}
-			generatedFKTargets[fk.ForeignTable] = true
-
-			foreignTI := findTableByName(tables, fk.ForeignTable)
-			if foreignTI == nil {
-				continue
-			}
-			// The table already has its own List query when it is a user-visible
-			// resource; generating a second query with the same name would make
-			// sqlc fail with a duplicate query name. Its List query is usable
-			// directly as the options source.
-			if _, exists := queries[foreignTI.Name+".sql"]; exists {
-				continue
-			}
-			foreignPluralName := toPascalCase(foreignTI.Name)
-			labelCol := findLabelColumn(*foreignTI)
-
-			var b strings.Builder
-			b.WriteString(fmt.Sprintf("-- name: List%s :many\n", foreignPluralName))
-			if driver == "mssql" {
-				b.WriteString(fmt.Sprintf("SELECT %s, %s FROM %s;\n\n",
-					foreignPKColumn(*foreignTI), labelCol, foreignTI.Name))
-			} else {
-				b.WriteString(fmt.Sprintf("SELECT %s, %s FROM %s ORDER BY %s;\n\n",
-					foreignPKColumn(*foreignTI), labelCol, foreignTI.Name, labelCol))
-			}
-
-			fname := foreignTI.Name + "_options.sql"
-			if _, exists := queries[fname]; !exists {
-				queries[fname] = b.String()
-			}
-		}
-	}
-
-	return queries
-}
-
-// foreignPKColumn returns the primary key column name of a table.
-func foreignPKColumn(ti TableInfo) string {
-	for _, c := range ti.Columns {
-		if c.IsPrimaryKey {
-			return c.Name
-		}
-	}
-	return "*"
-}
-
 // cmdInitFromDB is the main entry point for `yaga init --db {dsn}`. It
 // connects to the database, introspects the schema, creates auth tables if
 // missing, inserts an admin user when the users table is empty, then generates
-// yaga.yaml and SQL files.
+// yaga.yaml — including the captured `schema:` block. No SQL files are
+// written: the generator runs offline from the schema block (D11).
 func cmdInitFromDB(configPath, outDir, dsn, adminPassword string, force bool) error {
 	if !force {
 		if _, err := os.Stat(configPath); err == nil {
@@ -1500,7 +1223,7 @@ func cmdInitFromDB(configPath, outDir, dsn, adminPassword string, force bool) er
 		return fmt.Errorf("re-introspecting schema: %w", err)
 	}
 
-	// Write yaga.yaml
+	// Write yaga.yaml (includes the captured schema block)
 	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
 	}
@@ -1508,30 +1231,10 @@ func cmdInitFromDB(configPath, outDir, dsn, adminPassword string, force bool) er
 		return fmt.Errorf("writing config: %w", err)
 	}
 
-	// Write SQL files
-	sqlDir := filepath.Join(outDir, "sql")
-	if err := os.MkdirAll(filepath.Join(sqlDir, "migrations"), 0755); err != nil {
-		return fmt.Errorf("creating migrations directory: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Join(sqlDir, "queries"), 0755); err != nil {
-		return fmt.Errorf("creating queries directory: %w", err)
-	}
-
-	schemaSQL := generateSchemaSQL(tables, hasRoles, hasUsers, driver)
-	if err := os.WriteFile(filepath.Join(sqlDir, "migrations", "schema.sql"), []byte(schemaSQL), 0644); err != nil {
-		return fmt.Errorf("writing schema.sql: %w", err)
-	}
-
-	for name, content := range generateQueries(tables, driver) {
-		if err := os.WriteFile(filepath.Join(sqlDir, "queries", name), []byte(content), 0644); err != nil {
-			return fmt.Errorf("writing %s: %w", name, err)
-		}
-	}
-
-	fmt.Println("Introspected database and generated config in", outDir)
+	fmt.Println("Introspected database and generated config:", configPath)
 	fmt.Println("")
 	fmt.Println("Next steps:")
-	fmt.Println("  1. Review", configPath)
+	fmt.Println("  1. Review", configPath, "(the schema: block is the sole schema source)")
 	fmt.Println("  2. Run 'yaga generate --config", configPath, "--out", outDir, "'")
 	return nil
 }

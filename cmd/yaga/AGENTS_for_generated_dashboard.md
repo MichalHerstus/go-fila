@@ -4,10 +4,10 @@ This project is a **generated** admin dashboard produced by [yaga](https://githu
 from two sources of truth:
 
 1. `yaga.yaml` (repo root) — the declarative spec: panel, resources, pages, navigation, auth, actions, hooks, policies.
-2. `admin/sql/` — `migrations/schema.sql` (tables) and `queries/*.sql` (named SQLC queries).
+2. The `schema:` block in `yaga.yaml` — the captured database schema (tables, primary keys, foreign keys, column types), written by `yaga init --db DSN` and never re-derived at build time.
 
 Everything under `admin/` is a build artifact. This guide exists so an AI agent
-modifies this project correctly: edit the YAML + SQL, regenerate, rebuild — and
+modifies this project correctly: edit the YAML, regenerate, rebuild — and
 only hand-write the two Go files that yaga deliberately leaves to the user.
 
 ## THE GOLDEN RULE
@@ -31,29 +31,29 @@ for the user to fill in:
 
 All other generated files are **off-limits**, including:
 `admin/main.go`, `admin/internal/panel/**` (handlers/router/auth),
-`admin/internal/views/**` (templ), `admin/internal/data/**` (sqlc output),
-`admin/internal/viewmodels/**`, `admin/internal/assets/**`, `admin/sqlc.yaml`,
+`admin/internal/views/**` (templ), `admin/internal/data/**` (generated data queries),
+`admin/internal/viewmodels/**`, `admin/internal/assets/**`,
 `admin/tailwind.config.js`, `admin/Makefile`, `admin/static/**`.
-(There is no `package.json` — the dashboard builds with no npm/node.)
+(There is no `package.json` and no sqlc — the dashboard builds fully offline.)
 
 ## Build & regeneration
 
 ```sh
-# from the repo root (~/dev/pokus-fila)
+# from the repo root
 ./yaga generate --config yaga.yaml --out admin --force   # regenerate
 cd admin
-make                                                           # tailwind + sqlc + templ + go build
+make                                                           # tailwind + templ + go build
 ./admin --port 8080                                            # run
 ```
 
-- `generate` runs `sqlc generate` + tailwind itself but their failure is
-  **non-fatal** — re-run `make` afterwards; it redoes them in the right order.
+- `generate` is fully offline: it reads the captured `schema:` block (never the
+  live DB, never sqlc). Tailwind runs non-fatal — `make css` redoes it.
   Tailwind needs the standalone binary: `make get-tailwind` downloads it to
   `.tools/`, and `make css` picks it up automatically.
-- `make` targets: `build` (default), `css`, `sqlc`, `templ`, `tidy`,
+- `make` targets: `build` (default), `css`, `templ`, `tidy`,
   `get-tailwind`, `run`, `package`, `clean`.
 - Sanity-check a config without building: `./yaga validate --verbose`
-  (parses YAML; does NOT verify SQL references — that check is manual, see below).
+  (parses YAML + the schema block; does NOT verify SQL against a live DB).
 
 ## How the YAML drives the code (the dependency graph)
 
@@ -62,26 +62,25 @@ Read every edit against this chain — a broken link fails the build or renders 
 ```
 yaga.yaml ──► resource name ──► Go package / URL segment
       │
-      ├── list.query / count_query ──► -- name: <QueryName> in admin/sql/queries/*.sql ──► sqlc ──► admin/internal/data/<res>.sql.go
-      ├── detail.query ───────────────────────────────┘
-      ├── form.create.query / update.query ───────────────┘
-      ├── options_query (relation/select fields) ──► SELECT id,label FROM (<query body>) AS _opt  (resolved at GENERATION time)
-      ├── FK *_label list columns ──► LEFT JOIN reconstructed from a matching relation form field
+      ├── list / detail / form.populate queries ──► Get<Resource> methods in admin/internal/data  (SQL derived from the schema block)
+      ├── detail.query / form.update.populate_query ──► names that Get<Resource> method
+      ├── relation/select fields (options_value + options_label) ──► SELECT value,label FROM <fk table>  (from schema FK metadata)
+      │      └── options_sql: overrides the FK-derived option query
+      ├── FK *_label list columns ──► LEFT JOIN reconstructed from the schema block's FK metadata
       ├── actions ──► switch in actions.go (inline SQL / proc)
       ├── hooks ──► stubs in internal/hooks/hooks.go + inlined db.ExecContext
-      └── pages/widgets ──► raw SQL executed at REQUEST time (tables/columns must exist in schema.sql + db)
+      └── pages/widgets ──► raw SQL executed at REQUEST time (tables/columns must exist in the schema block + live DB)
 ```
 
 ### Naming rules (must match exactly)
 
 - Resource `OrderLine` → Go package/dir `orderline`, URL `/admin/orderline`.
   PascalCase in YAML is lowercased verbatim (`User`→`user`, `OrderLine`→`orderline`).
-- `snakeToPascal` = sqlc's field naming: lowercase all, split only on `_`, `id`→`ID`.
+- Field naming (matching `snakeToPascal`): lowercase all, split only on `_`, `id`→`ID`.
   So YAML column `role_id` → Go field `RoleID`, `customer_name` → `CustomerName`.
-- Query names in YAML (`query:`, `count_query:`, `populate_query:`, `options_query:`)
-  must match a `-- name: X` block **verbatim** in an `admin/sql/queries/*.sql` file.
-  Example files here: `products.sql`, `orders.sql`, `customers.sql`, `users.sql`,
-  `roles.sql`, `orderlines.sql`.
+- `detail.query` / `form.update.populate_query` name a generated `Get<Resource>`
+  method in `admin/internal/data` (default `GetByID`); there is no separate SQL
+  file tree to cross-reference.
 - `table:`/`id_column:`/`id_type:` override conventions only when the DB differs
   (not the case here — sqlite, table name = lowercased resource, PK = `id`, `int64`).
 
@@ -89,29 +88,27 @@ yaga.yaml ──► resource name ──► Go package / URL segment
 
 The driver comes from the first `connections:.*.driver` value in the YAML.
 Acceptable values: `postgres` (default when the key is absent), `sqlite`/`sqlite3`,
-`mssql`/`sqlserver`. **This project currently uses `sqlite`**, but the YAML,
-the SQL files and the generated code must stay driver-correct in case it changes.
-When you flip the driver, re-run `generate` (it rewrites `sql.Open`, `sqlc.yaml`,
-handlers, pagination, sanity check) AND rewrite every query/schema file for the
-new dialect — the generator does not translate SQL for you.
+`mssql`/`sqlserver`. **This project currently uses `sqlite`**, but the YAML
+and the generated code must stay driver-correct in case it changes.
+When you flip the driver, re-run `generate` (it rewrites `sql.Open`, placeholders,
+pagination, sanity check) AND keep every inline `query:`/`sql:`/widget SQL in the
+new dialect — the generator does not translate hand-written SQL for you.
 
 | Concern | postgres | sqlite (current) | mssql |
 |---|---|---|---|
 | YAML `driver:` | `postgres` | `sqlite`/`sqlite3` | `mssql`/`sqlserver` |
-| sqlc.yaml `engine` | `postgresql` | `sqlite` | `postgresql` |
 | `sql.Open` driver (main.go) | `pgx` | `sqlite3` | `mssql` |
 | bind placeholders | `$1..$N` | `?` | `$1..$N` (loose `$N`→`@pN`) |
 | LIKE operator | `ILIKE` | `LIKE` | `LIKE` (case-insensitive collation) |
 | pagination | `LIMIT $1 OFFSET $2` | `LIMIT ? OFFSET ?` | `OFFSET $2 ROWS FETCH NEXT $1 ROWS ONLY` (REQUIRES an ORDER BY) |
-| sqlc id type | `int32` | `int64` | `int32` (bigint PK → `id_type: int64`) |
+| data-query id type | `int32` | `int64` | `int32` (bigint PK → `id_type: int64`) |
 | create-hook id capture | `RETURNING <id>` | `RETURNING <id>` | `OUTPUT INSERTED.<id>` |
 | stored procedures | `CALL name($1)` | not supported | `EXEC name $1` |
 | startup sanity check | `SELECT 1 FROM {table} LIMIT 1` | same | `SELECT TOP 1 1 FROM {table}` |
 | go.mod extra | `github.com/jackc/pgx/v5` | `github.com/mattn/go-sqlite3` | `github.com/microsoft/go-mssqldb` |
 
 #### Postgres rules
-- Write `admin/sql/queries/*.sql` and `schema.sql` in **postgres dialect**: `$N`
-  placeholders, `ILIKE`, `LIMIT/OFFSET`, `SERIAL`/`TIMESTAMPTZ` DDL.
+- Inline SQL (`query:`/`sql:`/widgets) uses `$N` placeholders, `ILIKE`, `LIMIT/OFFSET`.
 - `proc:` hooks/actions → `CALL name($1)`.
 - Bind args are ordered with the LIMIT/OFFSET params first, then the search
   clauses numbered `$3..`.
@@ -119,21 +116,18 @@ new dialect — the generator does not translate SQL for you.
 #### SQLite rules (current project)
 - Bind placeholders are `?` (positional, SQL-text order — search args before `LIMIT ? OFFSET ?`).
 - LIKE operator is `LIKE` (not ILIKE). Pagination `LIMIT ? OFFSET ?`.
-- sqlc ids are `int64`. sqlc engine in `admin/sqlc.yaml` is `sqlite`.
+- Data-query ids are `int64`.
 - No stored procedures: `proc:` hooks/actions are **ignored** on sqlite — use `query:`/`sql:`.
 
 #### MSSQL rules
-- **PascalCase columns** (`CeleJmeno`, `ZamestnanecID`). sqlc lowercases + splits
-  only on `_`, so a column like `ZamestnanecID` maps to Go field `Zamestnanecid`;
-  `role_id` still maps to `RoleID`. When introspection detects a non-`id` key it
-  emits `id_column: ID`, and bigint PKs emit `id_type: int64`.
-- sqlc runs against a **postgres-dialect `schema.sql`** (engine stays
-  `postgresql`); that file is never executed against the DB.
-- `$N` placeholders; go-mssqldb validates arg count against the **highest** `$N`,
-  so the list/card COUNT query numbers its clauses separately from the data query.
+- **PascalCase columns** (`CeleJmeno`, `ZamestnanecID`). The naming rule
+  lowercases + splits only on `_`, so a column like `ZamestnanecID` maps to Go
+  field `Zamestnanecid`; `role_id` still maps to `RoleID`. When introspection
+  detects a non-`id` key it emits `id_column: ID`, and bigint PKs emit `id_type: int64`.
+- `$N` placeholders; go-mssqldb validates arg count against the **highest** `$N`.
 - Pagination `OFFSET/FETCH` **requires an ORDER BY**; when no sort is configured
   the generator emits `ORDER BY (SELECT NULL)`. ORDER BY is omitted from
-  derived-table `options_query`/list queries entirely.
+  derived-table `options_sql`/list queries entirely.
 - No `RETURNING` — create-hook id capture uses `OUTPUT INSERTED.<id>`.
 - `proc:` hooks/actions → `EXEC name $1` (bound `$1` passes positionally to the proc).
 - Startup sanity check is `SELECT TOP 1 1 FROM {table}`.
@@ -189,59 +183,54 @@ form:
 - On postgres/mssql the create handler switches to a `RETURNING`/`OUTPUT INSERTED`
   id capture so after-create hooks see the new row id (`Scope.ID`).
 
-### Relations / FK labels (`options_query`)
+### Relations / FK labels
 
-- A `select`/`relation` form field with `options_query: ListRoles` renders a modal
-  record picker; generation reads `admin/sql/queries/*.sql`, wraps the query body
-  as `SELECT options_value, options_label FROM (<body>) AS _opt`. The query must
-  select an id-ish first column + a label column (e.g. `-- name: ListRoles :many\nSELECT id, name FROM roles ORDER BY name;`).
+- A `select`/`relation` form field with `options_value` + `options_label` renders
+  a modal record picker. The option query is derived at generate time from the
+  schema block's FK metadata (`SELECT {options_value}, {options_label} FROM {fk table}`),
+  or from `options_sql:` when set. The two columns select a key + a label.
 - List views show FK targets via `<fk>_label` columns (e.g. `customer_name`).
-  The generated handler reconstructs the LEFT JOIN from the matching relation
-  form field — if you rename a column or drop the relation field, list queries
+  The generated handler reconstructs the LEFT JOIN from the schema block's FK
+  metadata — if you rename a column or drop the relation field, list queries
   break with `column "<fk>_label" does not exist`.
 
 ### Pages & widgets
 
 `pages:` → Dashboard (`/Dashboard`, default) and Reports (`/Reports`).
 Widgets (`stat`, `stats_grid`, `chart`, `table`, `list`, `html`) run **raw SQL at
-request time** — no sqlc, no generation-time checks. Verify every table/column
-you reference exists in `admin/sql/migrations/schema.sql` and in the live DB
+request time** — no generation-time checks. Verify every table/column you
+reference exists in the `schema:` block of `yaga.yaml` and in the live DB
 (sqlite: `admin/data/admin.db`; postgres/mssql: the configured server). The widget
 SQL must also be in the current driver's dialect (e.g. `strftime` is sqlite-only;
 postgres uses `to_char`/`date_trunc`). `generate` does not re-seed the DB.
 
-### SQL file editing rules
+### Schema editing rules
 
-- `admin/sql/queries/*.sql` and `admin/sql/migrations/schema.sql` are YOUR
-  source (they are not copied/overwritten by `generate` in this layout — the
-  config dir `~` has no `sql/`).
-- Format: `-- name: <QueryName> :many|:one|:exec` followed by the body; sqlc
-  compiles them into `internal/data`. Keep bodies valid for the **current driver's
-  dialect** — sqlite (`?` binds, `LIKE`), postgres (`$N`, `ILIKE`), mssql (`$N`,
-  `LIKE`, OFFSET/FETCH + ORDER BY).
-- Adding/changing a query referenced from YAML → re-run `generate` (rewrites
-  handlers + options loaders) and `make sqlc`.
-- schema.sql is never executed by the app — the DB schema already exists in
-  the live DB (`admin/data/admin.db` for sqlite; a real server for postgres/mssql).
-  Change schema.sql AND apply the same DDL to the live DB (sqlite:
-  `sqlite3 admin/data/admin.db`; postgres: psql; mssql: sqlcmd).
+- The database schema lives in the `schema:` block of `yaga.yaml`, captured by
+  `yaga init --db DSN`. There is no `admin/sql/` tree in the generated output.
+- To change the schema: apply the DDL to the live DB, then re-capture with
+  `yaga init --db DSN --force` (rewrites the `schema:` block), or hand-edit the
+  block carefully — table name, `pk`, columns, and `foreign_keys` must match the
+  live DB or generated queries fail at request time.
+- `generate` never touches the live DB and never executes the schema block.
 
 ## Workflow checklist (any change)
 
-1. Edit `yaga.yaml` (and/or `admin/sql/**`).
-2. Cross-check every referenced name: query names ↔ `-- name:` blocks, FK label
-   columns ↔ relation fields, page URLs ↔ navigation, policy roles ↔ `auth` login.
+1. Edit `yaga.yaml` (schema block + resources/pages/navigation).
+2. Cross-check every referenced name: `detail.query`/`populate_query` ↔ the
+   resource, FK label columns ↔ relation fields + schema FK metadata, page URLs ↔
+   navigation, policy roles ↔ `auth` login.
 3. `./yaga validate` for YAML sanity.
 4. `./yaga generate --config yaga.yaml --out admin --force`.
-5. `cd admin && make` (fix sqlc/templ errors if any).
+5. `cd admin && make` (fix templ errors if any).
 6. Run and click through the affected screens.
 
 ## Do / Don't
 
-- DO edit `yaga.yaml` and `admin/sql/**` freely — they are the source of truth.
+- DO edit `yaga.yaml` (including the `schema:` block) freely — it is the source of truth.
 - DO implement `fn:` hook bodies in `admin/internal/hooks/hooks.go`.
 - DON'T touch any other generated Go/templ/JS/config file.
-- DON'T invent query names, columns, or URLs that don't exist — verify against the YAML + SQL first.
-- DON'T expect `generate` to update the live DB — apply DDL manually if schema changes.
-- DON'T mix dialects: keep every SQL file consistent with the `connections.default.driver`
+- DON'T invent table/column names, query names, or URLs that don't exist — verify against the YAML + schema block first.
+- DON'T expect `generate` to update the live DB — apply DDL manually, then re-capture `schema:`.
+- DON'T mix dialects: keep every inline SQL consistent with the `connections.default.driver`
   in the YAML (placeholders, LIKE/ILIKE, pagination, date functions).

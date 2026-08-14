@@ -3,12 +3,14 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // fkSchemaTables returns the introspected tables for a schema where
 // sklad_zasoby.pn references sklad_zbozi.pn (a non-PK column) and sklad_zbozi
 // is itself a user-visible resource. This mirrors the real-world case that
-// exposed the FK join and options_query generation bugs.
+// exposed the FK join and options generation bugs.
 func fkSchemaTables() []TableInfo {
 	return []TableInfo{
 		{
@@ -34,64 +36,124 @@ func fkSchemaTables() []TableInfo {
 	}
 }
 
-// TestGenerateQueriesFKJoinNonPK ensures the FK LEFT JOIN uses the referenced
-// foreign column, not the foreign table's primary key.
-func TestGenerateQueriesFKJoinNonPK(t *testing.T) {
-	queries := generateQueries(fkSchemaTables(), "postgres")
+// TestConvertSchemaFKLabel ensures the captured schema block records each FK's
+// foreign table + label column (used to derive option SQL at generation time).
+func TestConvertSchemaFKLabel(t *testing.T) {
+	s := convertSchema(fkSchemaTables(), "postgres")
 
-	zasoby := queries["sklad_zasoby.sql"]
-	if !strings.Contains(zasoby, "LEFT JOIN sklad_zbozi f_sklad_zbozi ON f_sklad_zbozi.pn = t.pn") {
-		t.Fatalf("FK join must reference the foreign column (pn), got:\n%s", zasoby)
+	if len(s.Tables) != 2 {
+		t.Fatalf("expected 2 schema tables, got %d", len(s.Tables))
 	}
-	if strings.Contains(zasoby, "f_sklad_zbozi.id = t.pn") {
-		t.Fatal("FK join must not use the foreign primary key")
+	zasoby := s.Tables[0]
+	if zasoby.Name != "sklad_zasoby" || zasoby.PK != "id" {
+		t.Fatalf("sklad_zasoby wrong: %+v", zasoby)
 	}
-}
-
-// TestGenerateQueriesNoDuplicateListNames ensures a FK target that is itself a
-// resource does not get a second options file with a colliding query name.
-func TestGenerateQueriesNoDuplicateListNames(t *testing.T) {
-	queries := generateQueries(fkSchemaTables(), "postgres")
-
-	if _, ok := queries["sklad_zbozi_options.sql"]; ok {
-		t.Fatal("sklad_zbozi is a resource with its own List query; no options file should be generated")
+	if len(zasoby.ForeignKeys) != 1 {
+		t.Fatalf("expected 1 FK, got %d", len(zasoby.ForeignKeys))
 	}
-
-	names := map[string]bool{}
-	for _, content := range queries {
-		for _, line := range strings.Split(content, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "-- name: ") {
-				qn := strings.TrimSpace(strings.TrimPrefix(trimmed, "-- name: "))
-				qn = strings.SplitN(qn, " ", 2)[0]
-				if names[qn] {
-					t.Fatalf("duplicate query name %q across generated files", qn)
-				}
-				names[qn] = true
-			}
-		}
+	fk := zasoby.ForeignKeys[0]
+	if fk.Column != "pn" || fk.ForeignTable != "sklad_zbozi" || fk.ForeignColumn != "pn" {
+		t.Fatalf("FK wrong: %+v", fk)
 	}
-	if !names["ListSkladZbozi"] {
-		t.Fatal("ListSkladZbozi query missing from generated output")
+	// sklad_zbozi has no "name"/"title"/"label" column; the label falls back to
+	// its first non-PK string column (pn).
+	if fk.Label != "pn" {
+		t.Fatalf("FK label should fall back to pn, got %q", fk.Label)
 	}
 }
 
-// TestWriteResourceYAMLOptionsQuery ensures the relation field's options_query
-// matches the name of the query generateQueries emits for the FK target.
-func TestWriteResourceYAMLOptionsQuery(t *testing.T) {
+// TestConvertSchemaColumnTypes ensures yaga field types come from the DB types
+// via mapDBTypeToFieldType.
+func TestConvertSchemaColumnTypes(t *testing.T) {
+	s := convertSchema(fkSchemaTables(), "postgres")
+	zasoby := s.Tables[0]
+
+	got := map[string]string{}
+	for _, c := range zasoby.Columns {
+		got[c.Name] = c.Type
+	}
+	if got["mnozstvi"] != "float" {
+		t.Fatalf("numeric must map to float, got %q", got["mnozstvi"])
+	}
+	if got["created_at"] != "datetime" {
+		t.Fatalf("timestamp must map to datetime, got %q", got["created_at"])
+	}
+}
+
+// TestGenerateYAMLHasSchemaBlock ensures the introspected config carries the
+// `schema:` block (the sole schema source) and no longer a `sqlc:` block.
+func TestGenerateYAMLHasSchemaBlock(t *testing.T) {
+	out := generateYAML(fkSchemaTables(), "postgres", "postgres://x/x")
+
+	if !strings.Contains(out, "schema:") {
+		t.Fatalf("yaga.yaml must contain a schema: block:\n%s", out)
+	}
+	if !strings.Contains(out, "  tables:") {
+		t.Fatalf("schema block must list tables:\n%s", out)
+	}
+	if !strings.Contains(out, "  - name: sklad_zasoby") {
+		t.Fatalf("schema block must contain sklad_zasoby:\n%s", out)
+	}
+	if strings.Contains(out, "sqlc:") {
+		t.Fatal("yaga.yaml must not contain a sqlc: block")
+	}
+	if strings.Contains(out, "queries_dir") {
+		t.Fatal("yaga.yaml must not reference queries_dir")
+	}
+}
+
+// TestGenerateYAMLSchemaParses ensures the emitted schema block round-trips
+// through the yaml parser used by the generator (Field.OptionsSQL tags parse,
+// schema table/FK structure intact).
+func TestGenerateYAMLSchemaParses(t *testing.T) {
+	out := generateYAML(fkSchemaTables(), "postgres", "postgres://x/x")
+
+	var doc struct {
+		Schema struct {
+			Tables []struct {
+				Name        string `yaml:"name"`
+				PK          string `yaml:"pk"`
+				ForeignKeys []struct {
+					Column        string `yaml:"column"`
+					ForeignTable  string `yaml:"foreign_table"`
+					ForeignColumn string `yaml:"foreign_column"`
+					Label         string `yaml:"label"`
+				} `yaml:"foreign_keys"`
+			} `yaml:"tables"`
+		} `yaml:"schema"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("schema block does not parse: %v\n%s", err, out)
+	}
+	if len(doc.Schema.Tables) != 2 {
+		t.Fatalf("expected 2 schema tables, got %d", len(doc.Schema.Tables))
+	}
+	if len(doc.Schema.Tables[0].ForeignKeys) != 1 {
+		t.Fatalf("expected 1 FK in first table, got %d", len(doc.Schema.Tables[0].ForeignKeys))
+	}
+	fk := doc.Schema.Tables[0].ForeignKeys[0]
+	if fk.Column != "pn" || fk.ForeignTable != "sklad_zbozi" || fk.ForeignColumn != "pn" || fk.Label != "pn" {
+		t.Fatalf("FK structure wrong after round-trip: %+v", fk)
+	}
+}
+
+// TestWriteResourceYAMLRelationField ensures the relation field carries
+// options_value/options_label (option SQL is derived from the schema block)
+// and no longer an options_query reference.
+func TestWriteResourceYAMLRelationField(t *testing.T) {
 	var b strings.Builder
 	tables := fkSchemaTables()
 	writeResourceYAML(&b, tables[0], tables, "postgres")
 	out := b.String()
 
-	if !strings.Contains(out, "options_query: ListSkladZbozi") {
-		t.Fatalf("options_query must be ListSkladZbozi (the generated query), got:\n%s", out)
-	}
-	if strings.Contains(out, "options_query: ListSkladZbozis") {
-		t.Fatal("options_query must not be pluralized")
+	if strings.Contains(out, "options_query:") {
+		t.Fatalf("relation field must not reference options_query, got:\n%s", out)
 	}
 	if !strings.Contains(out, "options_value: pn") {
 		t.Fatalf("options_value must be the referenced foreign column pn:\n%s", out)
+	}
+	if !strings.Contains(out, "options_label: pn") {
+		t.Fatalf("options_label must be the FK target's label column:\n%s", out)
 	}
 }
 
@@ -129,6 +191,20 @@ func intGridView() TableInfo {
 			{Name: "id", DBType: "integer"},
 			{Name: "name", DBType: "character varying"},
 		},
+	}
+}
+
+// TestConvertSchemaView ensures views are marked with View in the schema block
+// and keep their fallback key column.
+func TestConvertSchemaView(t *testing.T) {
+	s := convertSchema(viewTables(), "postgres")
+
+	summary := s.Tables[1]
+	if !summary.View {
+		t.Fatal("order_summary must be marked as a view in the schema block")
+	}
+	if summary.PK != "customer_name" {
+		t.Fatalf("view key must fall back to its first column, got %q", summary.PK)
 	}
 }
 
@@ -170,46 +246,5 @@ func TestWriteResourceYAMLViewDetail(t *testing.T) {
 	}
 	if strings.Contains(out, "form:") {
 		t.Fatalf("view must not emit a form section, got:\n%s", out)
-	}
-}
-
-// TestGenerateQueriesViewReadOnly ensures views only get read queries
-// (List/Count/Get) and no write queries (Create/Update/Delete).
-func TestGenerateQueriesViewReadOnly(t *testing.T) {
-	queries := generateQueries(viewTables(), "postgres")
-
-	sql := queries["order_summary.sql"]
-	if !strings.Contains(sql, "-- name: ListOrderSummary :many") {
-		t.Fatalf("view must have a List query:\n%s", sql)
-	}
-	if !strings.Contains(sql, "-- name: CountOrderSummary :one") {
-		t.Fatalf("view must have a Count query:\n%s", sql)
-	}
-	if !strings.Contains(sql, "-- name: GetOrderSummary :one") {
-		t.Fatalf("view must have a Get query:\n%s", sql)
-	}
-	for _, bad := range []string{
-		"CreateOrderSummary", "UpdateOrderSummary", "DeleteOrderSummary",
-		"INSERT INTO order_summary", "UPDATE order_summary", "DELETE FROM order_summary",
-	} {
-		if strings.Contains(sql, bad) {
-			t.Fatalf("view must not emit write query %q:\n%s", bad, sql)
-		}
-	}
-	// The Get query must key on the view's fallback key column.
-	if !strings.Contains(sql, "WHERE t.customer_name = $1") {
-		t.Fatalf("view Get query must key on customer_name:\n%s", sql)
-	}
-}
-
-// TestGenerateSchemaSQLView ensures schema.sql (sqlc input) carries a synthetic
-// CREATE TABLE for a view so sqlc can infer its column types.
-func TestGenerateSchemaSQLView(t *testing.T) {
-	schema := generateSchemaSQL(viewTables(), false, false, "postgres")
-	if !strings.Contains(schema, "CREATE TABLE order_summary (") {
-		t.Fatalf("schema.sql must emit a synthetic CREATE TABLE for the view:\n%s", schema)
-	}
-	if !strings.Contains(schema, "customer_name character varying") {
-		t.Fatalf("schema.sql view DDL must include the view columns:\n%s", schema)
 	}
 }

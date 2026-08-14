@@ -235,7 +235,11 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Drop Node.js/npm from the dashboard build | **Done (D8)** |
 | Editor Validate (main menu → results list → jump-to-fix) | **Done (D9)** |
 | Rename project to YAGA (binary, module path, repo, docs) | Done |
-| List/Card filter section (`list.filter` / `card.filter`, collapsible, `$N` params) | Planned (D11) |
+| Drop sqlc & make the DB the sole schema source (`schema:` block, mandatory `--db`) | Planned (D11) |
+| Embed pre-built CSS into the yaga binary (drop the Tailwind build step) | Planned (D12) |
+| List/Card filter section (`list.filter` / `card.filter`, collapsible, `$N` params) | Planned (D13) |
+| Mobile device support (server-side UA detection, `visible_on_mobile` nav filter, mobile list/card/detail/form views, load-more, kanban column pages) | Planned (D14) |
+| Lua scripting for actions & hooks (gopher-lua, `script:` body, `ctx` scope, `db.*`/`abort`/`log` host API) | Planned (D15) |
 
 ---
 
@@ -669,7 +673,178 @@ repo renamed to `MichalHerstus/yaga`; `session-ses_*.md` transcripts left untouc
 
 ---
 
-### D11 — List/Card filter section
+### D11 — Drop sqlc & make the DB the sole schema source (2.0, core-first)
+
+**Status: planned, not started.** A v2-level model inversion: the live database becomes the
+**only** source of schema truth (tables, views, columns, types, primary keys, foreign
+keys) and the **sqlc** external toolchain is removed entirely. `yaga init --db DSN` becomes
+the **only** entry point (the `--db` flag is mandatory); `yaga generate` and `make build`
+run **offline**. Decisions taken: **captured `schema:` block** — `init --db` introspects the
+live DB, converts it to a `schema:` block inside `yaga.yaml`, and generate/build read that
+block (no DB connection at build time); **inline `options_sql`** — non-derivable custom
+option lists are supplied as inline SQL in YAML, while FK relations auto-generate their
+option SQL from the schema block; **core-first** — editor/Sync/sqlc-adjacent UI cleanup is a
+follow-up phase; **stored procedures are out of scope** for this plan; the `init` schema
+scaffold and `init --demo` are removed (demo comes from the service's prepared SQLite
+file). Custom SQL stays in YAML (action `query:`, page-widget `query:`, hook `sql:`,
+`options_sql:`).
+
+**Phase 0 — Git & version bookkeeping.** Tag current `main` as `v1.0.0` (project's first
+tag; the clean-tree tip is the live 1.0.0). Work on `feature/db-schema-source`; `main`
+stays green and identical to 1.0.0 until the cutover. Merge to `main` (bump to **2.0.0**)
+only when stable. No long-lived `release/1.0.x` maintenance line unless 1.0 patching is
+wanted after 2.0 (default: the tag is enough).
+
+**YAML schema additions** (`internal/types/config.go`, `internal/types/resource.go`):
+
+```yaml
+schema:                      # captured by init --db; the sole schema source of truth
+  tables:
+    - name: orders
+      pk: id
+      view: false
+      columns:
+        - { name: id, type: integer, primary_key: true }
+        - { name: customer_name, type: string }
+      foreign_keys:
+        - { column: customer_id, foreign_table: customers, foreign_column: id, label: name }
+# and on a relation/dropdown form field instead of options_query:
+  - name: role_id
+    type: select
+    options_sql: "SELECT id, name FROM roles WHERE active = 1"
+```
+
+**Phase 1 — Core: DB as source of truth, no sqlc (offline generate):**
+1. `internal/types/` — `Schema`/`SchemaTable`/`SchemaColumn`/`SchemaFK` (name, view, pk,
+   columns[type,pk], foreign_keys incl. `label`) + `Config.Schema *Schema yaml:"schema"`;
+   `Field.OptionsSQL string yaml:"options_sql"`. Keep `SQLCConfig` **parse-only + inert**
+   this phase so editor/parser/validate still compile (removed in Phase 2).
+2. `cmd/yaga/introspect.go` — convert `[]TableInfo → *types.Schema`; `generateYAML` appends
+   a `schema:` block (views stay read-only via existing logic). **Stop writing**
+   `sql/migrations/schema.sql` and `sql/queries/*.sql`; fold/drop `generateSchemaSQL`,
+   `mssqlTypeToPostgres`, `generateQueries`-as-files, `pkGoType`/`findPKColumn`
+   reverse-engineering (Go types are derived in the generator from stored column types; FK
+   targets carry their label column for option SQL).
+3. `internal/generator/data.go` (new) — from `cfg.Schema`, emit `internal/data` with
+   `Get{Resource}(db, ctx, key) (map[string]interface{}, error)` per resource (raw
+   `SELECT cols FROM {table} WHERE {pk}=?`, scan into an `interface{}` map). Emit FK option
+   SQL: for a relation field without `options_sql`, derive
+   `SELECT {options_value},{options_label} FROM {table}` from schema FKs/labels;
+   `options_sql` wins when present. `detail.go`/`update.go` swap sqlc struct fields for the
+   map result (`itemMap := item`) — removes the one real runtime dependency on sqlc output;
+   the `data.New(db).GetX(ctx, idType(id))` call shape and `id_type`/`id_column` overrides
+   stay.
+4. `internal/generator/generator.go` / `sqlc.go` / `makefile.go` — remove the
+   `generateSQLCConfig` call + `SQLC.Config` gate; remove `RunSQLC`, `copySQLFiles`
+   (query files retired). `build: css templ` (drop the `sqlc` target and the dependency on
+   an external sqlc run).
+5. `cmd/yaga/main.go` / `demo.go` — `init` requires `--db`; remove the `init`
+   schema-scaffold branch and `--demo`; delete `cmdInitDemo`, `demo.go`, `demo_test.go`;
+   update usage text; remove the `RunSQLC()` call in `cmdGenerate`.
+6. `internal/generator/handler.go` (`buildOptionsLoader`) — source option SQL from
+   `options_sql` or the generated FK SQL (drop `findSQLCQuery` file reads).
+
+**Phase 2 — Editor / Sync cleanup (follow-up, not in scope of this execution):** remove the
+`SQLC` editor screen, Sync "Generate missing queries", `sqledit.go`, `internal/schema`
+ParseSchema/ParseQueries/CollectReferences, the inert `SQLCConfig` type, and the now
+vestigial query-name YAML fields (`list.query`, `count_query`, `detail.query`,
+`form.*.query`, `populate_query`) plus their tests.
+
+**Tests / exit criteria (Phase 1):** `types`/`introspect_test.go` — `[]TableInfo → Schema`
+conversion, `schema:` embedded, no `schema.sql`/`queries/*.sql` emitted by
+`cmdInitFromDB`; `generator_test.go` — `internal/data` `Get` from a `schema:` block,
+detail/update use the map result, no `sqlc.yaml`, no `make sqlc`, no query files in output;
+`main.go` — `init` errors without `--db`. Gates: `go build ./...`, `go vet ./...`,
+`gofmt -l .`. Risks: map-based detail/update is low-risk (renderers already index maps +
+route through `viewmodels.Stringify`); keeping `SQLCConfig`/`internal/schema` inert in
+Phase 1 lets legacy `sqlc:` YAML still parse (ignored), removed cleanly in Phase 2.
+
+---
+
+### D12 — Embed pre-built CSS into the yaga binary (drop the Tailwind build step)
+
+**Status: planned (2026-08-14), not started.** Follows D11 (v2.0.0, no sqlc). Same pattern
+as D8's vendored Chart.js: a single pre-built, CSS-variable-based Tailwind stylesheet is
+committed into `internal/generator/assets/styles.css`, embedded via `//go:embed`, and
+written to the generated project's `static/css/styles.css` at generation time — so the
+dashboard builds with no Tailwind binary (and, post-D11, no sqlc): `make build` = `templ`
++ `go build`, fully offline. Decisions taken (2026-08-14): **embed, not hybrid** — no
+optional `css`/`get-tailwind` escape hatch in the generated Makefile; **CSS-variable
+theming** — the prebuilt CSS is generated with `colors.brand.primary → var(--brand-primary)`
+/ `secondary → var(--brand-secondary)` (both `:root` vars are already emitted at runtime by
+`Base`/`LoginPage`), so one baked stylesheet serves any brand theme; **fonts stay inline** —
+`Base`/`LoginPage` already apply `body { font-family }` / `code, pre { font-family }` via
+inline `<style>` (not Tailwind utilities), so custom fonts keep working untouched and the
+prebuilt config adds no `fontFamily` extend (`font-mono` comes from Tailwind defaults);
+**bounded grid/max-w knobs** — the three config-driven class names (`lg:grid-cols-N` card
+view, `lg:grid-cols-N` stats_grid, `max-w-{V}` from `max_content_width`) are covered by a
+safelist superset and validated with **silent clamp + warning** (columns → [1,12]; unknown
+`max_content_width` → `max-w-none` fallback + warn); **guarded regen** — a repo `make
+styles` target regenerates the asset and a coverage test fails loudly if generator templates
+ever emit a class missing from the embedded CSS.
+
+**Embedded asset** (`internal/generator/tailwind.go`): commit minified
+`internal/generator/assets/styles.css` + `//go:embed assets/styles.css` →
+`embeddedStylesCSS`; `generateAssets()` → `writeChartJS()` + `writeStylesCSS()` (writes the
+embedded bytes to `static/css/styles.css`); `ensureDirs` adds `static/css` and drops
+`internal/assets/css`; delete `generateTailwindCSS`, `generateStaticAssets`, `fontStack`,
+`RunTailwind` + their now-unused imports.
+
+**Config-driven classes** (`internal/parser/validator.go`): clamp `card.columns` and
+stats_grid widget `columns` to [1,12] (card currently only clamps `<1→4`; widgets have no
+bounds today); validate `max_content_width` against the allowlist, unknown values fall back
+to `max-w-none` with a warning. Behavior change: values >12 previously emitted arbitrary
+Tailwind classes.
+
+**Generated Makefile** (`internal/generator/makefile.go`, post-D11): remove the
+`css`/`get-tailwind` targets, `TAILWIND`/`TAILWIND_VERSION` vars and the
+`tailwindStandaloneVersion` const; `build: css templ` → `build: templ`.
+
+**CLI** (`cmd/yaga/main.go`): `cmdGenerate` drops the `RunTailwind()` call + warning (D11
+already removed `RunSQLC()`); Next-steps becomes `make` / `make run`.
+
+**Rebuild tooling** (yaga repo, dev workflow only): root `Makefile` gains
+`make styles` → `scripts/build-styles.sh`; `scripts/styles.tailwind.config.js` holds the
+var-based colors + safelist `{ pattern: /grid-cols-(1|…|12)/, variants: ['sm','md','lg'] }`
+and the explicit `max-w-*` allowlist; the script generates a project from the kitchen-sink
+fixture offline, drops in the config + `@tailwind` input, runs the pinned tailwind v3.4.19
+standalone (same OS/arch mapping as today's `get-tailwind`), and copies the minified output
+to `internal/generator/assets/styles.css`. No sqlc, no sql fixtures.
+
+**Kitchen-sink fixture** `testdata/kitchen.yaml`: hand-authored post-D11 YAML with a
+`schema:` block and `options_sql:` (no `sql/queries` files), covering list/card (grid +
+kanban)/detail/create/update/actions/bulk/policies/hooks, all widget types, pickers,
+`file`/`image`/`json`/`gps` fields, `card.columns: 12`, stats_grid `columns: 12`,
+`max_content_width: 7xl` — every class the generator can emit appears literally in the
+generated `.templ`.
+
+**Coverage guard test** (`internal/generator/styles_test.go`): generate from the fixture,
+extract every `class="…"` token from the emitted `.templ` files, and assert each token + the
+full safelist + `var(--brand-primary)`/`var(--brand-secondary)` presence exist in
+`embeddedStylesCSS`.
+
+**Touch points:**
+1. `internal/generator/tailwind.go` — embed + write the asset; delete the tailwind emitters / `RunTailwind`.
+2. `internal/generator/makefile.go` — `build: templ`, drop css/get-tailwind/TAILWIND.
+3. `internal/parser/validator.go` — column/max-w clamps + warnings.
+4. `cmd/yaga/main.go` — remove `RunTailwind()` + next-steps text.
+5. `internal/generator/generator.go` — `ensureDirs` (add `static/css`, drop `internal/assets/css`).
+6. `internal/generator/styles_test.go` + `testdata/kitchen.yaml` — guard test + fixture.
+7. `scripts/styles.tailwind.config.js` + `scripts/build-styles.sh` + root `Makefile` — regen tooling.
+8. Docs — `SPEC.md`, `README.md`, `TESTs.md`, `AGENTS.md` (drop `make css`/`get-tailwind`).
+
+**Tests / exit criteria:** guard test green (every generated class token present in the
+embedded CSS); `generator_test.go` updated (`TestGenerateMakefile` asserts `build: templ`,
+no TAILWIND/get-tailwind lines; the tailwind.config.js assertion becomes
+`static/css/styles.css` == embedded bytes); `make styles` regenerates the asset; demo/kitchen
+project `make build` succeeds **with no tailwind binary on PATH** and serves
+`/static/css/styles.css` honoring a custom brand color (via CSS vars). Gates:
+`go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l .`. Regression guard: feature-off
+output stays byte-identical except the CSS asset + Makefile.
+
+---
+
+### D13 — List/Card filter section
 
 **Status: planned (2026-08-11), not started.** A YAML-defined filter on list and card
 views: a collapsible filter section above the table/cards that builds an arbitrary
@@ -763,6 +938,193 @@ byte-identical.
 
 ---
 
+### D14 — Mobile device support
+
+**Status: planned (2026-08-14), not started.** Mobile browsers are auto-detected
+server-side and get distinct mobile views instead of the desktop variants: navigation
+shown as a separate view (no sidebar), an iOS/Android-style multiline-cell list, kanban
+columns as separate pages with a topbar switcher, continuous "load more" scrolling, and
+search tucked behind an icon. Decisions taken (2026-08-14): **`visible_on_mobile` lives on
+navigation items only** (groups with zero visible items are hidden on mobile); **default =
+true (opt-out)** — existing configs show everything on mobile after upgrade, deviating from
+the literal "only True shown" reading (⚠️ open to veto during review); **server-side UA
+detection + separate mobile templ views** (matches "mobile pages returned instead of desktop
+variant"; enables kanban-as-pages/multiline cells/nav-as-view); **load-more via HTML fragment
+fetch** (keeps per-request page size, avoids rendering huge tables).
+
+**YAML schema** (`internal/types/config.go`: `VisibleOnMobile *bool` on `NavigationItem`,
+`yaml:"visible_on_mobile"`):
+
+```yaml
+navigation:
+  - group: "Sales"
+    items:
+      - resource: Order          # visible on mobile (default)
+      - resource: OrderLine
+        visible_on_mobile: false # hidden on mobile
+```
+
+Generator semantics: `nil`/absent → visible; `false` → hidden. Parser accepts `true`/`false`
+only. A group whose items are all hidden renders no mobile entry. Desktop nav and all other
+behavior unchanged.
+
+**Detection** (new generated `internal/panel/auth/mobile.go`): `MobileMiddleware` sniffs
+`r.UserAgent()` against a conservative Android/iOS/tablet regex and stashes `isMobile` in the
+request context; `auth.IsMobile(r) bool` reads it (mirrors the `UserName`/`UserID` pattern;
+handlers already import auth). `?mobile=1` / `?desktop=1` query params override detection
+(testing/preview). Registered in `NewRouter`'s panel route group after `SessionMiddleware`,
+inside the existing single `r.Route` block (no second `r.Route` — panics on duplicate path).
+
+**Mobile layout + nav:** `layoutviews.Base(...)` gains a `mobile bool` param; every render
+call site (list/cards/detail/create/update in handler.go, page views in router.go) passes
+`auth.IsMobile(r)`. The mobile branch renders the mobile shell — topbar with a hamburger
+linking to a new `{panel}/nav` route (renders a new `layoutviews.MobileNav` view listing nav
+groups/items filtered by `visible_on_mobile`), plus the existing title/theme-toggle/logout —
+and **no sidebar**; the desktop branch stays byte-identical (regression-guarded). Login page
+is untouched (already `max-w-md` and mobile-friendly).
+
+**Mobile resource views** (new `.templ` files per resource, server-rendered, reuse
+`viewmodels.Stringify`/renderers):
+- **List** — `XListMobile`: iOS/Android-style rows — first column as the row title, the
+  remaining columns as `label: value` lines; search input hidden behind a magnifier icon
+  (JS toggle); bulk checkboxes + toolbar kept.
+- **Load-more** — `GET {res}?fragment=rows&page=N&search=&sort=&order=` renders a
+  `XListRowsMobile` fragment that JS appends via IntersectionObserver, preserving
+  search/sort/order; per-request `per_page` unchanged.
+- **Cards** — the grid already collapses to 1 column via `lg:grid-cols-N`; kanban becomes
+  `XCardsMobile`: horizontal column switcher in the topbar + `?col=KEY` renders a single
+  column page (no new route).
+- **Detail** — `XDetailMobile`: stacked label/value instead of the `<table>`.
+- **Form** — `XFormMobile`: full-width inputs/buttons, larger touch targets (file/picker/
+  CSV-import paths unaffected).
+
+**Pages & widgets:** widget tables gain `overflow-x-auto`; stat/chart/list/html widgets and
+`grid-cols-1 md:grid-cols-2 lg:grid-cols-N` grids are already responsive; pages render in the
+mobile shell.
+
+**Editor / AI / validation:** navigation-item editor (`cmd/yaga/editor/menu.go` `navItemPage`)
+gains a "Visible on mobile" yes/no field; `cmd/yaga/ai_spec.md` cheat-sheet gains the flag;
+parser/validator test for parse + default.
+
+**Touch points:**
+1. `internal/types/config.go` — `VisibleOnMobile *bool` on `NavigationItem`.
+2. `internal/generator/auth.go` (or new `mobile.go`) — `MobileMiddleware` + `auth.IsMobile(r)`.
+3. `internal/generator/router.go` — register `MobileMiddleware`; `{panel}/nav` route +
+   handler; `{res}/rows` fragment route per resource.
+4. `internal/generator/templ.go` — `Base` `mobile bool` param + mobile shell; `MobileNav`
+   view; `XListMobile`/`XListRowsMobile`/`XCardsMobile`/`XDetailMobile`/`XFormMobile`;
+   widget table `overflow-x-auto`.
+5. `internal/generator/handler.go` — mobile render branch + fragment branch in the list
+   handler; pass `auth.IsMobile(r)` at all 5 Base call sites.
+6. `cmd/yaga/editor/menu.go` — "Visible on mobile" field; `cmd/yaga/ai_spec.md` line.
+7. `internal/parser/validator.go` — flag validation.
+8. Docs — `SPEC.md` (schema), `README.md`, `TESTs.md`, `AGENTS.md`.
+
+**Tests / exit criteria:** parser (flag parse + default-true); generator via
+`assertGeneratedGoParses` — all Base call sites contain `auth.IsMobile(r)`, mobile templs +
+fragment route emitted, nav filtered by `visible_on_mobile`; desktop (feature-off) output
+byte-identical (existing snippet tests stay green). Gates: `go build ./...`,
+`go vet ./...`, `go test ./...`, `gofmt -l .`; E2E — generated project served, mobile
+User-Agent gets the mobile shell + nav page + load-more fragment, `?desktop=1` shows the
+desktop variant.
+
+---
+
+### D15 — Lua scripting for actions & hooks (gopher-lua)
+
+**Status: planned (2026-08-14), not started.** Actions and hooks gain a YAML-embedded
+scripting language so admin logic (conditional DB ops, default values, validation
+guards) lives in `yaga.yaml` instead of Go stubs, raw `sql:` strings, or DB-dialect
+stored procedures. Decisions taken (2026-08-14): **runtime = gopher-lua v1.1.1** —
+pure Go, no CGO (matches the modernc/sqlite philosophy), tiny, mature, and
+`L.SetContext` gives per-request timeouts with no goja-style interrupt/memory
+sandboxing; **executes in the generated dashboard at request time** (like `sql:`/
+`proc:` today), with scripts embedded as `%q` string literals in the generated Go
+source — the yaga binary itself gains NO dependency; **bare script body** — the script
+is the body of a single `run(ctx)` function, wrapped by the runtime, matching "single
+function per action/hook"; **runtime-only syntax check** — scripts compile lazily when
+the action/hook runs, so typos surface as request-time errors (no generate-time check
+in v1; flagged as an easy add-on). `script:` is mutually exclusive with the existing
+hook/action fields (parser enforces it), keeping the feature-off output byte-identical.
+
+**YAML schema** (`internal/types/hook.go`: `Hook.Script string yaml:"script"`;
+`internal/types/resource.go`: `Action.Script string yaml:"script"`):
+
+```yaml
+hooks:
+  before:
+    - name: set_default_status
+      script: |
+        if ctx.values["status"] == nil then
+          ctx.values["status"] = "draft"
+        end
+actions:
+  - name: archive
+    script: |
+      if ctx.values["status"] == "archived" then
+        abort("Already archived")
+      end
+      db.exec("UPDATE customers SET status = 'archived' WHERE id = ?", ctx.id)
+```
+
+**Script model:** each script is the body of one `run(ctx)` function (the generated
+runtime wraps it: `function run(ctx) ... end`). `ctx` table: `id` (number), `values`
+(map; **in/out** — a before-create/update script can set defaults and the handler
+writes them back into the INSERT/UPDATE `vals` slice by column index), `table`,
+`action` (`create|update|delete|<actionName>`), `user`, `role`.
+
+**Host API** (registered as Lua globals in the runtime, the only way to touch the DB):
+`db.exec(sql, ...)` → affected-row count (errors propagate); `db.query(sql, ...)` →
+array of row tables; `db.query_one(sql, ...)` → row table or `nil`; `abort(msg)` →
+raises a distinguishable error; `log(msg)` → server-side `log.Printf`. Positional `?`
+placeholders are renumbered to `$N` on postgres/mssql and kept as `?` on sqlite
+(driver-aware, mirroring the list handlers; `*sql.DB` and `*sql.Tx` both satisfy the
+runtime's `Execer` interface). No `os`/`io`/`require`/network access is exposed — the
+Lua state only contains the host globals + standard Lua builtins.
+
+**Generated runtime** `internal/panel/luascript/luascript.go` (new file, emitted only
+when ≥1 `script:` exists — mirror of `internal/panel/procs`): `Run(ctx, db, script,
+scope *Scope, timeout)` with a fixed 5 s `context.WithTimeout` per run
+(`L.SetContext`); lua↔go value converters; `IsAbort(err)` distinguishes `abort()` from
+real failures. **Audited script actions run against the audit `tx`** (the `Execer`
+interface accepts `*sql.Tx`), so the op + audit insert stay inside the single
+transaction like raw-SQL actions today; script hooks run against `db`.
+
+**Emission sites:**
+1. `internal/generator/hooks.go` — `hookCallsStr` gains the `script:` case
+   (`luascript.Run(...)` before/after the op, `IsAbort` → `httperr.BadRequest` with the
+   message, real errors → `httperr.Internal`); `hookBlockEmits`/`hasAnyHooks` treat
+   scripts like sql hooks; create/update write `ctx.values` back into `vals` by column
+   index after a before-script.
+2. `internal/generator/handler.go` — `generateActionHandler` emits a script branch in
+   the action `case` body (mutually exclusive with `query`/`proc`); action `abort()` →
+   redirect to the list with `?flash=<msg>`; audit flag includes script actions
+   (`exec != ""` semantics). `generateBulkHandler` loops `luascript.Run` per selected id
+   with **no outer tx** (mirrors proc bulk actions).
+3. `internal/generator/mod.go` — add `github.com/yuin/gopher-lua v1.1.1` to the generated
+   `go.mod` **only when a script exists** (conditional, like `driverDep`), so
+   feature-off output stays byte-identical and `go mod tidy` never strips it.
+4. `internal/parser/validator.go` — "exactly one of fn, sql, proc, script" for hooks;
+   `validateAction` becomes query/proc/script mutual exclusion.
+5. `internal/panel/httperr` (`httperr.go`) — add `BadRequest(w, msg string)` (safe:
+   only trusted config-author text reaches it).
+6. `cmd/yaga/editor/` — script-body `TextArea` editor on action pages + hook items
+   (sqledit.go-style, in-memory); `cmd/yaga/ai_spec.md` cheat-sheet line; demo config
+   gains one scripted action to exercise the feature.
+7. Docs — `SPEC.md` (schema + host API), `README.md`, `TESTs.md`, `AGENTS.md`.
+
+**Tests / exit criteria:** parser mut-ex (`fn/sql/proc/script`, query/proc/script);
+generator snippets — conditional go.mod dep, `luascript.go` emitted only when a script
+exists, hook/action/bulk/audit emission, `ctx.values` write-back, abort paths, all via
+`assertGeneratedGoParses`; byte-identical feature-off regression (existing hook/action
+tests stay green). Gates: `go build ./...`, `go vet ./...`, `go test ./...`,
+`gofmt -l .`; E2E — generated project: before-hook sets a default (visible in the
+created row), `abort()` flashes on the list (action) / 400s with the message (hook), a
+scripted action using `db.query_one` + `db.exec` works, and an audited script action
+writes one `audit_log` row in the same tx.
+
+---
+
 ### Order, dependencies & cross-cutting
 
 **D2 → D3 → D5 → D6.** Rationale: D2's audit INSERT weaving and transactional single-row
@@ -774,8 +1136,25 @@ reuse; D5 and D6 are independent and smallest — last. **D7 is independent of D
 generated-app handlers or the editor.
 **D10 (rename to YAGA) is independent of all other phases** and lands last: it renames the
 project, module path, CLI, repo and the very docs/`cmd` paths this roadmap references.
-**D11 (list/card filters) is independent of D2–D9; it should land after D10 since its
-docs/code references and example YAML (demo/ai_spec) touch the renamed paths.**
+**D11 (drop sqlc, DB as sole schema source) is the biggest and most invasive change** — a
+v2 model inversion that reworks init/generate, the Makefile, introspection, the `internal/data`
+replacement, and (in a follow-up phase) the editor/Sync sqlc surfaces. It lands **after**
+D10 and takes priority over subsequent milestones: its removal of the sqlc toolchain touches
+many of the same code paths that D13+ build on.
+**D12 (pre-built CSS, drop the Tailwind build step) is the direct successor to D11**: it
+removes the last external toolchain step from the generated Makefile (`build: css templ` →
+`build: templ`) and touches the same asset/build/`makefile.go` surfaces; it also fits the D8
+asset-tooling precedent. **D13 (list/card filters) is independent of D2–D12; it should land
+after D10 since its docs/code references and example YAML (demo/ai_spec) touch the renamed
+paths.** **D14 (mobile device support) is independent of D2–D13 and builds on D11**: its
+detection middleware, mobile templ views and nav filtering touch the same generated-handler/
+layout surfaces as D11's v2 model but share no sqlc dependency; the `mobile bool` threading
+into `layoutviews.Base(...)` should land after D11's layout rework to avoid churn.
+**D15 (Lua scripting) is independent of D2–D14**: it adds a generated runtime package
+(`internal/panel/luascript`), a conditional go.mod dependency and new `script:` fields on
+hooks/actions — no sqlc, DB, or layout coupling — so it can slot in alongside any other
+milestone; it mirrors the D5 (plugin hook sources) and D6 (procedures) precedent of
+embedding logic in `yaga.yaml` and emitting runtime support into the generated app.
 
 Cross-cutting for every milestone: version bump `0.8.0 → 0.9.0`; docs
 (`SPEC.md`, `README.md`, `AGENTS.md`) updated per milestone; every milestone ends with

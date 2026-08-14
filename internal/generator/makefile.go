@@ -2,9 +2,10 @@
 //
 // Generates a Makefile in the generated admin panel application with targets
 // that run every step required to build the dashboard binary: building the
-// Tailwind CSS, regenerating the sqlc queries and templ views, tidying the Go
-// module and compiling the binary. No npm/node is required — Tailwind CSS runs
-// via the standalone binary (TAILWIND override + optional get-tailwind
+// Tailwind CSS, compiling the templ views, tidying the Go module and compiling
+// the binary. No npm/node and no sqlc are required — the schema comes from the
+// config's captured `schema:` block, so the build runs fully offline. Tailwind
+// CSS runs via the standalone binary (TAILWIND override + optional get-tailwind
 // download) and Chart.js is vendored at generation time.
 package generator
 
@@ -19,9 +20,9 @@ const tailwindStandaloneVersion = "v3.4.19"
 
 // generateMakefile writes a Makefile into the output directory. The default
 // target builds the dashboard binary from scratch; the individual steps are
-// also exposed as separate targets (css, sqlc, templ, tidy, get-tailwind) so
-// they can be re-run on their own. The binary is named after the output
-// directory base name (matching the module name written to go.mod).
+// also exposed as separate targets (css, templ, tidy, get-tailwind) so they
+// can be re-run on their own. The binary is named after the output directory
+// base name (matching the module name written to go.mod).
 // Returns an error on write failure.
 func (g *Generator) generateMakefile() error {
 	binary := filepath.Base(g.OutDir)
@@ -50,12 +51,12 @@ TAILWIND_VERSION ?= ` + tailwindStandaloneVersion + `
 #   make package PACKAGE_NAME=my-release
 PACKAGE_NAME ?= $(BINARY)-$(shell date +%Y%m%d)
 
-.PHONY: all build css sqlc templ tidy get-tailwind run package clean
+.PHONY: all build css templ tidy get-tailwind run package clean
 
 all: build
 
 # Build the dashboard binary and its assets (default target).
-build: css sqlc templ
+build: css templ
 	go build -o $(BINARY) .
 
 # Build the Tailwind CSS into static/css/styles.css. Chart.js is already
@@ -80,10 +81,6 @@ get-tailwind:
 	chmod +x .tools/tailwindcss ; \
 	echo "Downloaded .tools/tailwindcss" ; \
 	echo "Downloaded .tools/tailwindcss; make css/build will now use it automatically"
-
-# Regenerate the sqlc query code into internal/data.
-sqlc:
-	sqlc generate
 
 # Compile the .templ views into *_templ.go (required before go build).
 # Tidy first so the toolchain can resolve and download templ.

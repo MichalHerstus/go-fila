@@ -117,13 +117,13 @@ func (g *Generator) applyAudit() {
 }
 
 // generateAuditSchema writes the audit_log table DDL into the out dir's
-// sql/migrations directory so sqlc sees the table and the user can migrate it,
-// plus a sqlc List/Count query file into sql/queries. The DDL is driver-aware
+// sql/migrations directory so the user can migrate it. The DDL is driver-aware
 // (postgres/mssql share the postgres dialect, sqlite gets its own) and is
 // never executed against the DB — it is input for the user's migrations. When
 // a migration file in the out dir already declares the audit table (the
-// user's own DDL, or e.g. the demo schema), nothing is emitted — emitting a
-// duplicate CREATE TABLE would break sqlc.
+// user's own DDL, or e.g. a schema captured from a live DB), nothing is
+// emitted — no sqlc query file is produced (D11), the audit list/count
+// queries run as raw SQL inside the generated list handler.
 // Returns: an error on write failure.
 func (g *Generator) generateAuditSchema() error {
 	if !g.auditEnabled() {
@@ -161,24 +161,7 @@ func (g *Generator) generateAuditSchema() error {
 );
 `, table)
 	}
-	if err := os.WriteFile(path, []byte(ddl), 0644); err != nil {
-		return err
-	}
-
-	queryDir := filepath.Join(g.OutDir, "sql", "queries")
-	qPath := filepath.Join(queryDir, strings.ToLower(table)+".sql")
-	if _, err := os.Stat(qPath); err != nil {
-		queries := fmt.Sprintf(`-- name: ListAuditLogs :many
-SELECT id, user_id, user_name, table_name, action, row_id, values_json, created_at FROM %s ORDER BY created_at DESC;
-
--- name: CountAuditLogs :one
-SELECT COUNT(*) FROM %s;
-`, table, table)
-		if err := os.WriteFile(qPath, []byte(queries), 0644); err != nil {
-			return err
-		}
-	}
-	return nil
+	return os.WriteFile(path, []byte(ddl), 0644)
 }
 
 // auditTableInMigrations reports whether any .sql file in the out dir's
