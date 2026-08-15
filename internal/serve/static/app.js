@@ -1261,6 +1261,26 @@ async function pageValidate() {
   h2(root, "Validate");
   const btnRow = document.createElement("div");
   btnRow.className = "toolbar";
+  const fix = btn("Fix", "small");
+  fix.addEventListener("click", async () => {
+    let r;
+    try {
+      r = await api("POST", "/api/fix");
+    } catch (e) {
+      toast("fix failed: " + e.message, "error");
+      pageValidate();
+      return;
+    }
+    const remaining = (r.errors || []).length;
+    if (r.changed) {
+      toast("Fixed " + (r.fixed || []).length + " item(s)" + (remaining ? " — " + remaining + " problem(s) remain" : ""), remaining ? "warn" : "ok");
+      try { await reloadConfig(); } catch (e) { /* keep the page */ }
+    } else {
+      toast(remaining ? "Nothing to fix — validation still fails" : "Nothing to fix", remaining ? "warn" : "ok");
+    }
+    pageValidate();
+  });
+  btnRow.appendChild(fix);
   const refresh = btn("Refresh", "small");
   refresh.addEventListener("click", () => pageValidate());
   btnRow.appendChild(refresh);

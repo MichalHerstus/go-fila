@@ -16,9 +16,28 @@ yaga init --db DSN # introspects the DB, writes yaga.yaml with a captured `schem
 yaga edit          # interactive TUI editor for yaga.yaml
 yaga wedit         # web-based editor for yaga.yaml (local HTTP server + embedded SPA)
 yaga generate      # generates admin/ app offline (no sqlc, no DB connection); tailwind non-fatal
+yaga validate      # parses + validates yaga.yaml; `--fix` auto-repairs problems, `--dry-run` previews
 cd admin
 make               # builds the dashboard binary + assets (css + templ + go build)
 ```
+
+`yaga validate --fix` (via `cmdValidate`) auto-repairs known-fixable problems by
+editing the `yaml.v3` node tree directly (the same round-trip the AI path uses —
+config defaults are never injected). The engine lives in `internal/fixer/`
+(`fixer.Apply(data) → (out, fixed, remaining, err)`), shared by the CLI, the
+TUI editor's Validate screen **Fix** button (`cmd/yaga/editor/fix.go`,
+`repairConfig`/`autoFix`, shortcut Ctrl+F) and wedit's `POST /api/fix` + "Fix"
+button (in-memory only — Save persists). The only fixer so far,
+`fixEmptyFilters`, drops an **inert** `list.filter`/`card.filter` block (a
+mapping with empty `label`/`where` and no `params`) that would trip "where is
+required", leaving `filter: null`, non-null scalar forms and any filter with
+real content untouched. Fixes loop and revalidate until clean or no fixer
+progresses; whenever at least one fix applies, the repair is persisted even if
+unfixable errors remain (partial repair — the CLI prints the fixed paths + the
+remaining errors and exits 1). `--fix` saves the untouched original to
+`<config>.bak` before writing; `--dry-run` runs the same passes without writing
+anything (no backup). Unparseable YAML is a fatal error and never touches the
+file.
 
 D11: the DB is the sole schema source. `init` without `--db` is an error (no
 scaffold/`--demo`); the introspected schema is captured into the YAML `schema:`
@@ -92,7 +111,9 @@ go mod tidy && go build -o admin .
 
 ### Web editor (`wedit`, E4)
 
-`yaga wedit` starts a local HTTP server (default `:9090`, `--port`/`--open`; `--config` comes from the shared global flags — `-p` is NOT available because `parseGlobalFlags` maps it to `--admin-password`) with an embedded vanilla-JS SPA. Package `internal/serve/`: `Server` holds in-memory `*types.Config` + `configPath` + `sync.RWMutex` + `pendingSQL map[string]string`; routes are Go 1.22+ `http.ServeMux` method patterns (no chi). Entry point `cmd/yaga/wedit.go` (`cmdWedit` → `parseWeditFlags(os.Args[2:])` → `parser.ParseFile` → `serve.New(...).Start()`; graceful shutdown via `signal.NotifyContext`). Endpoints: `GET/PUT /api/config`, `GET /api/validate`, `POST /api/save`, `GET /api/analyze`, `GET /api/queries/{name}` / `PUT /api/queries` (staged rewrites via `schema.RewriteQueryBody`, flushed by save), `GET/PUT /api/raw`, `GET /static/*`, `GET /`. **Preview endpoints:** `GET /preview?view=page|resource&page=&resource=&theme=auto|light|dark` renders the dashboard mock (see below), `GET /preview/styles.css` + `GET /preview/chart.js` serve the generator's embedded assets.
+`yaga wedit` starts a local HTTP server (default `:9090`, `--port`/`--open`; `--config` comes from the shared global flags — `-p` is NOT available because `parseGlobalFlags` maps it to `--admin-password`) with an embedded vanilla-JS SPA. Package `internal/serve/`: `Server` holds in-memory `*types.Config` + `configPath` + `sync.RWMutex` + `pendingSQL map[string]string`; routes are Go 1.22+ `http.ServeMux` method patterns (no chi). Entry point `cmd/yaga/wedit.go` (`cmdWedit` → `parseWeditFlags(os.Args[2:])` → `parser.ParseFile` → `serve.New(...).Start()`; graceful shutdown via `signal.NotifyContext`). Endpoints: `GET/PUT /api/config`, `GET /api/validate`, `POST /api/fix` (auto-repair, replaces the in-memory config with the fixes applied — no disk write), `POST /api/save`, `GET /api/analyze`, `GET /api/queries/{name}` / `PUT /api/queries` (staged rewrites via `schema.RewriteQueryBody`, flushed by save), `GET/PUT /api/raw`, `GET /static/*`, `GET /`. **MCP (E5):** `POST /mcp` + `GET /mcp` serve a Model Context Protocol **Streamable HTTP** endpoint (JSON-RPC 2.0, synchronous `application/json` responses) so AI agents can edit the in-memory config through structured tools — opencode: `{ "mcp": { "yaga": { "type": "remote", "url": "http://localhost:9090/mcp" } } }`. **Preview endpoints:** `GET /preview?view=page|resource&page=&resource=&theme=auto|light|dark` renders the dashboard mock (see below), `GET /preview/styles.css` + `GET /preview/chart.js` serve the generator's embedded assets.
+
+**MCP over wedit (E5):** MCP lives in `internal/mcp/` — a transport-agnostic `Server` (`New(State)`, JSON-RPC 2.0: `initialize`/`ping`/`tools/list`+`call`/`resources/list`+`read`/`prompts/list`) plus `path.go` (case-insensitive `nav.go`-style path resolution on the yaml.Node tree, get/set/add/remove + merge helpers, `#idx`/identity-key/fixed and null-placeholder replacement) and `tools.go` (full toolset: `validate`, `save`, `open`, `analyze`, `get_config`, `get_value`, `list_resources`, `list_navigation`, `set_value`, `merge_yaml_fragment`, `add_resource`/`remove_resource`, `add_column`, `add_field`, `add_nav_item`/`remove_nav_item`). The serve package mounts it (`serve.go` routes, `serve/mcp.go` `serverMCPState`) via a narrow `State` interface (Config/Parse/Commit/Save/ReadConfigFile/Report/Analyze) wired to `s.cfg`/`s.pendingSQL`/`configFromYAML`/`findingsOf`/`analyze`. Mutating tools edit the derived yaml.Node tree and go through `commitOrError` (Parse + ValidateAll → Commit), so an invalid edit is `isError` and never touches the in-memory config (mirrors `PUT /api/config` 422); `save` runs the health check first and writes the previous disk file to `<config>.bak` before `saveToDisk()`. The SPA and MCP share the single in-memory config — agent edits appear on the browser's next `/api/config`. Tests: `internal/mcp/mcp_test.go` (stub State, per-tool shape) + `internal/serve/mcp_test.go` (httptest opencode flow: initialize → tools/list → set_value → validate → save → disk + .bak).
 
 **Config↔JSON bridge**: the types have only YAML tags, so `configTree` = `yaml.Marshal(cfg)` → generic tree → JSON, and `configFromJSON` reverses it (JSON → tree → YAML → `types.Config` → `parser.ValidateAll`). JSON field names match the YAML names the SPA renders/submits; numbers (`per_page: 20`), `-created_at` strings and nulls round-trip. Invalid JSON/YAML → 422 with `{errors, warnings}` and the in-memory config stays untouched. `analyze()` (handlers.go) reads the `sql/queries` + `sql/migrations` dirs (the **kept** Queries tab — it is not the schema-block Validate check) via `schema.ParseSchema` (**explicit paths, NOT globs** — callers must `filepath.Glob(filepath.Join(s.schemaDir(cfg), "*.sql"))` first), `schema.ParseQueries`, `schema.CollectReferences`; `sqlBase`/`queriesDir`/`schemaDir` take the captured `*types.Config` (they resolve relative to it, so no extra locking). All JSON list fields are initialized to `[]` (never nil) so the SPA always sees arrays, not `null`.
 
@@ -549,6 +570,7 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 | `cmd/yaga/wedit.go` | `wedit` — entry point for the web-based config editor (E4) |
 | `cmd/yaga/editor/` | tview TUI editor: 3-pane shell, section editors, sync + validate + preview screens (18 files, see `edit` above) |
 | `internal/serve/` | Web editor (E4): REST API + YAML↔JSON bridge + `static/` embedded SPA (see `wedit` above) |
+| `internal/mcp/` | MCP server over wedit (E5): JSON-RPC 2.0 dispatch, toolset, yaml.Node path helpers (mounted at `POST /mcp`, see `wedit` above) |
 | `internal/types/` | YAML-tagged Go structs for config schema (7 files: config.go, panel.go, resource.go, field.go, hook.go, procedure.go, schema.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
 | `internal/generator/` | Code generation pipeline (see above; `assets/` holds the embedded Chart.js 4.4.1 bundle + pre-built `styles.css`) |

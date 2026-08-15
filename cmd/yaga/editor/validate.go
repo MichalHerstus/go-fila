@@ -268,6 +268,9 @@ func (e *Editor) validatePage() tview.Primitive {
 	buttons.SetBorder(false)
 	buttons.SetButtonBackgroundColor(colAccent)
 	buttons.SetButtonTextColor(tcell.ColorWhite)
+	e.addButton(buttons, "Fix", func() {
+		e.autoFix()
+	})
 	e.addButton(buttons, "Refresh", func() {
 		e.refreshPage("Validate", e.validatePage())
 	})

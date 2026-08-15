@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/MichalHerstus/yaga/internal/mcp"
 	"github.com/MichalHerstus/yaga/internal/types"
 )
 
@@ -47,6 +48,7 @@ type Server struct {
 	port int
 	open bool // open the browser automatically after binding
 
+	mcp mcpHandler
 	mux *http.ServeMux
 }
 
@@ -68,6 +70,7 @@ func New(cfg *types.Config, configPath string, opts Options) *Server {
 		open:       opts.OpenBrowser,
 		mux:        http.NewServeMux(),
 	}
+	s.mcp = mcp.New(serverMCPState{s: s})
 	s.routes()
 	return s
 }
@@ -84,6 +87,9 @@ func (s *Server) routes() {
 	mux.HandleFunc("PUT /api/config", s.handleConfigPut)
 	mux.HandleFunc("POST /api/save", s.handleSave)
 	mux.HandleFunc("GET /api/validate", s.handleValidate)
+	mux.HandleFunc("POST /api/fix", s.handleFix)
+	mux.HandleFunc("POST /mcp", s.handleMCPPost)
+	mux.HandleFunc("GET /mcp", s.handleMCPGet)
 	mux.HandleFunc("GET /api/analyze", s.handleAnalyze)
 	mux.HandleFunc("GET /api/queries/{name}", s.handleQueryGet)
 	mux.HandleFunc("PUT /api/queries", s.handleQueryPut)

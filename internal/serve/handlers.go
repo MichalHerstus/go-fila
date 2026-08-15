@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MichalHerstus/yaga/internal/fixer"
 	"github.com/MichalHerstus/yaga/internal/parser"
 	"github.com/MichalHerstus/yaga/internal/schema"
 	"github.com/MichalHerstus/yaga/internal/types"
@@ -123,39 +124,78 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "warnings": warns})
 }
 
+// saveToDisk flushes any staged SQL query-file rewrites and writes the
+// in-memory config to disk. Shared by the SPA save endpoint and the MCP save
+// tool.
+func (s *Server) saveToDisk() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for p, content := range s.pendingSQL {
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			return err
+		}
+	}
+	data, err := yaml.Marshal(s.cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(s.configPath, data, 0644); err != nil {
+		return err
+	}
+	s.pendingSQL = nil
+	return nil
+}
+
 // handleSave writes the in-memory config (and any staged query-file rewrites)
 // to disk. Mirrors the TUI editor's save(): staged SQL files are flushed
 // before the YAML.
 func (s *Server) handleSave(w http.ResponseWriter, r *http.Request) {
+	if err := s.saveToDisk(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+}
+
+// handleFix applies the auto-repair engine (the `validate --fix` logic) to the
+// in-memory config and replaces it with the repaired one; nothing is written to
+// disk until a global Save (POST /api/save). Returns the fixed paths and any
+// unfixable errors/warnings that remain. Partial repairs still apply — like the
+// CLI, fixable problems are fixed even when others cannot be.
+func (s *Server) handleFix(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.cfg
-	pending := make(map[string]string, len(s.pendingSQL))
-	for k, v := range s.pendingSQL {
-		pending[k] = v
-	}
-	path := s.configPath
 	s.mu.RUnlock()
 
-	for p, content := range pending {
-		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
-			return
-		}
-	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
 		return
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
+	out, fixed, remaining, err := fixer.Apply(data)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]interface{}{"ok": false, "error": err.Error(), "fixed": []string{}})
+		return
+	}
+	norm := func(ss []string) []string {
+		if ss == nil {
+			return []string{}
+		}
+		return ss
+	}
+	if len(fixed) == 0 {
+		errs, warns := splitErrors(remaining)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "changed": false, "fixed": []string{}, "errors": norm(errs), "warnings": norm(warns)})
 		return
 	}
 
-	s.mu.Lock()
-	s.pendingSQL = nil
-	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+	newCfg, errs, warns := configFromYAML(out)
+	if newCfg != nil {
+		s.mu.Lock()
+		s.cfg = newCfg
+		s.mu.Unlock()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "changed": true, "fixed": fixed, "errors": norm(errs), "warnings": norm(warns)})
 }
 
 // findingJSON is one row of the /api/validate screen.
@@ -165,28 +205,20 @@ type findingJSON struct {
 	Detail string `json:"detail"`
 }
 
-// handleValidate runs the full health check (structural validation of a YAML
-// copy so defaults are not injected, plus a schema-block reference pass) and
-// returns every finding. Since D11 the captured `schema:` block is the source
+// findingsOf runs the full health check over a config (structural validation of
+// a YAML copy so defaults are not injected, plus a schema-block reference
+// pass) and returns every finding. The captured `schema:` block is the source
 // of truth: a resource's table must exist in it and every referenced column
 // must be a column of that table.
-func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	cfg := s.cfg
-	s.mu.RUnlock()
-
+func (s *Server) findingsOf(cfg *types.Config) []findingJSON {
 	findings := make([]findingJSON, 0)
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
-		findings = append(findings, findingJSON{"error", "yaml.Marshal failed", err.Error()})
-		writeJSON(w, http.StatusOK, map[string]interface{}{"findings": findings})
-		return
+		return append(findings, findingJSON{"error", "yaml.Marshal failed", err.Error()})
 	}
 	var copyCfg types.Config
 	if err := yaml.Unmarshal(data, &copyCfg); err != nil {
-		findings = append(findings, findingJSON{"error", "yaml.Unmarshal failed", err.Error()})
-		writeJSON(w, http.StatusOK, map[string]interface{}{"findings": findings})
-		return
+		return append(findings, findingJSON{"error", "yaml.Unmarshal failed", err.Error()})
 	}
 	for _, verr := range parser.ValidateAll(&copyCfg) {
 		kind := "error"
@@ -195,11 +227,9 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		}
 		findings = append(findings, findingJSON{kind, verr.Error(), ""})
 	}
-
 	if copyCfg.Schema == nil {
 		findings = append(findings, findingJSON{"warning", "no schema block captured (re-run `yaga init --db`)", ""})
-		writeJSON(w, http.StatusOK, map[string]interface{}{"findings": findings})
-		return
+		return findings
 	}
 	refs := schema.CollectReferences(&copyCfg)
 	for _, r := range copyCfg.Resources {
@@ -215,8 +245,15 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	return findings
+}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"findings": findings})
+// handleValidate runs the full health check and returns every finding.
+func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"findings": s.findingsOf(cfg)})
 }
 
 // schemaBlockTable returns the captured `schema:` block entry for a table by

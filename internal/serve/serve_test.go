@@ -465,3 +465,104 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestFixEndpoint checks that POST /api/fix applies the same repairs as
+// `validate --fix` to the in-memory config (no disk write) and reports the
+// unfixable errors that remain.
+func TestFixEndpoint(t *testing.T) {
+	cfg := testConfig()
+	cfg.Resources[0].List.Filter = &types.FilterConfig{}
+	s, _ := setupServer(t, cfg)
+
+	rec, data := get(t, s.Handler(), "GET", "/api/validate", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	found := false
+	for _, f := range data["findings"].([]interface{}) {
+		if strings.Contains(f.(map[string]interface{})["label"].(string), "where is required") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a where-required finding first, got %v", data["findings"])
+	}
+
+	rec, data = get(t, s.Handler(), "POST", "/api/fix", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if data["changed"] != true {
+		t.Fatalf("changed = %v", data["changed"])
+	}
+	fixed := data["fixed"].([]interface{})
+	if len(fixed) != 1 || fixed[0] != "resources/User/list.filter" {
+		t.Fatalf("fixed = %v", fixed)
+	}
+	if errs := data["errors"].([]interface{}); len(errs) != 0 {
+		t.Fatalf("errors = %v", errs)
+	}
+
+	// The in-memory config now validates cleanly.
+	rec, data = get(t, s.Handler(), "GET", "/api/validate", nil)
+	for _, f := range data["findings"].([]interface{}) {
+		if f.(map[string]interface{})["kind"] == "error" {
+			t.Errorf("error finding after fix: %v", f)
+		}
+	}
+}
+
+// TestFixEndpointNoop ensures an already-valid config reports changed=false
+// and leaves the config untouched.
+func TestFixEndpointNoop(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	rec, data := get(t, s.Handler(), "POST", "/api/fix", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if data["changed"] != false {
+		t.Fatalf("changed = %v, want false", data["changed"])
+	}
+	if f := data["fixed"].([]interface{}); len(f) != 0 {
+		t.Fatalf("fixed = %v", f)
+	}
+}
+
+// TestFixEndpointPartialRepair checks an unfixable error survives while the
+// fixable filter is still applied.
+func TestFixEndpointPartialRepair(t *testing.T) {
+	cfg := testConfig()
+	cfg.Resources[0].List.Filter = &types.FilterConfig{}
+	cfg.Resources[0].ImportCSV = true
+	s, _ := setupServer(t, cfg)
+
+	rec, data := get(t, s.Handler(), "POST", "/api/fix", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if data["changed"] != true {
+		t.Fatal("expected changes")
+	}
+	fixed := data["fixed"].([]interface{})
+	if len(fixed) != 1 || fixed[0] != "resources/User/list.filter" {
+		t.Fatalf("fixed = %v", fixed)
+	}
+	if errs := data["errors"].([]interface{}); len(errs) != 1 || !strings.Contains(errs[0].(string), "import_csv") {
+		t.Fatalf("errors = %v", errs)
+	}
+	// After a fix the filter error is gone; only the import_csv error remains.
+	_, data = get(t, s.Handler(), "GET", "/api/validate", nil)
+	found := false
+	for _, f := range data["findings"].([]interface{}) {
+		label := f.(map[string]interface{})["label"].(string)
+		if strings.Contains(label, "where is required") {
+			t.Errorf("filter error should be fixed away: %v", f)
+		}
+		if strings.Contains(label, "import_csv") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("import_csv error should remain, got %v", data["findings"])
+	}
+}

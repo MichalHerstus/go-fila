@@ -92,6 +92,9 @@ Flags:
   --verbose, -v  Enable verbose logging
   --skip-plugins, -s
                  Skip loading declared plugins (generate cannot use them)
+  --fix          Auto-repair known-fixable validation problems (e.g. an inert
+                 list/card filter block) and rewrite the config
+  --dry-run      With validate: show what --fix would apply without writing
   --admin-password, -p PASSWORD
                  Set the initial admin password for --db scaffolding
                  (a random one is generated and printed when omitted)
@@ -185,9 +188,50 @@ func cmdInit() {
 
 // cmdValidate parses and validates the YAML config file, printing whether it
 // is valid. With --verbose it also prints a short summary of the panel, the
-// number of resources, pages and navigation groups.
+// number of resources, pages and navigation groups. With --fix it first
+// auto-repairs known-fixable problems (e.g. an inert list/card filter block)
+// and rewrites the file; --dry-run shows what --fix would apply without
+// writing.
 func cmdValidate() {
 	configPath, _, _, _, _, verbose, _ := parseGlobalFlags()
+	fix, dryRun := wantFixFlags()
+
+	if fix || dryRun {
+		fixed, _, remaining, err := autoFixFile(configPath, dryRun)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Validation failed: %v\n", err)
+			os.Exit(1)
+		}
+		if len(fixed) > 0 {
+			if dryRun {
+				fmt.Println("Dry run — the following changes would be applied:")
+			} else {
+				fmt.Println("Auto-fixed:")
+				fmt.Printf("Backup saved to %s.bak\n", configPath)
+			}
+			for _, f := range fixed {
+				fmt.Printf("  %s\n", f)
+			}
+		}
+		if len(remaining) > 0 {
+			fmt.Fprintln(os.Stderr, "Validation failed:")
+			for _, e := range remaining {
+				fmt.Fprintf(os.Stderr, "  %v\n", e)
+			}
+			os.Exit(1)
+		}
+		fmt.Println("Configuration is valid!")
+		if verbose {
+			cfg, err := parser.ParseFile(configPath)
+			if err == nil {
+				fmt.Printf("  Panel: %s (path: %s)\n", cfg.Panel.Name, cfg.Panel.Path)
+				fmt.Printf("  Resources: %d\n", len(cfg.Resources))
+				fmt.Printf("  Pages: %d\n", len(cfg.Pages))
+				fmt.Printf("  Navigation groups: %d\n", len(cfg.Navigation))
+			}
+		}
+		return
+	}
 
 	cfg, err := parser.ParseFile(configPath)
 	if err != nil {

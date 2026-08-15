@@ -1464,80 +1464,98 @@ editor tests.
 
  ---
 
- ### E5 — `yaga mcp`: MCP server for AI agent config editing
+### E5 — MCP over wedit: AI agent config editing endpoint
 
-**Status: drafted (2026-08-14), not started.** An MCP (Model Context Protocol) server
-that exposes the yaga config and editing operations as structured tools, resources,
-and prompts over JSON-RPC 2.0 (stdio transport). AI agents like Opencode can call
-these tools to read, edit, validate, and save `yaga.yaml` — no third-party API
-calls, no full-config serialization to an LLM.
+**Status: drafted (2026-08-16); supersedes the earlier stdio `yaga mcp` command
+and is planned, not started.** An MCP (Model Context Protocol) server that
+exposes the yaga config and editing operations as structured tools, resources,
+and prompts over JSON-RPC 2.0. Instead of a separate `yaga mcp` subprocess, the
+MCP protocol rides the **existing `yaga wedit` HTTP server as an endpoint**
+(`POST /mcp`, Streamable HTTP transport) — wedit already runs a server and owns
+the in-memory config, so MCP becomes "just another endpoint" sharing that state.
+AI agents (e.g. Opencode) connect with a remote-URL MCP config — no new CLI
+command, no full-config serialization to an LLM.
 
-**Command shape:**
+**Command shape (unchanged — wedit simply gains a route):**
 ```
-yaga mcp                          # loads yaga.yaml, starts stdio MCP server
-yaga mcp --config path/to/other.yaml
+yaga wedit                       # also serves MCP at POST /mcp
+```
+Client-side registration in `opencode.json`:
+```json
+{ "mcp": { "yaga": { "type": "remote", "url": "http://localhost:9090/mcp" } } }
 ```
 
-**Transport:** JSON-RPC 2.0 over stdin/stdout — the standard MCP CLI-server pattern.
-The agent spawns `yaga mcp` as a subprocess and communicates line-delimited JSON.
+**Transport:** MCP **Streamable HTTP** — JSON-RPC 2.0 over `POST /mcp`
+(`Content-Type: application/json`, `Accept: application/json, text/event-stream`).
+All tools are one-shot and synchronous, so the server answers plain
+`application/json` (no SSE streaming, no session bookkeeping emitted). `GET /mcp`
+answers 405 or an SSE 200 for spec compliance. `initialize` /
+`notifications/initialized`, `ping`, `tools/list`, `tools/call`,
+`resources/list`/`read`, `prompts/list`/`get` are implemented. Zero new Go
+dependencies (`encoding/json` is stdlib). **State sharing:** MCP writes go to
+the same in-memory `*types.Config` the SPA edits — agent and browser must not
+race (same as two tabs); the SPA sees agent edits on its next `/api/config`.
 
-**Tool categories:**
+**Layering:**
+
+| File | Purpose |
+|------|---------|
+| `internal/mcp/mcp.go` | `Server` — JSON-RPC 2.0 dispatch, MCP method surface, capabilities (transport-agnostic) |
+| `internal/mcp/tools.go` | all tool handler implementations |
+| `internal/mcp/path.go` | case-insensitive `nav.go`-style path resolution on the yaml.Node tree + get/set/add/remove helpers |
+| `internal/mcp/mcp_test.go` | request→response shape tests for every tool |
+| `internal/serve/serve.go` | +`POST /mcp` +`GET /mcp` routes |
+| `internal/serve/mcp.go` | wires `internal/mcp` to the existing `Server` (`s.cfg`, `s.pendingSQL`, `configFromYAML`, `analyze`, shared `save()`) |
+| `internal/serve/mcp_test.go` | httptest flow: `initialize` → `tools/list` → `set_value` → `validate` → `save` |
+
+`internal/mcp` depends only on a narrow `State` interface (`GetConfig`,
+`SetConfig`, `Save`, `Validate`, `Analyze`); the serve package implements it.
+Node-path helpers for get/set/add/remove reuse the surgical `yaml.v3` round-trip
+pattern from `internal/fixer` and the AI path — edits edit the node tree, then
+`configFromYAML` → `parser.ValidateAll` → `SetConfig` (defaults never injected;
+a mutating tool that would leave the config invalid fails with the validator
+errors and applies nothing, mirroring `PUT /api/config` 422).
+
+**Tool categories (full set for v1):**
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
-| Lifecycle | `open {path}`, `save`, `validate` | Load/switch configs, pre-save check, persist |
-| Read | `get_config`, `get_value {path}`, `list_resources`, `list_navigation` | Targeted queries |
-| Edit (scalar) | `set_value {path, value}` | Single field change |
-| Edit (structural) | `add_resource`, `remove_resource`, `add_column`, `add_field`, `add_nav_item`, `remove_nav_item` | List mutations |
-| Edit (bulk) | `merge_yaml_fragment {yaml}` | AI-generated multi-key edit |
-| Utility | `analyze` | Schema/query sync check |
+| Lifecycle | `validate`, `save`, `open {path}`, `analyze` | pre-save check, persist `yaga.yaml` (+ `.bak`) and flush `pendingSQL`, load/switch the in-memory config, schema/query sync report |
+| Read | `get_config`, `get_value {path}`, `list_resources`, `list_navigation` | targeted queries |
+| Edit (scalar) | `set_value {path, value}` | single field change |
+| Edit (structural) | `add_resource`, `remove_resource`, `add_column`, `add_field`, `add_nav_item`, `remove_nav_item` | list mutations on keyed sequences (`name`/`group`/identity keys) |
+| Edit (bulk) | `merge_yaml_fragment {yaml}` | AI-generated multi-key edit (reuses the AI path's merge semantics) |
 
-**Path resolution** uses the same case-insensitive matching as the TUI editor's
-`nav.go` — `resources/Customer` resolves to the `Customer` resource,
-`navigation/0/items/1` to the second item of the first group. Resource names, group
-names, and item identity keys match via `matchesSeg`/`foldSeg`.
+Structural tool list for v1: `add_resource`, `remove_resource`, `add_column`,
+`add_field`, `add_nav_item`, `remove_nav_item`. `save` writes disk only after
+the config passes validation and backs up the pre-save bytes to the
+`<config>.bak` (like `validate --fix`); mutations are in-memory until then.
+
+**Path resolution** on the yaml.Node tree uses the same case-insensitive matching
+as the TUI editor — `resources/Customer` → the `Customer` resource,
+`navigation/0/items/1` → the second item of the first group, `#<idx>` for
+unnamed/duplicate segments; identity keys for keyed sequences (`name` for
+resources/pages/columns/fields, `group` then `resource`/`page`/`url` for
+navigation items).
 
 **Example agent workflow:**
 ```
-Agent → open {path: "../other/yaga.yaml"}
-     → get_value {path: "panel/name"}             → "My Admin"
-     → set_value {path: "panel/name", value: "CRM"}
-     → validate                                    → "OK"
-     → save                                        → "Written to ../other/yaga.yaml"
+Agent → get_value {path: "panel/name"}                        → "My Admin"
+     → set_value {path: "panel/brand/logo", value: "newlogo.jpg"}
+     → add_column {resource: "User", column: {name: "created_at", type: "datetime"}}
+     → validate                                               → "OK"
+     → save                                                   → "Written (backup: yaga.yaml.bak)"
 ```
 
-**Agent prompts mapped to tool calls:**
+**Dependencies:** zero new (stdlib `encoding/json`, `net/http`). **Security:**
+wedit already binds `:9090` on all interfaces and `POST /api/save` already writes
+files, so `/mcp` adds no new exposure class; optionally default to `127.0.0.1` in
+a follow-up.
 
-| "change dashboard icon to newlogo.jpg" | `set_value {path: "panel/brand/logo", value: "newlogo.jpg"}` |
-| "List available resources" | `list_resources` → `[{name, label, icon, table}]` |
-| "show me columns in list view for Customers" | `get_value {path: "resources/Customer/list/columns"}` |
-| "remove topic Order List from navigation" | `get_value {path: "navigation"}` → find → `remove_nav_item {group: "Sales", label: "Order List"}` |
-
-**Refactoring needed** — extract `mergeYAML`, `changedPaths`, `extractYAMLBlock` and
-their helpers from `cmd/yaga/ai.go` (unexported `package main`) into
-`internal/mcp/merge.go`. These are pure functions (zero I/O) and `ai.go` already has
-test coverage for them.
-
-**New files:**
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `cmd/yaga/mcp.go` | ~40 | Entry point, `--config` flag, `parser.ParseFile`, start server |
-| `internal/mcp/mcp.go` | ~150 | `Server` struct, JSON-RPC 2.0 dispatch over stdio, capabilities |
-| `internal/mcp/tools.go` | ~350 | 15 tool handler implementations |
-| `internal/mcp/resources.go` | ~80 | Resource URI handlers (`yaga://config`, `yaga://resources/{name}`, etc.) |
-| `internal/mcp/merge.go` | ~350 | Extracted from `ai.go`: `mergeYAML`, `changedPaths`, `extractYAMLBlock` |
-| `internal/mcp/prompts.go` | ~50 | Prompt templates (e.g. `validate_and_fix`) |
-| `cmd/yaga/main.go` | +3 | `case "mcp":` + usage line |
-| `cmd/yaga/ai.go` | `-0` | Stripped merge/diff/changedPaths; imports `internal/mcp` |
-| **Total new** | **~1,020** | |
-
-**Dependencies:** zero new. `encoding/json` is stdlib. JSON-RPC 2.0 is a trivial
-protocol (`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_config","arguments":{}}}`).
-
-**Tests / exit criteria:** `internal/mcp/mcp_test.go` — unit tests calling each tool
-handler with JSON-RPC request structs, asserting response shape; `merge_test.go` —
-carried over from existing `ai_test.go` merge/diff tests. Integration:
-`go test ./internal/mcp/...` with a real config file. Existing `editAI` integration
-tests in `ai_test.go` stay green (same functions, imported package).
-`go vet ./...` / `go build ./...` / `go test ./...` all clean.
+**Tests / exit criteria:** `internal/mcp/mcp_test.go` — JSON-RPC shape tests for
+`initialize`/`tools/list`/`tools/call` and every tool (get/set path round-trip,
+structural add/remove, invalid edit returns `isError` + leaves config untouched,
+`merge_yaml_fragment`); `internal/serve/mcp_test.go` — httptest of the full
+opencode flow against a temp `yaga.yaml` (initialize → tools/list → set_value →
+validate → save → assert disk + `.bak`). `go vet ./...` / `go build ./...` /
+`go test ./...` all clean; existing wedit/`--fix` suites stay green.
