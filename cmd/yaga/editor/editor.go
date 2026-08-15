@@ -112,7 +112,6 @@ func (e *Editor) navItem(label string, page string, build func() tview.Primitive
 func (e *Editor) buildNav() {
 	e.navItem("Panel", "Panel", e.panelPage)
 	e.navItem("Connections", "Connections", e.connectionsPage)
-	e.navItem("SQLC", "SQLC", e.sqlcPage)
 	e.navItem("Auth", "Auth", e.authPage)
 	e.navItem("Audit", "Audit", e.auditPage)
 	e.navItem("Procedures", "Procedures", e.proceduresPage)
@@ -122,7 +121,6 @@ func (e *Editor) buildNav() {
 	e.navItem("Pages", "Pages", e.pagesPage)
 	e.nav.AddItem("", "", 0, nil)
 	e.navItem("Validate (Ctrl+V)", "Validate", e.validatePage)
-	e.navItem("Sync SQL & YAML", "Sync", e.syncPage)
 	e.navItem("Preview", "Preview", e.previewPage)
 	e.nav.AddItem("", "", 0, nil)
 	e.navItem("Save (Ctrl+S)", "save", nil)

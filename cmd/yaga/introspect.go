@@ -391,6 +391,13 @@ func introspectMSSQL(db *sql.DB) ([]TableInfo, error) {
 	return tables, nil
 }
 
+// sqliteIdent double-quotes an identifier for use inside a PRAGMA argument,
+// escaping embedded double quotes (SQLite doubles them inside "" identifiers).
+// Required because a table may be named with a SQL keyword (e.g. "Order").
+func sqliteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
 // introspectSQLite queries sqlite_master and PRAGMA statements to discover
 // tables and views, their columns, primary keys and foreign keys in a SQLite
 // database. Views carry no primary keys or foreign keys (both discovered only
@@ -420,7 +427,7 @@ func introspectSQLite(db *sql.DB) ([]TableInfo, error) {
 	for _, name := range tableNames {
 		ti := TableInfo{Name: name, IsView: tableViews[name]}
 
-		colRows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, name))
+		colRows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, sqliteIdent(name)))
 		if err != nil {
 			return nil, fmt.Errorf("listing columns for %s: %w", name, err)
 		}
@@ -447,7 +454,7 @@ func introspectSQLite(db *sql.DB) ([]TableInfo, error) {
 		}
 
 		if !ti.IsView {
-			fkRows, err := db.Query(fmt.Sprintf(`PRAGMA foreign_key_list(%s)`, name))
+			fkRows, err := db.Query(fmt.Sprintf(`PRAGMA foreign_key_list(%s)`, sqliteIdent(name)))
 			if err != nil {
 				return nil, fmt.Errorf("listing FKs for %s: %w", name, err)
 			}

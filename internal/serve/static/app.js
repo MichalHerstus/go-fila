@@ -89,6 +89,25 @@ function clearDirty() {
   $("#dirty-indicator").classList.add("hidden");
 }
 
+/* ---------- editor theme (light/dark) ---------- */
+
+function applyEditorTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem("wedit-theme"); } catch (e) { /* ignore */ }
+  const dark = saved
+    ? saved === "dark"
+    : window.matchMedia("(prefers-color-scheme: dark)").matches;
+  document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+}
+
+function toggleEditorTheme() {
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
+  try { localStorage.setItem("wedit-theme", dark ? "light" : "dark"); } catch (e) { /* ignore */ }
+}
+
+$("#theme-toggle").addEventListener("click", toggleEditorTheme);
+
 /* ---------- modal helpers ---------- */
 
 let modalResolve = null;
@@ -428,14 +447,13 @@ function collectionEditor(container, items, schema, opts = {}) {
 const TABS = [
   ["panel", "Panel"],
   ["connections", "Connections"],
-  ["sqlc", "SQLC"],
   ["auth", "Auth"],
   ["navigation", "Navigation"],
   ["resources", "Resources"],
   ["pages", "Pages"],
   ["queries", "Queries"],
   ["validate", "Validate"],
-  ["sync", "Sync"],
+  ["preview", "Preview"],
   ["raw", "Raw YAML"],
 ];
 
@@ -469,14 +487,13 @@ function renderPage() {
   const fns = {
     panel: pagePanel,
     connections: pageConnections,
-    sqlc: pageSQLC,
     auth: pageAuth,
     navigation: pageNavigation,
     resources: pageResources,
     pages: pagePages,
     queries: pageQueries,
     validate: pageValidate,
-    sync: pageSync,
+    preview: pagePreview,
     raw: pageRaw,
   };
   (fns[state.page] || pagePanel)();
@@ -555,20 +572,6 @@ function pageConnections() {
   root.appendChild(add);
 }
 
-/* ---------- page: SQLC ---------- */
-
-function pageSQLC() {
-  const s = state.config.sqlc;
-  const root = content();
-  h2(root, "SQLC");
-  const card = cardEl(root);
-  const g = gridWrap(card);
-  textField(g, "Config file", s, "config");
-  textField(g, "Queries dir", s, "queries_dir");
-  textField(g, "Schema dir", s, "schema_dir");
-  textField(g, "Output package", s, "output_pkg");
-}
-
 /* ---------- page: Auth ---------- */
 
 function pageAuth() {
@@ -598,70 +601,237 @@ function pageAuth() {
   root.appendChild(hint);
 }
 
-/* ---------- page: Navigation ---------- */
+/* ---------- page: Navigation (tree) ---------- */
 
-const NAV_ITEM_SCHEMA = [
-  { key: "type", label: "Type", type: "select", options: ["resource", "page", "url"] },
-  { key: "resource", label: "Resource" },
-  { key: "page", label: "Page" },
-  { key: "url", label: "URL" },
-  { key: "label", label: "Label" },
-  { key: "opens_in_new_tab", label: "New tab", type: "bool" },
-];
+const NAV_ITEM_TYPES = ["resource", "page", "url"];
+
+/* groups whose items are collapsed; defaults to open */
+const navCollapsed = new Set();
+
+function navItemTarget(item) {
+  if (item.resource) return "/" + String(item.resource).toLowerCase();
+  if (item.page) return item.page;
+  return item.url || "";
+}
+
+function navItemMissing(c, item) {
+  if (item.resource) {
+    const name = String(item.resource).toLowerCase();
+    return !(c.resources || []).some((r) => String(r.name || "").toLowerCase() === name);
+  }
+  if (item.page) {
+    return !(c.pages || []).some((p) => p.name === item.page);
+  }
+  return false;
+}
+
+function navItemModal(c, item, onSave) {
+  const typeSel = document.createElement("select");
+  for (const t of NAV_ITEM_TYPES) {
+    const o = document.createElement("option");
+    o.value = t;
+    o.textContent = t;
+    typeSel.appendChild(o);
+  }
+  const cur = item.resource ? "resource" : item.page ? "page" : item.url ? "url" : (item.type || "resource");
+  typeSel.value = NAV_ITEM_TYPES.includes(cur) ? cur : "resource";
+
+  function field(label, initial, hint) {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    const l = document.createElement("label");
+    l.textContent = label;
+    const i = document.createElement("input");
+    i.type = "text";
+    i.value = initial || "";
+    wrap.append(l, i);
+    if (hint) {
+      const h = document.createElement("div");
+      h.className = "mono";
+      h.textContent = hint;
+      wrap.appendChild(h);
+    }
+    return wrap;
+  }
+
+  openModal("Edit nav item", (body, ok, cancel, close) => {
+    const typeWrap = document.createElement("div");
+    typeWrap.className = "field";
+    const typeLabel = document.createElement("label");
+    typeLabel.textContent = "Type";
+    const typeHint = document.createElement("div");
+    typeHint.className = "mono";
+    typeHint.textContent = "resource / page / url";
+    typeWrap.append(typeLabel, typeSel, typeHint);
+    body.appendChild(typeWrap);
+    const resourceIn = field("Resource (PascalCase)", item.resource, "must match a resource name");
+    const pageIn = field("Page", item.page, "must match a page name");
+    const urlIn = field("URL", item.url, "external link");
+    const labelIn = field("Label (optional override)", item.label, "falls back to the target name");
+    const newTab = document.createElement("label");
+    newTab.className = "checkbox-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!item.opens_in_new_tab;
+    newTab.append(cb, document.createTextNode("Open in new tab"));
+    body.append(resourceIn, pageIn, urlIn, labelIn, newTab);
+
+    const err = document.createElement("div");
+    err.style.color = "var(--red)";
+    body.appendChild(err);
+
+    const sync = () => {
+      resourceIn.style.display = typeSel.value === "resource" ? "" : "none";
+      pageIn.style.display = typeSel.value === "page" ? "" : "none";
+      urlIn.style.display = typeSel.value === "url" ? "" : "none";
+    };
+    typeSel.addEventListener("change", sync);
+    sync();
+
+    ok.addEventListener("click", () => {
+      for (const k of Object.keys(item)) delete item[k];
+      item.type = typeSel.value;
+      if (typeSel.value === "resource") item.resource = resourceIn.value.trim();
+      else if (typeSel.value === "page") item.page = pageIn.value.trim();
+      else item.url = urlIn.value.trim();
+      if (labelIn.value.trim()) item.label = labelIn.value.trim();
+      if (cb.checked) item.opens_in_new_tab = true;
+      if (typeSel.value === "url" && !item.url) { err.textContent = "URL is required for url items"; return; }
+      if ((typeSel.value === "resource" && !item.resource) || (typeSel.value === "page" && !item.page)) {
+        err.textContent = "Target is required"; return;
+      }
+      close();
+      onSave();
+    });
+    cancel.textContent = "Cancel";
+  });
+}
 
 function pageNavigation() {
   const c = state.config;
   if (!Array.isArray(c.navigation)) c.navigation = [];
   const root = content();
   h2(root, "Navigation");
+  const hint = document.createElement("p");
+  hint.className = "mono";
+  hint.textContent = "Groups sort by their sort value. Click a group to expand/collapse; hover a row for actions.";
+  root.appendChild(hint);
+
+  const list = document.createElement("ul");
+  list.className = "tree";
+  root.appendChild(list);
+
+  const rerender = () => pageNavigation();
+
   c.navigation.forEach((group, gi) => {
-    const card = cardEl(root);
-    const head = document.createElement("div");
-    head.className = "toolbar";
-    const t = document.createElement("h3");
-    t.style.margin = "0";
-    t.textContent = group.group || "(unnamed)";
-    head.appendChild(t);
-    const spacer = document.createElement("div");
-    spacer.className = "spacer";
-    head.appendChild(spacer);
-    const del = btn("Delete group", "danger small");
-    del.addEventListener("click", () => confirmModal(`Delete navigation group "${group.group}"?`, () => {
-      c.navigation.splice(gi, 1);
-      markDirty();
-      pageNavigation();
-    }));
-    head.appendChild(del);
-    card.appendChild(head);
-
-    const g = gridWrap(card);
-    textField(g, "Group name", group, "group");
-    textField(g, "Icon", group, "icon");
-    numField(g, "Sort", group, "sort");
-
     if (!Array.isArray(group.items)) group.items = [];
-    const itemsHead = document.createElement("div");
-    itemsHead.className = "toolbar";
-    const it = document.createElement("h3");
-    it.style.margin = "0";
-    it.textContent = "Items";
-    itemsHead.appendChild(it);
-    const addIt = btn("+ Add item", "small");
-    addIt.addEventListener("click", () => {
+
+    const li = document.createElement("li");
+    li.className = "tree-group" + (navCollapsed.has(gi) ? " collapsed" : "");
+
+    const head = document.createElement("div");
+    head.className = "tree-group-head";
+    head.addEventListener("click", () => {
+      if (navCollapsed.has(gi)) navCollapsed.delete(gi);
+      else navCollapsed.add(gi);
+      li.classList.toggle("collapsed");
+    });
+
+    const chev = document.createElement("span");
+    chev.className = "chevron";
+    chev.textContent = "▾";
+
+    const title = document.createElement("span");
+    title.className = "tree-group-title";
+    title.textContent = group.group || "(unnamed)";
+
+    const meta = document.createElement("span");
+    meta.className = "tree-group-meta";
+    meta.textContent = (group.items || []).length + " item" + (group.items.length === 1 ? "" : "s") +
+      (group.icon ? "  ·  " + group.icon : "");
+
+    const actions = document.createElement("span");
+    actions.className = "tree-actions";
+    actions.addEventListener("click", (e) => e.stopPropagation());
+    const editG = mkButton("Edit", () => {
+      openModal("Edit group: " + (group.group || "(unnamed)"), (body, ok, cancel, close) => {
+        const g = gridWrap(cardEl(body));
+        textField(g, "Group name", group, "group");
+        textField(g, "Icon", group, "icon");
+        numField(g, "Sort", group, "sort");
+        ok.addEventListener("click", () => { close(); markDirty(); rerender(); });
+        cancel.textContent = "Cancel";
+      });
+    });
+    const addI = mkButton("+ Item", () => {
       group.items.push({ type: "resource" });
       markDirty();
-      pageNavigation();
+      rerender();
     });
-    itemsHead.appendChild(addIt);
-    card.appendChild(itemsHead);
-    collectionEditor(card, group.items, NAV_ITEM_SCHEMA, { jsonTitle: "Edit nav item (JSON)" });
+    const delG = mkButton("✕", () => confirmModal(`Delete navigation group "${group.group}"?`, () => {
+      c.navigation.splice(gi, 1);
+      markDirty();
+      rerender();
+    }));
+    actions.append(editG, addI, delG);
+
+    head.append(chev, title, meta, actions);
+    li.appendChild(head);
+
+    const children = document.createElement("ul");
+    children.className = "tree-children";
+    group.items.forEach((item, ii) => {
+      const itemLi = document.createElement("li");
+      itemLi.className = "tree-item";
+
+      const badge = document.createElement("span");
+      badge.className = "type-badge";
+      badge.textContent = item.type || (item.resource ? "resource" : item.page ? "page" : "url");
+
+      const label = document.createElement("span");
+      label.className = "tree-label";
+      label.textContent = item.label || item.resource || item.page || item.url || "(unnamed)";
+
+      const metaEl = document.createElement("span");
+      metaEl.className = "tree-meta";
+      metaEl.textContent = navItemTarget(item);
+
+      const itActions = document.createElement("span");
+      itActions.className = "tree-actions";
+      const editI = mkButton("Edit", () => navItemModal(c, item, () => { markDirty(); rerender(); }));
+      const delI = mkButton("✕", () => confirmModal(`Delete nav item "${label.textContent}"?`, () => {
+        group.items.splice(ii, 1);
+        markDirty();
+        rerender();
+      }));
+      itActions.append(editI, delI);
+
+      itemLi.append(badge, label, metaEl);
+      if (item.opens_in_new_tab) {
+        const dot = document.createElement("span");
+        dot.className = "new-tab-dot";
+        dot.title = "opens in new tab";
+        itemLi.appendChild(dot);
+      }
+      if (navItemMissing(c, item)) {
+        const m = document.createElement("span");
+        m.className = "missing";
+        m.textContent = "missing";
+        m.title = "references a resource/page that does not exist in this config";
+        itemLi.appendChild(m);
+      }
+      itemLi.appendChild(itActions);
+      children.appendChild(itemLi);
+    });
+    li.appendChild(children);
+    list.appendChild(li);
   });
 
   const add = btn("+ Add group", "primary");
   add.addEventListener("click", () => inputModal("Add navigation group", "Group name", "", (name) => {
     c.navigation.push({ group: name, items: [] });
     markDirty();
-    pageNavigation();
+    rerender();
   }));
   root.appendChild(add);
 }
@@ -1021,7 +1191,7 @@ function renderPageEditor(name) {
 
 async function pageQueries() {
   const root = content();
-  h2(root, "SQLC Queries");
+  h2(root, "SQL Queries");
   const hint = document.createElement("p");
   hint.className = "mono";
   hint.textContent = "Click a query to edit its SQL body. Changes are staged and flushed on Save.";
@@ -1127,94 +1297,120 @@ async function pageValidate() {
   root.appendChild(ul);
 }
 
-/* ---------- page: Sync ---------- */
+/* ---------- page: Preview ---------- */
 
-async function pageSync() {
+state.preview = { view: "page", target: "", theme: "auto" };
+
+function pagePreview() {
+  const c = state.config;
   const root = content();
-  h2(root, "SQL ↔ YAML Sync");
-  const btnRow = document.createElement("div");
-  btnRow.className = "toolbar";
-  const gen = btn("Generate missing queries", "primary");
-  gen.addEventListener("click", async () => {
+  h2(root, "Preview");
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "preview-toolbar";
+
+  const errDiv = document.createElement("div");
+  errDiv.className = "preview-error hidden";
+
+  const iframe = document.createElement("iframe");
+  iframe.className = "preview-frame";
+  iframe.title = "Dashboard preview";
+
+  function targets() {
+    if (state.preview.view === "resource") return (c.resources || []).map((r) => r.name);
+    return (c.pages || []).map((p) => p.name);
+  }
+  function pickTarget() {
+    const ts = targets();
+    if (!ts.includes(state.preview.target)) state.preview.target = ts[0] || "";
+  }
+  pickTarget();
+
+  function loadPreview() {
+    const q = new URLSearchParams({ view: state.preview.view, theme: state.preview.theme });
+    if (state.preview.target) q.set(state.preview.view === "resource" ? "resource" : "page", state.preview.target);
+    iframe.src = "/preview?" + q.toString();
+  }
+
+  async function syncConfigThenLoad() {
+    errDiv.classList.add("hidden");
     try {
-      const res = await api("POST", "/api/generate-queries");
-      if (res.written && res.written.length) toast("Generated " + res.written.length + " query file(s): " + res.written.join(", "), "ok");
-      else toast("Nothing to generate: all queries present", "ok");
-      pageSync();
+      await api("PUT", "/api/config", state.config);
     } catch (e) {
-      toast("generate failed: " + e.message, "error");
+      const errors = (e.data && e.data.errors) || [e.message];
+      errDiv.textContent = "Config is currently invalid; preview shows the last saved config:\n" + errors.join("\n");
+      errDiv.classList.remove("hidden");
     }
+    loadPreview();
+  }
+
+  const viewSel = document.createElement("select");
+  viewSel.id = "preview-view";
+  for (const [v, l] of [["page", "Page"], ["resource", "Resource"]]) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = l;
+    viewSel.appendChild(o);
+  }
+  viewSel.value = state.preview.view;
+
+  const targetSel = document.createElement("select");
+  targetSel.id = "preview-target";
+  function fillTargets() {
+    targetSel.innerHTML = "";
+    const ts = targets();
+    if (ts.length === 0) {
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = state.preview.view === "resource" ? "(no resources)" : "(no pages)";
+      targetSel.appendChild(o);
+    }
+    for (const t of ts) {
+      const o = document.createElement("option");
+      o.value = t;
+      o.textContent = t;
+      targetSel.appendChild(o);
+    }
+    if (ts.includes(state.preview.target)) targetSel.value = state.preview.target;
+  }
+  fillTargets();
+
+  const themeSel = document.createElement("select");
+  themeSel.id = "preview-theme";
+  for (const [v, l] of [["auto", "Auto"], ["light", "Light"], ["dark", "Dark"]]) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = l;
+    themeSel.appendChild(o);
+  }
+  themeSel.value = state.preview.theme;
+
+  const refresh = btn("Refresh", "primary");
+  refresh.addEventListener("click", syncConfigThenLoad);
+
+  viewSel.addEventListener("change", () => {
+    state.preview.view = viewSel.value;
+    state.preview.target = targets()[0] || "";
+    fillTargets();
+    syncConfigThenLoad();
   });
-  const refresh = btn("Refresh", "small");
-  refresh.addEventListener("click", () => pageSync());
-  btnRow.append(gen, refresh);
-  root.appendChild(btnRow);
+  targetSel.addEventListener("change", () => {
+    state.preview.target = targetSel.value;
+    syncConfigThenLoad();
+  });
+  themeSel.addEventListener("change", () => {
+    state.preview.theme = themeSel.value;
+    loadPreview();
+  });
 
-  let rep;
-  try {
-    rep = await api("GET", "/api/analyze");
-  } catch (e) {
-    toast("analyze failed: " + e.message, "error");
-    return;
-  }
-  state.analyze = rep;
-  if (rep.err) {
-    const p = document.createElement("p");
-    p.textContent = rep.err;
-    root.appendChild(p);
-    return;
-  }
-  const ul = document.createElement("ul");
-  ul.className = "findings";
-  const add = (kind, text) => {
-    const li = document.createElement("li");
-    li.className = kind;
-    li.textContent = text;
-    ul.appendChild(li);
-  };
-  if (rep.missing_queries.length) add("error", "missing queries: " + rep.missing_queries.length);
-  if (rep.missing_tables.length) add("error", "missing tables: " + rep.missing_tables.join(", "));
-  if (rep.missing_columns.length) add("warning", "missing columns: " + rep.missing_columns.length);
-  if (rep.fk_targets.length) add("warning", "FK target List queries missing: " + rep.fk_targets.length);
-  if (rep.missing_queries.length === 0 && rep.missing_tables.length === 0 && rep.missing_columns.length === 0 && rep.fk_targets.length === 0) {
-    add("good", "Schema, queries and YAML references are in sync.");
-  }
-  root.appendChild(ul);
+  toolbar.append(viewSel, targetSel, themeSel);
+  const spacer = document.createElement("div");
+  spacer.className = "spacer";
+  toolbar.appendChild(spacer);
+  toolbar.appendChild(refresh);
 
-  const grid = document.createElement("div");
-  grid.className = "grid";
-  const tabCard = cardEl(grid);
-  const qCard = cardEl(grid);
-  root.appendChild(grid);
-
-  h3(tabCard, "Schema tables (" + rep.tables.length + ")");
-  const tl = document.createElement("ul");
-  tl.className = "code-list";
-  for (const t of rep.tables) {
-    const li = document.createElement("li");
-    li.textContent = t.name;
-    const c = document.createElement("span");
-    c.className = "origin";
-    c.textContent = t.cols + " cols";
-    li.appendChild(c);
-    tl.appendChild(li);
-  }
-  tabCard.appendChild(tl);
-
-  h3(qCard, "Query definitions (" + rep.queries.length + ")");
-  const ql = document.createElement("ul");
-  ql.className = "code-list";
-  for (const q of rep.queries) {
-    const li = document.createElement("li");
-    const a = document.createElement("a");
-    a.href = "#";
-    a.textContent = q.name;
-    a.style.color = "var(--accent)";
-    a.addEventListener("click", (ev) => { ev.preventDefault(); queryEditor(q.name); });
-    li.appendChild(a);
-    ql.appendChild(li);
-  }
-  qCard.appendChild(ql);
+  root.append(toolbar, errDiv, iframe);
+  syncConfigThenLoad();
 }
 
 /* ---------- page: Raw YAML ---------- */
@@ -1298,6 +1494,7 @@ async function reloadConfig() {
 /* ---------- init ---------- */
 
 async function init() {
+  applyEditorTheme();
   try {
     const data = await api("GET", "/api/config");
     state.config = data.config;

@@ -71,7 +71,6 @@ func TestResolvePath(t *testing.T) {
 	check("Panel/Theme", "Panel/Theme")
 	check("Connections/default", "Connections/default")
 	check("Auth/Login Fields", "Auth/Login Fields")
-	check("SQLC", "SQLC")
 	check("Navigation", "Navigation")
 	check("Navigation/Sales/Items/User", "Navigation/Sales/Items/User")
 	check("Resources", "Resources")
@@ -97,12 +96,11 @@ func TestResolvePath(t *testing.T) {
 	check("Pages/Dashboard/Widgets/Users", "Pages/Dashboard/Widgets/Users")
 	check("Pages/Dashboard/Widgets/Grid/Sub-widgets/A", "Pages/Dashboard/Widgets/Grid/Sub-widgets/A")
 	check("Validate", "Validate")
-	check("Sync", "Sync")
 	check("Preview", "Preview")
 	check("Preview/Page/Dashboard", "Preview/Page/Dashboard")
 	check("Preview/Resource/User", "Preview/Resource/User")
 
-	for _, bad := range []string{"Bogus", "Resources/Nope", "Resources/User/Nope", "Panel/Sub", "Pages/Dashboard/Nope", "Preview/Page/Nope"} {
+	for _, bad := range []string{"Bogus", "Sync", "Resources/Nope", "Resources/User/Nope", "Panel/Sub", "Pages/Dashboard/Nope", "Preview/Page/Nope"} {
 		if _, err := e.resolvePath(bad); err == nil {
 			t.Fatalf("resolvePath(%q) should fail", bad)
 		}
@@ -168,7 +166,7 @@ func TestCompletePath(t *testing.T) {
 	check("Resources/U", "Resources/User", []string{"User"})
 	check("Resources/User/List/Col", "Resources/User/List/Columns", []string{"Columns"})
 	check("Resources/User/Card/Fi", "Resources/User/Card/Fields", []string{"Fields"})
-	check("", "", []string{"Panel", "Connections", "SQLC", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"})
+	check("", "", []string{"Panel", "Connections", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Preview"})
 }
 
 // newNavEditor returns an editor ready for dialog interactions (pages + app).
@@ -258,10 +256,10 @@ func TestNavAliases(t *testing.T) {
 	if !e.navOpen {
 		t.Fatal("Ctrl+> should open the dialog")
 	}
-	e.navInput.SetText("Sync")
+	e.navInput.SetText("Validate")
 	e.navGo()
-	if cur := e.currentPath(); cur != "Sync" {
-		t.Fatalf("path = %q, want Sync", cur)
+	if cur := e.currentPath(); cur != "Validate" {
+		t.Fatalf("path = %q, want Validate", cur)
 	}
 
 	e.capture(tcell.NewEventKey(tcell.KeyCtrlO, 'O', tcell.ModCtrl))
@@ -339,7 +337,7 @@ func TestChildrenOfRoot(t *testing.T) {
 		t.Fatal("childrenOf(nil) should resolve")
 	}
 	got := strings.Join(kids, ",")
-	for _, want := range []string{"Panel", "Connections", "SQLC", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"} {
+	for _, want := range []string{"Panel", "Connections", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Preview"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("childrenOf(nil) missing %s: %v", want, kids)
 		}

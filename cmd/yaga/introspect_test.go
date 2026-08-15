@@ -1,10 +1,12 @@
 package main
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+	_ "modernc.org/sqlite"
 )
 
 // fkSchemaTables returns the introspected tables for a schema where
@@ -294,5 +296,55 @@ func TestWriteResourceYAMLViewDetail(t *testing.T) {
 	}
 	if strings.Contains(out, "form:") {
 		t.Fatalf("view must not emit a form section, got:\n%s", out)
+	}
+}
+
+// TestIntrospectSQLiteKeywordTable ensures introspecting a SQLite database that
+// contains a table named with a SQL keyword (e.g. "Order") succeeds. PRAGMA
+// arguments must quote the identifier or SQLite errors with
+// `near "Order": syntax error`.
+func TestIntrospectSQLiteKeywordTable(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE "Order" (id INTEGER PRIMARY KEY AUTOINCREMENT, total REAL, status TEXT)`,
+		`CREATE TABLE Customer (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, order_id INTEGER REFERENCES "Order"(id))`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("exec %q: %v", s, err)
+		}
+	}
+
+	tables, err := introspectSQLite(db)
+	if err != nil {
+		t.Fatalf("introspectSQLite: %v", err)
+	}
+
+	var order *TableInfo
+	var customer *TableInfo
+	for i := range tables {
+		switch tables[i].Name {
+		case "Order":
+			order = &tables[i]
+		case "Customer":
+			customer = &tables[i]
+		}
+	}
+	if order == nil {
+		t.Fatal("Order table not introspected")
+	}
+	if len(order.Columns) != 3 || !order.Columns[0].IsPrimaryKey {
+		t.Fatalf("Order columns wrong: %+v", order.Columns)
+	}
+	if customer == nil {
+		t.Fatal("Customer table not introspected")
+	}
+	if len(customer.ForeignKeys) != 1 || customer.ForeignKeys[0].ForeignTable != "Order" {
+		t.Fatalf("Customer FK should reference Order, got %+v", customer.ForeignKeys)
 	}
 }

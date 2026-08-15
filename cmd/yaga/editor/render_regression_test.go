@@ -1,8 +1,6 @@
 package editor
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -35,50 +33,6 @@ func drawPrimitive(t *testing.T, p tview.Primitive, w, h int) ([]string, []tcell
 		lines[y] = b.String()
 	}
 	return lines, contents
-}
-
-// TestSyncSimpleView renders the Sync screen and verifies it is the simple
-// list form: schema tables, query definitions, the missing-reference summary
-// and the action buttons are all visible in the TextView.
-func TestSyncSimpleView(t *testing.T) {
-	dir := t.TempDir()
-	migrations := filepath.Join(dir, "sql", "migrations")
-	queries := filepath.Join(dir, "sql", "queries")
-	if err := os.MkdirAll(migrations, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(queries, 0755); err != nil {
-		t.Fatal(err)
-	}
-	schemaSQL := `CREATE TABLE users (
-  id INTEGER PRIMARY KEY,
-  email TEXT NOT NULL,
-  name TEXT
-);
-CREATE TABLE roles (
-  id INTEGER PRIMARY KEY,
-  name TEXT NOT NULL
-);`
-	if err := os.WriteFile(filepath.Join(migrations, "001.sql"), []byte(schemaSQL), 0644); err != nil {
-		t.Fatal(err)
-	}
-	rolesQ := "-- name: ListRoles :many\nSELECT id, name FROM roles ORDER BY name;\n"
-	if err := os.WriteFile(filepath.Join(queries, "roles.sql"), []byte(rolesQ), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := testConfig()
-	cfg.SQLC.SchemaDir = "./sql/migrations"
-	cfg.SQLC.QueriesDir = "./sql/queries"
-	e := New(cfg, filepath.Join(dir, "yaga.yaml"))
-
-	lines, _ := drawPrimitive(t, e.syncPage(), 110, 30)
-	text := strings.Join(lines, "\n")
-	for _, want := range []string{"Schema", "users", "roles", "Queries", "ListRoles", "missing queries", "missing tables", "inline SQL", "Generate missing queries", "Refresh", "Back"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("sync view missing %q in render:\n%s", want, text)
-		}
-	}
 }
 
 // TestPreviewGridColors verifies only the grid chrome is light blue while the

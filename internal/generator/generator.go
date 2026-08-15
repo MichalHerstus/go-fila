@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/MichalHerstus/yaga/internal/filterexpr"
 	"github.com/MichalHerstus/yaga/internal/types"
 )
 
@@ -111,6 +112,54 @@ func (g *Generator) likeOp() string {
 	return "ILIKE"
 }
 
+// quoteIdent returns a driver-correct quoted SQL identifier for the configured
+// driver: `"Order"` (double quotes, embedded " doubled) for postgres/sqlite and
+// `[Order]` (brackets, embedded ] doubled) for mssql. Every generated SQL
+// identifier — table names, column names, schema columns — is routed through
+// this helper so keyword/mixed-case names (e.g. an "Order" table) survive.
+func (g *Generator) quoteIdent(name string) string {
+	return filterexpr.QuoteIdent(g.driver(), name)
+}
+
+// quoteSQLList renders a comma-separated list of Go string literals that hold
+// SQL-quoted identifiers, each optionally prefixed with a table alias (the
+// prefix itself is NOT quoted: "t."). It feeds the searchable-columns slice in
+// the generated list/card handlers, where the value is concatenated with
+// " LIKE ?" at runtime, so the identifiers must be quoted (they cannot be
+// pre-escaped into an emitted SQL literal).
+// Params: words (the column names), prefix (optional "t."-style alias prefix).
+// Returns: a comma-separated list of quoted Go literals.
+func (g *Generator) quoteSQLList(words []string, prefix string) string {
+	q := make([]string, len(words))
+	for i, w := range words {
+		q[i] = fmt.Sprintf("%q", prefix+g.quoteIdent(w))
+	}
+	return strings.Join(q, ", ")
+}
+
+// colsLiteralQuoted renders a comma-separated list of Go string literals that
+// hold SQL-quoted column names, used for the cols []string literals in the
+// generated create/update/import handlers (the slice values are joined into the
+// INSERT/SET SQL at runtime).
+// Params: cols (the column names).
+// Returns: a comma-separated list of quoted Go literals.
+func (g *Generator) colsLiteralQuoted(cols []string) string {
+	q := make([]string, len(cols))
+	for i, c := range cols {
+		q[i] = fmt.Sprintf("%q", g.quoteIdent(c))
+	}
+	return strings.Join(q, ", ")
+}
+
+// embedSQL escapes SQL text so it can be injected verbatim into an emitted Go
+// string literal (double quotes become \"). Only sites that splice SQL into a
+// generated "..." literal with %s (rather than %q) need this.
+// Params: s (SQL text already identifier-quoted).
+// Returns: the same text with quotes escaped for Go string-literal embedding.
+func embedSQL(s string) string {
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
 // idGoType returns the Go type used for primary key ids in the generated data
 // queries: sqlite INTEGER ids map to int64 while postgres INTEGER ids map to
 // int32.
@@ -184,6 +233,10 @@ func (g *Generator) Generate() error {
 
 	if err := g.generateHTTPErr(); err != nil {
 		return fmt.Errorf("generating httperr: %w", err)
+	}
+
+	if err := g.generateSQLUtil(); err != nil {
+		return fmt.Errorf("generating sqlutil: %w", err)
 	}
 
 	for _, r := range g.Config.Resources {

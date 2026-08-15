@@ -152,10 +152,10 @@ func TestGenerateAudit(t *testing.T) {
 	createStr := string(create)
 	for _, want := range []string{
 		`db.BeginTx(r.Context(), nil)`,
-		`tx.QueryRowContext(r.Context(), query+" RETURNING id", vals...)`,
+		`tx.QueryRowContext(r.Context(), query+" RETURNING \"id\"", vals...)`,
 		`var valuesJSON []byte`,
 		`"name": vals[0],`,
-		`INSERT INTO audit_log (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1, $2, $3, $4, $5, $6)`,
+		`INSERT INTO \"audit_log\" (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1, $2, $3, $4, $5, $6)`,
 		`auth.UserID(r), auth.UserName(r), "users", "create", fmt.Sprintf("%d", newID), string(valuesJSON)`,
 		`tx.Commit()`,
 		`defer tx.Rollback()`,
@@ -192,7 +192,7 @@ func TestGenerateAudit(t *testing.T) {
 	}
 	delStr := string(del)
 	for _, want := range []string{
-		`tx.ExecContext(r.Context(), "DELETE FROM users WHERE id = $1", int64(id))`,
+		`tx.ExecContext(r.Context(), "DELETE FROM \"users\" WHERE \"id\" = $1", int64(id))`,
 		`auth "`,
 		`"users", "delete", strconv.FormatInt(int64(id), 10), ""`,
 	} {
@@ -258,7 +258,7 @@ func TestGenerateAuditNoValuesAndExcluded(t *testing.T) {
 	if strings.Contains(createStr, "var valuesJSON") {
 		t.Error("create.go must not emit values_json when audit.include_values is false")
 	}
-	if strings.Contains(createStr, "INSERT INTO audit_log") {
+	if strings.Contains(createStr, `INSERT INTO "audit_log"`) {
 		t.Error("create.go must not emit an audit INSERT when the resource is excluded")
 	}
 	if strings.Contains(createStr, "BeginTx") {
@@ -313,7 +313,7 @@ func TestGenerateAuditSchemaEmitted(t *testing.T) {
 	}
 	ddlStr := string(ddl)
 	for _, want := range []string{
-		"CREATE TABLE audit_log (",
+		`CREATE TABLE "audit_log" (`,
 		"user_id TEXT",
 		"values_json",
 		"created_at",
@@ -375,11 +375,11 @@ func TestGenerateHooks(t *testing.T) {
 	}
 	createStr := string(create)
 	for _, want := range []string{
-		`RETURNING id`,
+		`RETURNING \"id\"`,
 		`hooks.Scope{`,
 		`Action: "create"`,
 		`hooks.ValidateUserDomain(r.Context(), db, scope)`,
-		`db.QueryRowContext(r.Context(), query+" RETURNING id", vals...)`,
+		`db.QueryRowContext(r.Context(), query+" RETURNING \"id\"", vals...)`,
 		`scope.ID = newID`,
 		`db.ExecContext(r.Context(), "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')", scope.ID)`,
 	} {
@@ -675,7 +675,7 @@ func TestGenerateProcPostgres(t *testing.T) {
 	}
 	assert("internal/panel/resources/user/create.go", []string{
 		`db.ExecContext(r.Context(), "CALL sp_archive_user($1)", scope.ID)`,
-		`RETURNING id`,
+		`RETURNING \"id\"`,
 		`hooks "`,
 	})
 	assert("internal/panel/resources/user/delete.go", []string{
@@ -715,7 +715,7 @@ func TestGenerateProcMSSQL(t *testing.T) {
 	}
 	assert("internal/panel/resources/user/create.go", []string{
 		`db.ExecContext(r.Context(), "EXEC sp_archive_user $1", scope.ID)`,
-		`OUTPUT INSERTED.id`,
+		`OUTPUT INSERTED.[id]`,
 		`hooks "`,
 	})
 	assert("internal/panel/resources/user/actions.go", []string{
@@ -766,7 +766,7 @@ func TestGenerateProcSQLiteIgnored(t *testing.T) {
 		`db.ExecContext(r.Context(), query, vals...)`,
 	})
 	assertNot("internal/panel/resources/user/create.go", []string{
-		"CALL", "EXEC", "RETURNING id", `hooks "`,
+		"CALL", "EXEC", `RETURNING \"id\"`, `hooks "`,
 	})
 
 	assertNot("internal/panel/resources/user/delete.go", []string{
@@ -840,7 +840,7 @@ func TestGenerateProcSQLiteMixedHooks(t *testing.T) {
 	}
 	createStr := string(create)
 	for _, want := range []string{
-		`RETURNING id`,
+		`RETURNING \"id\"`,
 		`hooks "`,
 		`db.ExecContext(r.Context(), "INSERT INTO notifications (target) VALUES ('created')", scope.ID)`,
 	} {
@@ -913,9 +913,9 @@ func TestGenerateListFKLabelJoin(t *testing.T) {
 	}
 	listStr := string(list)
 	for _, want := range []string{
-		`SELECT t.id, t.pn_nazev, f_sklad_zbozi.pn AS pn_label, COUNT(*) OVER() AS _total FROM sklad_zasoby t LEFT JOIN sklad_zbozi f_sklad_zbozi ON f_sklad_zbozi.pn = t.pn`,
-		`searchableCols := []string{"t.pn_nazev"}`,
-		`dataQuery := "SELECT t.id, t.pn_nazev, f_sklad_zbozi.pn AS pn_label, COUNT(*) OVER() AS _total FROM sklad_zasoby t LEFT JOIN sklad_zbozi f_sklad_zbozi ON f_sklad_zbozi.pn = t.pn" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"`,
+		`SELECT t.\"id\", t.\"pn_nazev\", f_sklad_zbozi.\"pn\" AS pn_label, COUNT(*) OVER() AS _total FROM \"sklad_zasoby\" t LEFT JOIN \"sklad_zbozi\" f_sklad_zbozi ON f_sklad_zbozi.\"pn\" = t.\"pn\"`,
+		`searchableCols := []string{"t.\"pn_nazev\""}`,
+		`dataQuery := "SELECT t.\"id\", t.\"pn_nazev\", f_sklad_zbozi.\"pn\" AS pn_label, COUNT(*) OVER() AS _total FROM \"sklad_zasoby\" t LEFT JOIN \"sklad_zbozi\" f_sklad_zbozi ON f_sklad_zbozi.\"pn\" = t.\"pn\"" + whereSQL + orderSQL + " LIMIT $1 OFFSET $2"`,
 		`case int64:
             total = tv`,
 	} {
@@ -1877,7 +1877,7 @@ func TestGenerateIDColumnUpdateDelete(t *testing.T) {
 		t.Fatalf("read update.go: %v", err)
 	}
 	updStr := string(upd)
-	if want := `query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d", "Zamestnanec", strings.Join(setClauses, ", "), "ID", len(cols)+1)`; !strings.Contains(updStr, want) {
+	if want := `query := fmt.Sprintf("UPDATE %s SET %s WHERE %s = $%d", "[Zamestnanec]", strings.Join(setClauses, ", "), "[ID]", len(cols)+1)`; !strings.Contains(updStr, want) {
 		t.Errorf("update.go missing idColumn WHERE clause %q\n--- generated:\n%s", want, updStr)
 	}
 	if strings.Contains(updStr, `WHERE id = $`) {
@@ -1888,7 +1888,7 @@ func TestGenerateIDColumnUpdateDelete(t *testing.T) {
 		t.Fatalf("read delete.go: %v", err)
 	}
 	delStr := string(del)
-	if want := `db.ExecContext(r.Context(), "DELETE FROM Zamestnanec WHERE ID = $1", int64(id))`; !strings.Contains(delStr, want) {
+	if want := `db.ExecContext(r.Context(), "DELETE FROM [Zamestnanec] WHERE [ID] = $1", int64(id))`; !strings.Contains(delStr, want) {
 		t.Errorf("delete.go missing idColumn WHERE clause %q\n--- generated:\n%s", want, delStr)
 	}
 	if strings.Contains(delStr, `WHERE id = $1`) {
@@ -2103,7 +2103,7 @@ func TestGenerateExportSubset(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	code := readResourceFile(t, dir, "user", "export.go")
-	if !strings.Contains(code, `query := "SELECT name, email FROM users ORDER BY 1"`) {
+	if !strings.Contains(code, `query := "SELECT \"name\", \"email\" FROM \"users\" ORDER BY 1"`) {
 		t.Errorf("export must select only the subset columns\n--- generated:\n%s", code)
 	}
 	if !strings.Contains(code, `wr.Write([]string{csvSafe("Name"), csvSafe("email")})`) {
@@ -2120,7 +2120,7 @@ func TestGenerateExportAllColumns(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	code := readResourceFile(t, dir, "user", "export.go")
-	if !strings.Contains(code, `query := "SELECT id, name, email, status FROM users ORDER BY 1"`) {
+	if !strings.Contains(code, `query := "SELECT \"id\", \"name\", \"email\", \"status\" FROM \"users\" ORDER BY 1"`) {
 		t.Errorf("export without subset must keep all list columns\n--- generated:\n%s", code)
 	}
 	if !strings.Contains(code, `out[i] = csvSafe(c)`) {
@@ -2269,7 +2269,7 @@ func TestGenerateDataFromSchema(t *testing.T) {
 	for _, want := range []string{
 		"func New(db *sql.DB) *Querier",
 		"func (q *Querier) GetUser(ctx context.Context, id int32) (map[string]interface{}, error) {",
-		`SELECT t.id, t.name, t.email, t.role_id, f_roles.name AS role_id_label FROM users t LEFT JOIN roles f_roles ON f_roles.id = t.role_id WHERE t.id = $1`,
+		`SELECT t.\"id\", t.\"name\", t.\"email\", t.\"role_id\", f_roles.\"name\" AS role_id_label FROM \"users\" t LEFT JOIN \"roles\" f_roles ON f_roles.\"id\" = t.\"role_id\" WHERE t.\"id\" = $1`,
 	} {
 		if !strings.Contains(str, want) {
 			t.Errorf("data.go missing %q\n--- generated:\n%s", want, str)
@@ -2297,7 +2297,7 @@ func TestGenerateDataFallbackFields(t *testing.T) {
 		t.Fatalf("read data.go: %v", err)
 	}
 	str := string(code)
-	if !strings.Contains(str, "SELECT id, name, email, role_id FROM users WHERE id = $1") {
+	if !strings.Contains(str, `SELECT \"id\", \"name\", \"email\", \"role_id\" FROM \"users\" WHERE \"id\" = $1`) {
 		t.Errorf("fallback Get must use detail/update fields + key column\n--- generated:\n%s", str)
 	}
 	if strings.Contains(str, "LEFT JOIN") {
@@ -2315,7 +2315,7 @@ func TestGenerateOptionsLoaderFKFromSchema(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	code := readResourceFile(t, dir, "user", "create.go")
-	if !strings.Contains(code, `SELECT id, name FROM roles`) {
+	if !strings.Contains(code, `SELECT \"id\", \"name\" FROM \"roles\"`) {
 		t.Errorf("create.go must derive role_id option SQL from the schema FK\n--- generated:\n%s", code)
 	}
 	if !strings.Contains(code, `role_idOpts := map[string]string{}`) {
@@ -2337,7 +2337,7 @@ func TestGenerateOptionsLoaderFKFromSchema(t *testing.T) {
 	// And the list/card handlers must join the FK label from the schema block
 	// even though no options_query exists on the relation field.
 	listCode := readResourceFile(t, dir, "user", "list.go")
-	if !strings.Contains(listCode, "LEFT JOIN roles f_roles ON f_roles.id = t.role_id") {
+	if !strings.Contains(listCode, `LEFT JOIN \"roles\" f_roles ON f_roles.\"id\" = t.\"role_id\"`) {
 		t.Errorf("list.go must join the FK label from the schema block\n--- generated:\n%s", listCode)
 	}
 }
@@ -2535,7 +2535,7 @@ func TestGenerateCopiesAutoFill(t *testing.T) {
 	create := readResourceFile(t, dir, "user", "create.go")
 	// FK-derived SQL must carry the copy source columns in deterministic
 	// (sorted-target: city, customer_country, shipped_at) order.
-	if !strings.Contains(create, `SELECT id, name, city, country, created_at FROM roles`) {
+	if !strings.Contains(create, `SELECT \"id\", \"name\", \"city\", \"country\", \"created_at\" FROM \"roles\"`) {
 		t.Errorf("create.go loader must extend the FK SQL with copy columns\n--- generated:\n%s", create)
 	}
 	if !strings.Contains(create, `role_idCopies := map[string]map[string]string{}`) {
@@ -2676,10 +2676,10 @@ func TestGenerateMasterChildren(t *testing.T) {
 
 	// Header detail: child lines SELECT + Lines literal + helper.
 	detail := readResourceFile(t, dir, "order", "detail.go")
-	if !strings.Contains(detail, `SELECT id, qty, total FROM order_lines t WHERE t.order_id = $1`) {
+	if !strings.Contains(detail, `SELECT \"id\", \"qty\", \"total\" FROM \"order_lines\" t WHERE t.\"order_id\" = $1`) {
 		t.Errorf("detail.go must select child lines scoped by the reverse FK\n--- generated:\n%s", detail)
 	}
-	if !strings.Contains(detail, `childLines1 := loadChildLines(r.Context(), db, "SELECT id, qty, total FROM order_lines t WHERE t.order_id = $1", int64(id))`) {
+	if !strings.Contains(detail, `childLines1 := loadChildLines(r.Context(), db, "SELECT \"id\", \"qty\", \"total\" FROM \"order_lines\" t WHERE t.\"order_id\" = $1", int64(id))`) {
 		t.Errorf("detail.go must load child lines into the lines var\n--- generated:\n%s", detail)
 	}
 	if !strings.Contains(detail, "Lines: []viewmodels.ChildLinesData{") || !strings.Contains(detail, `Heading:`) || !strings.Contains(detail, `"Lines"`) {
@@ -2692,7 +2692,7 @@ func TestGenerateMasterChildren(t *testing.T) {
 
 	// Header edit: locked map + child lines + Return.
 	update := readResourceFile(t, dir, "order", "update.go")
-	if !strings.Contains(update, `loadChildLines(r.Context(), db, "SELECT id, qty, total FROM order_lines t WHERE t.order_id = $1", int64(id))`) {
+	if !strings.Contains(update, `loadChildLines(r.Context(), db, "SELECT \"id\", \"qty\", \"total\" FROM \"order_lines\" t WHERE t.\"order_id\" = $1", int64(id))`) {
 		t.Errorf("update.go must load child lines on GET\n--- generated:\n%s", update)
 	}
 	if !strings.Contains(update, "Return:        r.URL.Query().Get(\"return\"),") {

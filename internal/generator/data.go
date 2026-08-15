@@ -119,7 +119,7 @@ func (g *Generator) getMethod(name string, r types.Resource) string {
     }
     return m, nil
 }
-`, name, idType, sel, from, whereCol, g.placeholder(1))
+`, name, idType, embedSQL(sel), embedSQL(from), embedSQL(whereCol), g.placeholder(1))
 }
 
 // getQuerySQL builds the SELECT list, FROM fragment and WHERE key column for a
@@ -132,15 +132,15 @@ func (g *Generator) getQuerySQL(r types.Resource) (sel, from, whereCol string) {
 	if st := g.schemaTable(tName); st != nil {
 		var cols []string
 		for _, c := range st.Columns {
-			cols = append(cols, "t."+c.Name)
+			cols = append(cols, "t."+g.quoteIdent(c.Name))
 		}
-		fromParts := []string{st.Name + " t"}
+		fromParts := []string{g.quoteIdent(st.Name) + " t"}
 		for _, fk := range st.ForeignKeys {
-			cols = append(cols, fmt.Sprintf("f_%s.%s AS %s_label", fk.ForeignTable, fk.Label, fk.Column))
-			fromParts = append(fromParts, fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", fk.ForeignTable, fk.ForeignTable, fk.ForeignTable, fk.ForeignColumn, fk.Column))
+			cols = append(cols, fmt.Sprintf("f_%s.%s AS %s_label", fk.ForeignTable, g.quoteIdent(fk.Label), fk.Column))
+			fromParts = append(fromParts, fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", g.quoteIdent(fk.ForeignTable), fk.ForeignTable, fk.ForeignTable, g.quoteIdent(fk.ForeignColumn), g.quoteIdent(fk.Column)))
 		}
 		if st.PK != "" {
-			whereCol = "t." + st.PK
+			whereCol = "t." + g.quoteIdent(st.PK)
 		}
 		return strings.Join(cols, ", "), strings.Join(fromParts, " "), whereCol
 	}
@@ -150,7 +150,7 @@ func (g *Generator) getQuerySQL(r types.Resource) (sel, from, whereCol string) {
 	add := func(c string) {
 		if c != "" && !seen[c] {
 			seen[c] = true
-			cols = append(cols, c)
+			cols = append(cols, g.quoteIdent(c))
 		}
 	}
 	if r.Detail != nil {
@@ -165,9 +165,9 @@ func (g *Generator) getQuerySQL(r types.Resource) (sel, from, whereCol string) {
 	}
 	add(whereCol)
 	if len(cols) == 0 {
-		return "*", tName, whereCol
+		return "*", g.quoteIdent(tName), g.quoteIdent(whereCol)
 	}
-	return strings.Join(cols, ", "), tName, whereCol
+	return strings.Join(cols, ", "), g.quoteIdent(tName), g.quoteIdent(whereCol)
 }
 
 // schemaTable returns the schema block entry for a table name, comparing

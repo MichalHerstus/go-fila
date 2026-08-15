@@ -84,7 +84,6 @@ func TestPageBuilders(t *testing.T) {
 		"layout":      e.layoutPage,
 		"theme":       e.themePage,
 		"connections": e.connectionsPage,
-		"sqlc":        e.sqlcPage,
 		"auth":        e.authPage,
 		"audit":       e.auditPage,
 		"procedures":  e.proceduresPage,
@@ -203,11 +202,6 @@ SELECT id, name FROM roles ORDER BY name;
 	rep = e.analyze()
 	if !containsString(rep.missingTabs, "Product -> products") {
 		t.Errorf("expected Product -> products flagged, got %v", rep.missingTabs)
-	}
-
-	e.generateMissingQueries(rep)
-	if _, err := os.Stat(filepath.Join(queries, "users.sql")); err != nil {
-		t.Errorf("users.sql was not generated: %v", err)
 	}
 
 	e.importResourcesFromSchema(rep)

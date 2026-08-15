@@ -151,10 +151,6 @@ func (e *Editor) resolveSegs(segs []string) (navTarget, error) {
 		return e.resolvePanel(rest)
 	case "connections":
 		return e.resolveConnections(rest)
-	case "sqlc":
-		if len(rest) == 0 {
-			return navTarget{"SQLC", e.sqlcPage}, nil
-		}
 	case "auth":
 		return e.resolveAuth(rest)
 	case "audit":
@@ -182,10 +178,6 @@ func (e *Editor) resolveSegs(segs []string) (navTarget, error) {
 	case "validate":
 		if len(rest) == 0 {
 			return navTarget{"Validate", e.validatePage}, nil
-		}
-	case "sync":
-		if len(rest) == 0 {
-			return navTarget{"Sync", e.syncPage}, nil
 		}
 	case "preview":
 		return e.resolvePreview(rest)
@@ -923,7 +915,7 @@ func (e *Editor) resolvePreview(rest []string) (navTarget, error) {
 // the path is a known directory. Used for Tab completion.
 func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 	if len(segs) == 0 {
-		return []string{"Panel", "Connections", "SQLC", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Sync", "Preview"}, true
+		return []string{"Panel", "Connections", "Auth", "Audit", "Procedures", "Plugins", "Navigation", "Resources", "Pages", "Validate", "Preview"}, true
 	}
 	rest := segs[1:]
 	switch foldSeg(segs[0]) {

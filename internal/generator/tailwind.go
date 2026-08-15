@@ -22,6 +22,21 @@ var chartUmdJS []byte
 //go:embed assets/styles.css
 var stylesCSS []byte
 
+// StylesCSS returns the pre-built Tailwind stylesheet (embedded). It is
+// shared with the wedit preview (internal/serve) so the editor's dashboard
+// mock uses the exact same compiled classes as the generated app.
+func StylesCSS() []byte { return stylesCSS }
+
+// ChartUmdJS returns the vendored Chart.js bundle (embedded). Shared with the
+// wedit preview so its chart widgets render with real Chart.js, identical to
+// the generated dashboard.
+func ChartUmdJS() []byte { return chartUmdJS }
+
+// HexChannels converts a "#rrggbb" hex color into the "r g b" channel triplet
+// for the --brand-*-rgb CSS variables. Exported so the wedit preview emits the
+// same variables as the generated Base layout.
+func HexChannels(hex string) string { return hexChannels(hex) }
+
 // generateAssets writes all static assets for the project: the pre-built
 // stylesheet at static/css/styles.css and the vendored Chart.js bundle at
 // static/js/chart.js, byte-identical to the embedded copies.

@@ -1,7 +1,7 @@
 // Package serve implements the `yaga wedit` web-based YAML config editor
 // (E4). It starts a local HTTP server exposing a small JSON REST API over the
 // same Go logic the TUI editor uses (parser.ValidateAll, schema.ParseQueries,
-// schema.CollectReferences, schema.GenerateQueries) plus an embedded
+// schema.CollectReferences) plus an embedded
 // vanilla-JS single-page app. The command name is `wedit` (not the E4-drafted
 // `serve`) so the web version of the editor is clearly distinguishable from a
 // running generated dashboard.
@@ -85,7 +85,6 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/save", s.handleSave)
 	mux.HandleFunc("GET /api/validate", s.handleValidate)
 	mux.HandleFunc("GET /api/analyze", s.handleAnalyze)
-	mux.HandleFunc("POST /api/generate-queries", s.handleGenerateQueries)
 	mux.HandleFunc("GET /api/queries/{name}", s.handleQueryGet)
 	mux.HandleFunc("PUT /api/queries", s.handleQueryPut)
 	mux.HandleFunc("GET /api/raw", s.handleRawGet)
@@ -95,6 +94,10 @@ func (s *Server) routes() {
 	if err != nil {
 		panic(err) // embed is static; cannot fail
 	}
+	mux.HandleFunc("GET /preview", s.handlePreview)
+	mux.HandleFunc("GET /preview/styles.css", s.handlePreviewStyles)
+	mux.HandleFunc("GET /preview/chart.js", s.handlePreviewChart)
+
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(sub))))
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {

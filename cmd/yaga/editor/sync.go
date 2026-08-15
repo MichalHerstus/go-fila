@@ -2,15 +2,11 @@ package editor
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/MichalHerstus/yaga/internal/schema"
 	"github.com/MichalHerstus/yaga/internal/types"
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 	"gopkg.in/yaml.v3"
 )
 
@@ -118,122 +114,6 @@ func tableHasColumn(t schema.Table, col string) bool {
 		}
 	}
 	return false
-}
-
-// syncPage renders a simple list of schema tables, query definitions and the
-// missing-reference summary, plus the apply/navigation buttons.
-func (e *Editor) syncPage() tview.Primitive {
-	rep := e.analyze()
-	tv := tview.NewTextView().SetDynamicColors(true)
-	tv.SetBorder(true).SetBorderColor(colBorder).SetTitle("SQL <-> YAML sync")
-	tv.SetScrollable(true)
-
-	if rep.err != "" {
-		fmt.Fprintf(tv, "[red]%s[-:-:-]\n", rep.err)
-		return tv
-	}
-
-	fmt.Fprintf(tv, "[::b]Schema[:-:-:-]  %d tables\n", len(rep.tables))
-	for _, t := range rep.tables {
-		fmt.Fprintf(tv, "  %s  [::d](%d cols)[-:-:-]\n", t.Name, len(t.Columns))
-	}
-	fmt.Fprintf(tv, "\n[::b]Queries[:-:-:-]  %d definitions\n", len(rep.queries))
-	names := make([]string, 0, len(rep.queries))
-	for n := range rep.queries {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	if len(names) > 0 {
-		fmt.Fprintf(tv, "  %s\n", strings.Join(names, ", "))
-	}
-
-	fmt.Fprintf(tv, "\n[::b]YAML references[:-:-:-]\n")
-	color := "green"
-	if len(rep.missingQ) > 0 {
-		color = "red"
-	}
-	fmt.Fprintf(tv, "  ["+color+"]missing queries: %d[-:-:-]\n", len(rep.missingQ))
-	for _, q := range rep.missingQ {
-		fmt.Fprintf(tv, "    %s  [::d](%s)[-:-:-]\n", q.Name, q.Origin)
-	}
-	if len(rep.inlineQ) > 0 {
-		fmt.Fprintf(tv, "  [green]inline SQL (widget/action queries, not query names): %d[-:-:-]\n", len(rep.inlineQ))
-		for _, q := range rep.inlineQ {
-			fmt.Fprintf(tv, "    [::d](%s)[-:-:-]\n", q.Origin)
-		}
-	}
-	color = "green"
-	if len(rep.missingTabs) > 0 {
-		color = "red"
-	}
-	fmt.Fprintf(tv, "  ["+color+"]missing tables: %d[-:-:-]\n", len(rep.missingTabs))
-	for _, t := range rep.missingTabs {
-		fmt.Fprintf(tv, "    %s\n", t)
-	}
-	color = "green"
-	if len(rep.missingCols) > 0 {
-		color = "yellow"
-	}
-	fmt.Fprintf(tv, "  ["+color+"]missing columns: %d[-:-:-]\n", len(rep.missingCols))
-	for _, m := range rep.missingCols {
-		fmt.Fprintf(tv, "    %s.%s.%s\n", m.resource, m.ref.Section, m.ref.Column)
-	}
-	color = "green"
-	if len(rep.fkTargets) > 0 {
-		color = "yellow"
-	}
-	fmt.Fprintf(tv, "  ["+color+"]FK target List queries missing: %d[-:-:-]\n", len(rep.fkTargets))
-	for _, f := range rep.fkTargets {
-		fmt.Fprintf(tv, "    %s\n", f)
-	}
-
-	actions := tview.NewForm()
-	actions.SetBorder(false)
-	actions.SetButtonBackgroundColor(colAccent)
-	actions.SetButtonTextColor(tcell.ColorWhite)
-	e.addButton(actions, "Generate missing queries", func() {
-		e.generateMissingQueries(rep)
-	})
-	e.addButton(actions, "Refresh", func() {
-		e.refreshPage("Sync", e.syncPage())
-	})
-	e.backButton(actions)
-
-	flex := tview.NewFlex().SetDirection(tview.FlexRow)
-	flex.AddItem(tv, 0, 1, true)
-	flex.AddItem(actions, 3, 0, false)
-	return flex
-}
-
-// generateMissingQueries writes SQLC query files for schema tables that do not
-// yet have a file in sql/queries. Existing files are never overwritten.
-func (e *Editor) generateMissingQueries(rep *syncReport) {
-	base := e.sqlBase()
-	queriesDir := e.cfg.SQLC.QueriesDir
-	if queriesDir == "" {
-		queriesDir = "./sql/queries"
-	}
-	dir := filepath.Join(base, queriesDir)
-	driver := schema.Driver(e.cfg)
-	generated := schema.GenerateQueries(rep.tables, driver)
-	var written []string
-	for fname, content := range generated {
-		path := filepath.Join(dir, fname)
-		if _, err := os.Stat(path); err == nil {
-			continue
-		}
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			e.errorModal("Generate failed", err.Error())
-			return
-		}
-		written = append(written, fname)
-	}
-	if len(written) == 0 {
-		e.toast("Nothing to generate: all queries present")
-		return
-	}
-	sort.Strings(written)
-	e.toast(fmt.Sprintf("Generated %d query file(s)", len(written)))
 }
 
 // importResourcesFromSchema appends resource blocks for schema tables that are

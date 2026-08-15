@@ -126,7 +126,7 @@ func TestGenerateProceduresSQLite(t *testing.T) {
 	for _, want := range []string{
 		`procs "`,
 		`procs.Exec(db, "sp_archive_user", scope.ID)`,
-		"RETURNING id",
+		`RETURNING \"id\"`,
 	} {
 		if !strings.Contains(create, want) {
 			t.Errorf("create.go missing %q\n--- generated:\n%s", want, create)
@@ -218,7 +218,7 @@ func TestGenerateProcSQLiteDeclaredProcOnlyHook(t *testing.T) {
 	for _, want := range []string{
 		`hooks "`,
 		`procs "`,
-		"RETURNING id",
+		`RETURNING \"id\"`,
 		`procs.Exec(db, "sp_archive_user", scope.ID)`,
 	} {
 		if !strings.Contains(create, want) {

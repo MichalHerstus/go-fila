@@ -236,7 +236,7 @@ func scopeValuesStr(cols []string) string {
 // Params: r (the resource definition; used for its id column override).
 // Returns: the SQL fragment including its leading space.
 func (g *Generator) returningClause(r types.Resource) string {
-	col := idColumn(r)
+	col := g.quoteIdent(idColumn(r))
 	if g.isMSSQL() {
 		return " OUTPUT INSERTED." + col
 	}

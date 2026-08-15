@@ -326,7 +326,7 @@ type LoginPageData struct {
 		panelPath, panelName,
 		emailField, passwordField,
 		panelPath, panelName,
-		authTable, emailField,
+		embedSQL(g.quoteIdent(authTable)), embedSQL(g.quoteIdent(emailField)),
 		panelPath, panelName,
 		panelPath, panelName,
 		loginReset, successSession,

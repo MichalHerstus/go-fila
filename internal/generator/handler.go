@@ -275,8 +275,8 @@ func (g *Generator) labelJoins(r types.Resource, colNames []string) []fkLabelJoi
 				ftable := fk.ForeignTable
 				joins = append(joins, fkLabelJoin{
 					colName:    c,
-					selectPart: fmt.Sprintf("f_%s.%s AS %s", ftable, fk.Label, c),
-					fromPart:   fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", ftable, ftable, ftable, fk.ForeignColumn, fk.Column),
+					selectPart: fmt.Sprintf("f_%s.%s AS %s", ftable, g.quoteIdent(fk.Label), c),
+					fromPart:   fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", g.quoteIdent(ftable), ftable, ftable, g.quoteIdent(fk.ForeignColumn), g.quoteIdent(fk.Column)),
 				})
 				joined = true
 				break
@@ -304,8 +304,8 @@ func (g *Generator) labelJoins(r types.Resource, colNames []string) []fkLabelJoi
 		ftable := tableName(*foreign)
 		joins = append(joins, fkLabelJoin{
 			colName:    c,
-			selectPart: fmt.Sprintf("f_%s.%s AS %s", ftable, f.OptionsLabel, c),
-			fromPart:   fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", ftable, ftable, ftable, f.OptionsValue, base),
+			selectPart: fmt.Sprintf("f_%s.%s AS %s", ftable, g.quoteIdent(f.OptionsLabel), c),
+			fromPart:   fmt.Sprintf("LEFT JOIN %s f_%s ON f_%s.%s = t.%s", g.quoteIdent(ftable), ftable, ftable, g.quoteIdent(f.OptionsValue), g.quoteIdent(base)),
 		})
 	}
 	return joins
@@ -347,7 +347,11 @@ func relationFormField(r types.Resource, name string) *types.Field {
 func (g *Generator) listSelectFrom(r types.Resource, tName string, colNames []string) (selectFrag, fromFrag, colPrefix, tableRef string, hasJoins bool) {
 	joins := g.labelJoins(r, colNames)
 	if len(joins) == 0 {
-		return strings.Join(colNames, ", "), tName, "", tName, false
+		qn := make([]string, len(colNames))
+		for i, c := range colNames {
+			qn[i] = g.quoteIdent(c)
+		}
+		return embedSQL(strings.Join(qn, ", ")), embedSQL(g.quoteIdent(tName)), "", tName, false
 	}
 	labelCols := map[string]bool{}
 	for _, j := range joins {
@@ -358,16 +362,16 @@ func (g *Generator) listSelectFrom(r types.Resource, tName string, colNames []st
 		if labelCols[c] {
 			continue
 		}
-		sel = append(sel, "t."+c)
+		sel = append(sel, "t."+g.quoteIdent(c))
 	}
 	for _, j := range joins {
 		sel = append(sel, j.selectPart)
 	}
-	fromParts := []string{tName + " t"}
+	fromParts := []string{g.quoteIdent(tName) + " t"}
 	for _, j := range joins {
 		fromParts = append(fromParts, j.fromPart)
 	}
-	return strings.Join(sel, ", "), strings.Join(fromParts, " "), "t.", tName + " t", true
+	return embedSQL(strings.Join(sel, ", ")), embedSQL(strings.Join(fromParts, " ")), "t.", tName + " t", true
 }
 
 // filterCompile parses and compiles a list/card filter's `where` expression
@@ -538,7 +542,7 @@ func (g *Generator) filterListCore(searchableColsLiteral, colPrefix, selectFrag,
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %[3]s, sort, order)
+            orderSQL = " ORDER BY " + %[3]s + sqlutil.Ident(sort) + " " + order
         }
 
         var total int64
@@ -581,7 +585,7 @@ func (g *Generator) filterListCore(searchableColsLiteral, colPrefix, selectFrag,
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %[3]s, sort, order)
+            orderSQL = " ORDER BY " + %[3]s + sqlutil.Ident(sort) + " " + order
         }
         if orderSQL == "" {
             orderSQL = " ORDER BY (SELECT NULL)"
@@ -625,7 +629,7 @@ func (g *Generator) filterListCore(searchableColsLiteral, colPrefix, selectFrag,
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %[3]s, sort, order)
+            orderSQL = " ORDER BY " + %[3]s + sqlutil.Ident(sort) + " " + order
         }
 
         var total int64
@@ -691,14 +695,17 @@ func (g *Generator) generateListHandler(dir string, r types.Resource) error {
 	if hasFilter {
 		urlImport = "    \"net/url\"\n"
 	}
+	fmtImport := ""
+	if !g.isSQLite() && (len(searchCols) > 0 || (hasFilter && compiled != nil && len(compiled.Bindings) > 0)) {
+		fmtImport = "    \"fmt\"\n"
+	}
 
 	// Package declaration and imports
 	sb.WriteString(fmt.Sprintf(`package %s
 
 import (
     "database/sql"
-    "fmt"
-    "math"
+%s    "math"
     "net/http"
     "strconv"
     "strings"
@@ -707,6 +714,7 @@ import (
     %q
     auth %q
     httperr %q
+    sqlutil %q
     layoutviews %q
 )
 
@@ -742,9 +750,9 @@ func List(db *sql.DB) http.HandlerFunc {
             order = "asc"
         }
 
-        validSorts := map[string]bool{`, pkgName, urlImport,
+        validSorts := map[string]bool{`, pkgName, fmtImport, urlImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"), perPage))
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/panel/sqlutil"), g.moduleImport("internal/views/layout"), perPage))
 
 	// Valid sort columns
 	for i, c := range sortableCols {
@@ -759,7 +767,7 @@ func List(db *sql.DB) http.HandlerFunc {
         }
 
 `)
-	searchableColsLiteral := quoteList(searchCols, colPrefix)
+	searchableColsLiteral := g.quoteSQLList(searchCols, colPrefix)
 
 	// Build the args + WHERE/ORDER/LIMIT construction. Sqlite binds ? args
 	// positionally in SQL text order, so search args must come before the
@@ -786,7 +794,7 @@ func List(db *sql.DB) http.HandlerFunc {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
+            orderSQL = " ORDER BY " + %s + sqlutil.Ident(sort) + " " + order
         }
 
         var total int64
@@ -825,7 +833,7 @@ func List(db *sql.DB) http.HandlerFunc {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
+            orderSQL = " ORDER BY " + %s + sqlutil.Ident(sort) + " " + order
         }
         if orderSQL == "" {
             orderSQL = " ORDER BY (SELECT NULL)"
@@ -866,7 +874,7 @@ func List(db *sql.DB) http.HandlerFunc {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
+            orderSQL = " ORDER BY " + %s + sqlutil.Ident(sort) + " " + order
         }
 
         var total int64
@@ -1021,7 +1029,7 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 		searchCols = append(searchCols, s)
 	}
 	selectFrag, fromFrag, colPrefix, _, _ := g.listSelectFrom(r, tName, fieldNames)
-	searchable := quoteList(searchCols, colPrefix)
+	searchable := g.quoteSQLList(searchCols, colPrefix)
 
 	hasFilter := card.Filter != nil
 	var compiled *filterexpr.Compiled
@@ -1037,6 +1045,10 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 	urlImport := ""
 	if hasFilter {
 		urlImport = "    \"net/url\"\n"
+	}
+	fmtImport := ""
+	if !g.isSQLite() && (len(searchCols) > 0 || (hasFilter && compiled != nil && len(compiled.Bindings) > 0)) {
+		fmtImport = "    \"fmt\"\n"
 	}
 
 	kanban := card.KanbanField != ""
@@ -1078,7 +1090,7 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
+            orderSQL = " ORDER BY " + %s + sqlutil.Ident(sort) + " " + order
         }
 
         var total int64
@@ -1116,7 +1128,7 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
+            orderSQL = " ORDER BY " + %s + sqlutil.Ident(sort) + " " + order
         }
         if orderSQL == "" {
             orderSQL = " ORDER BY (SELECT NULL)"
@@ -1156,7 +1168,7 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 
         orderSQL := ""
         if sort != "" {
-            orderSQL = fmt.Sprintf(" ORDER BY %%s%%s %%s", %s, sort, order)
+            orderSQL = " ORDER BY " + %s + sqlutil.Ident(sort) + " " + order
         }
 
         var total int64
@@ -1227,8 +1239,7 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 
 import (
     "database/sql"
-    "fmt"
-    "math"
+%s    "math"
     "net/http"
     "strconv"
     "strings"
@@ -1237,6 +1248,7 @@ import (
     %q
     auth %q
     httperr %q
+    sqlutil %q
     layoutviews %q
 )
 
@@ -1291,9 +1303,9 @@ func Cards(db *sql.DB) http.HandlerFunc {
         layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sCards(vd)).Render(r.Context(), w)
     }
 }
-`, pkgName, urlImport,
+`, pkgName, fmtImport, urlImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
-		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
+		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/panel/sqlutil"), g.moduleImport("internal/views/layout"),
 		perPage,
 		sortStmt,
 		queryCore,
@@ -1521,7 +1533,7 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
             httperr.Internal(w, err)
             return
         }
-`, tName, idColumn(r))
+`, embedSQL(g.quoteIdent(tName)), embedSQL(g.quoteIdent(idColumn(r))))
 		middle += g.auditInsertStr(r, "delete", "strconv.FormatInt(int64(id), 10)", `""`, "        ") + "\n"
 		middle += auditTxCommitStr("        ")
 	} else {
@@ -1530,7 +1542,7 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
             httperr.Internal(w, err)
             return
         }
-`, tName, idColumn(r))
+`, embedSQL(g.quoteIdent(tName)), embedSQL(g.quoteIdent(idColumn(r))))
 	}
 	if hasHooks {
 		middle += g.hookCallsStr(r.Form.Delete.Hooks.After, "scope", "        ") + "\n"
@@ -2113,7 +2125,7 @@ func safeUploadExt(ext string) bool {
             placeholders[i] = fmt.Sprintf("$%%d", i+1)
         }
         query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
-`, colsLiteral(colNames), valsLine, tName)
+`, g.colsLiteralQuoted(colNames), valsLine, g.quoteIdent(tName))
 	hasHooks := g.hookBlockEmits(create.Hooks)
 	audit := g.auditFor(r)
 	jsonImport := ""
@@ -2326,7 +2338,11 @@ func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (
 						for _, t := range targets {
 							srcs = append(srcs, f.Copies[t])
 						}
-						inner = fmt.Sprintf("SELECT %s, %s, %s FROM %s", f.OptionsValue, f.OptionsLabel, strings.Join(srcs, ", "), fk.ForeignTable)
+						var qsrcs []string
+						for _, s := range srcs {
+							qsrcs = append(qsrcs, g.quoteIdent(s))
+						}
+						inner = fmt.Sprintf("SELECT %s, %s, %s FROM %s", g.quoteIdent(f.OptionsValue), g.quoteIdent(f.OptionsLabel), strings.Join(qsrcs, ", "), g.quoteIdent(fk.ForeignTable))
 						break
 					}
 				}
@@ -2359,6 +2375,10 @@ func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (
 			copyVar := f.Name + "Copies"
 			copyVars[f.Name] = copyVar
 			srcs := scanSources(f, targets)
+			var qsrcs []string
+			for _, s := range srcs {
+				qsrcs = append(qsrcs, embedSQL(g.quoteIdent(s)))
+			}
 			var scanVars []string
 			var ampVars []string
 			var copyExprs []string
@@ -2372,11 +2392,11 @@ func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (
 			loads = append(loads, fmt.Sprintf(`        %s := map[string]string{}
         %s := map[string]map[string]string{}
         { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label, %s interface{}; if err := optRows.Scan(&val, &label, %s); err == nil { k := fmt.Sprintf("%%v", val); %s[k] = fmt.Sprintf("%%v", label); %s[k] = map[string]string{%s} } } } }`,
-				varName, copyVar, optField, optLabel, strings.Join(srcs, ", "), inner, strings.Join(scanVars, ", "), strings.Join(ampVars, ", "), varName, copyVar, strings.Join(copyExprs, ", ")))
+				varName, copyVar, embedSQL(g.quoteIdent(optField)), embedSQL(g.quoteIdent(optLabel)), strings.Join(qsrcs, ", "), inner, strings.Join(scanVars, ", "), strings.Join(ampVars, ", "), varName, copyVar, strings.Join(copyExprs, ", ")))
 			continue
 		}
 		loads = append(loads, fmt.Sprintf(`        %s := map[string]string{}
-        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, optField, optLabel, inner, varName))
+        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, embedSQL(g.quoteIdent(optField)), embedSQL(g.quoteIdent(optLabel)), inner, varName))
 	}
 	return optVars, copyVars, strings.Join(loads, "\n")
 }
@@ -2570,14 +2590,14 @@ func (g *Generator) childLinesParts(r types.Resource, parentIDExpr, parentIDArg 
 		add := func(c string) {
 			if !seen[c] {
 				seen[c] = true
-				sel = append(sel, c)
+				sel = append(sel, g.quoteIdent(c))
 			}
 		}
 		add(rel.childID)
 		for _, c := range rel.cols {
 			add(c.Name)
 		}
-		query := fmt.Sprintf("SELECT %s FROM %s t WHERE t.%s = %s", strings.Join(sel, ", "), rel.childTable, rel.fkCol, g.placeholder(1))
+		query := fmt.Sprintf("SELECT %s FROM %s t WHERE t.%s = %s", strings.Join(sel, ", "), g.quoteIdent(rel.childTable), g.quoteIdent(rel.fkCol), g.placeholder(1))
 		loads = append(loads, fmt.Sprintf(`        %s := loadChildLines(r.Context(), db, %q, %s)`, rel.varName, query, parentIDArg))
 
 		var colDefs []string
@@ -2632,7 +2652,7 @@ func (g *Generator) optionSQL(r types.Resource, f types.Field) string {
 		if !strings.EqualFold(fk.Column, f.Name) {
 			continue
 		}
-		return fmt.Sprintf("SELECT %s, %s FROM %s", f.OptionsValue, f.OptionsLabel, fk.ForeignTable)
+		return fmt.Sprintf("SELECT %s, %s FROM %s", g.quoteIdent(f.OptionsValue), g.quoteIdent(f.OptionsLabel), g.quoteIdent(fk.ForeignTable))
 	}
 	return ""
 }
@@ -2821,7 +2841,7 @@ func safeUploadExt(ext string) bool {
         }
         vals = append(vals, int64(id))
         query := fmt.Sprintf("UPDATE %%s SET %%s WHERE %%s = $%%d", %q, strings.Join(setClauses, ", "), %q, len(cols)+1)
-`, colsLiteral(colNames), strings.Join(valExprs, ", "), tName, idColumn(r))
+`, g.colsLiteralQuoted(colNames), strings.Join(valExprs, ", "), g.quoteIdent(tName), g.quoteIdent(idColumn(r)))
 	hasHooks := g.hookBlockEmits(update.Hooks)
 	audit := g.auditFor(r)
 	jsonImport := ""

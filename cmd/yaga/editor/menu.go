@@ -122,17 +122,6 @@ func (e *Editor) connectionPage(name string) tview.Primitive {
 	})
 }
 
-// sqlcPage edits the sqlc configuration.
-func (e *Editor) sqlcPage() tview.Primitive {
-	s := &e.cfg.SQLC
-	return e.formShell("SQLC", func(f *tview.Form) {
-		e.str(f, "Config", s.Config, func(v string) { s.Config = v })
-		e.str(f, "Queries dir", s.QueriesDir, func(v string) { s.QueriesDir = v })
-		e.str(f, "Schema dir", s.SchemaDir, func(v string) { s.SchemaDir = v })
-		e.str(f, "Output package", s.OutputPkg, func(v string) { s.OutputPkg = v })
-	})
-}
-
 // authPage edits the authentication configuration.
 func (e *Editor) authPage() tview.Primitive {
 	a := &e.cfg.Auth

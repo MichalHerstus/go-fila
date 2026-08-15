@@ -25,9 +25,11 @@ type finding struct {
 
 // runValidation runs the full health check over the in-memory config: the
 // structural validator (parser.ValidateAll against a YAML copy so defaults are
-// not injected into the live config) plus the schema/queries analysis from the
-// sync tool. Every schema finding carries a goTo that jumps to the relevant
-// editor page (and highlights the offending column/field row).
+// not injected into the live config) plus a schema-block reference pass that
+// ensures every resource's table and every referenced column exists in the
+// captured `schema:` block (D11 source of truth). Every schema finding carries
+// a goTo that jumps to the relevant editor page (and highlights the offending
+// column/field row).
 func (e *Editor) runValidation() []finding {
 	var out []finding
 
@@ -47,57 +49,66 @@ func (e *Editor) runValidation() []finding {
 		out = append(out, finding{kind: "error", label: verr.Error(), goTo: e.structuralGoTo(verr.Error())})
 	}
 
-	rep := e.analyze()
-	if rep.err != "" {
-		return append(out, finding{kind: "error", label: rep.err})
+	if copyCfg.Schema == nil {
+		out = append(out, finding{kind: "warning", label: "no schema block captured (re-run `yaga init --db`)"})
+		return out
 	}
-	for _, t := range rep.missingTabs {
-		t := t
-		parts := strings.SplitN(t, "->", 2)
-		resName := strings.TrimSpace(parts[0])
-		table := resName
-		if len(parts) == 2 {
-			table = strings.TrimSpace(parts[1])
+	refs := schema.CollectReferences(&copyCfg)
+	for _, r := range copyCfg.Resources {
+		r := r
+		res := r.Name
+		table := refs.Tables[res]
+		st := schemaBlockTable(copyCfg, table)
+		if st == nil {
+			out = append(out, finding{
+				kind:   "error",
+				label:  fmt.Sprintf("%s: table %q not found in schema block", res, table),
+				detail: "The resource's table is missing from the schema block; add it or re-run `yaga init --db`",
+				goTo:   e.resourceGoTo(res),
+			})
+			continue
 		}
-		out = append(out, finding{
-			kind:   "error",
-			label:  fmt.Sprintf("%s: table %q not found in schema", resName, table),
-			detail: "Add the table to sql/migrations or fix the resource's table:",
-			goTo:   e.resourceGoTo(resName),
-		})
-	}
-	for _, m := range rep.missingCols {
-		m := m
-		out = append(out, finding{
-			kind:   "warning",
-			label:  fmt.Sprintf("%s.%s.%s: not a column of the resource's table", m.resource, m.ref.Section, m.ref.Column),
-			detail: "Rename to an existing column, or add it to the table in sql/migrations",
-			goTo:   e.columnGoTo(m.resource, m.ref),
-		})
-	}
-	for _, q := range rep.missingQ {
-		q := q
-		resource := strings.SplitN(q.Origin, ".", 2)[0]
-		f := finding{
-			kind:   "error",
-			label:  fmt.Sprintf("missing query %q (%s)", q.Name, q.Origin),
-			detail: "Add the SQLC query to sql/queries, or generate it from the Sync screen",
+		for _, ref := range refs.ColumnRefs[res] {
+			ref := ref
+			if schemaBlockHasColumn(st, ref.Column) {
+				continue
+			}
+			m := colMissing{resource: res, ref: ref}
+			out = append(out, finding{
+				kind:   "warning",
+				label:  fmt.Sprintf("%s.%s.%s: not a column of the resource's table", m.resource, m.ref.Section, m.ref.Column),
+				detail: "Rename to an existing column, or add it to the schema block (re-run `yaga init --db`)",
+				goTo:   e.columnGoTo(m.resource, m.ref),
+			})
 		}
-		if idx := e.resourceIdxByName(resource); idx >= 0 {
-			f.goTo = e.queryGoTo(idx, q.Name)
-		}
-		out = append(out, f)
-	}
-	for _, fk := range rep.fkTargets {
-		fk := fk
-		out = append(out, finding{
-			kind:   "warning",
-			label:  "missing FK target query " + fk,
-			detail: "Add it from the Sync screen (Generate missing queries)",
-			goTo:   func() { e.showPage("Sync", e.syncPage()) },
-		})
 	}
 	return out
+}
+
+// schemaBlockTable returns the captured `schema:` block entry for a table by
+// name (case-insensitive), or nil when the block has no such table.
+func schemaBlockTable(cfg types.Config, name string) *types.SchemaTable {
+	if cfg.Schema == nil {
+		return nil
+	}
+	for i := range cfg.Schema.Tables {
+		t := &cfg.Schema.Tables[i]
+		if strings.EqualFold(t.Name, name) {
+			return t
+		}
+	}
+	return nil
+}
+
+// schemaBlockHasColumn reports whether a schema-block table carries a column
+// with the given name, trying exact and case-insensitive matches.
+func schemaBlockHasColumn(st *types.SchemaTable, name string) bool {
+	for _, c := range st.Columns {
+		if c.Name == name || strings.EqualFold(c.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 var (
@@ -212,23 +223,6 @@ func (e *Editor) sectionJump(resource string, ref schema.ColumnRef) (string, tvi
 		list.SetCurrentItem(ref.Index)
 	}
 	return name, prim
-}
-
-// queryGoTo opens the resource's SQL-queries page and focuses the row for the
-// missing query (when the resource references it).
-func (e *Editor) queryGoTo(idx int, qname string) func() {
-	return func() {
-		prim := e.sqlQueriesPage(idx)
-		e.showPage(e.resSQLPath(idx), prim)
-		if list, ok := prim.(*tview.List); ok {
-			for i := 0; i < list.GetItemCount(); i++ {
-				if main, _ := list.GetItemText(i); main == qname {
-					list.SetCurrentItem(i)
-					break
-				}
-			}
-		}
-	}
 }
 
 // validatePage renders the validation results: one list row per problem,

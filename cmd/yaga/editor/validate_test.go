@@ -1,8 +1,6 @@
 package editor
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,20 +10,18 @@ import (
 	"github.com/rivo/tview"
 )
 
-// writeUsersSchema creates a sql/migrations dir under dir with a minimal users
-// table so analyze() can resolve the resource's table.
-func writeUsersSchema(t *testing.T, dir string) {
-	t.Helper()
-	migrations := filepath.Join(dir, "sql", "migrations")
-	if err := os.MkdirAll(migrations, 0755); err != nil {
-		t.Fatal(err)
-	}
-	schemaSQL := `CREATE TABLE users (
-  id INTEGER PRIMARY KEY,
-  email TEXT NOT NULL
-);`
-	if err := os.WriteFile(filepath.Join(migrations, "001.sql"), []byte(schemaSQL), 0644); err != nil {
-		t.Fatal(err)
+// setUsersSchema attaches a minimal users table (id, email) to the config's
+// captured `schema:` block so runValidation can resolve the resource's table.
+func setUsersSchema(cfg *types.Config) {
+	cfg.Schema = &types.Schema{
+		Tables: []types.SchemaTable{{
+			Name: "users",
+			PK:   "id",
+			Columns: []types.SchemaColumn{
+				{Name: "id", Type: "integer", PrimaryKey: true},
+				{Name: "email", Type: "string"},
+			},
+		}},
 	}
 }
 
@@ -37,28 +33,25 @@ func TestValidatePageBuilds(t *testing.T) {
 		t.Error("validatePage returned nil")
 	}
 
-	dir := t.TempDir()
-	writeUsersSchema(t, dir)
 	cfg := testConfig()
+	setUsersSchema(cfg)
 	cfg.Resources[0].List.Columns = append(cfg.Resources[0].List.Columns, types.Column{Name: "role_id"})
-	e = New(cfg, filepath.Join(dir, "yaga.yaml"))
+	e = New(cfg, "testdata/yaga.yaml")
 	if p := e.validatePage(); p == nil {
 		t.Error("validatePage returned nil with findings")
 	}
 }
 
 // TestRunValidationFindsBadColumns verifies that a column missing from the
-// table is reported as a navigable warning for every section it is referenced
-// from (list, card), and that invoking goTo lands on the right editor page.
+// captured schema block is reported as a navigable warning for every section
+// it is referenced from (list, card), and that invoking goTo lands on the
+// right editor page.
 func TestRunValidationFindsBadColumns(t *testing.T) {
-	dir := t.TempDir()
-	writeUsersSchema(t, dir)
 	cfg := testConfig()
+	setUsersSchema(cfg)
 	cfg.Resources[0].List.Columns = append(cfg.Resources[0].List.Columns, types.Column{Name: "role_id"})
 	cfg.Resources[0].Card = &types.CardConfig{Fields: []types.Field{{Name: "missing_card"}}}
-	cfg.SQLC.SchemaDir = "./sql/migrations"
-	cfg.SQLC.QueriesDir = "./sql/queries"
-	e := New(cfg, filepath.Join(dir, "yaga.yaml"))
+	e := New(cfg, "testdata/yaga.yaml")
 
 	fs := e.runValidation()
 	var listCol, cardCol *finding

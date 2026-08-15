@@ -31,6 +31,20 @@ import (
 // driver placeholder (`?` or `$N`) at request time.
 const GHOST = "__GFP__"
 
+// QuoteIdent returns a quoted SQL identifier for the given driver so keyword
+// and mixed-case names (e.g. an "Order" table) survive. Postgres/sqlite use
+// double quotes with embedded " doubled; mssql uses brackets with embedded ]
+// doubled. The driver string accepts the generator's "postgres"/"sqlite"/
+// "mssql" values; anything else defaults to the double-quote form.
+func QuoteIdent(driver, name string) string {
+	switch driver {
+	case "mssql", "sqlserver":
+		return "[" + strings.ReplaceAll(name, "]", "]]") + "]"
+	default:
+		return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+	}
+}
+
 // Binding describes one __GFP__ placeholder token in Compiled.Frag, in text
 // order. Param is the zero-based index into the filter's Params list ($N → N-1);
 // Contains marks a `contains`/`not_contains` condition whose runtime value must
@@ -439,7 +453,7 @@ func (c *compiler) emit(n node) (string, error) {
 }
 
 func (c *compiler) emitCond(t *condNode) (string, error) {
-	col := c.colPrefix + t.col
+	col := c.colPrefix + QuoteIdent(c.driver, t.col)
 	if t.isNull {
 		if t.negNull {
 			return col + " IS NOT NULL", nil

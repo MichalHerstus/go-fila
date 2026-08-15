@@ -1,12 +1,9 @@
 package editor
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/MichalHerstus/yaga/internal/types"
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
@@ -46,27 +43,6 @@ func TestFormButtonShortcuts(t *testing.T) {
 	}
 	if !hasLabel(labels, "Back (Ctrl+B)") {
 		t.Errorf("Back must always get Ctrl+B, got %v", labels)
-	}
-}
-
-// TestSyncButtonShortcuts verifies the sync page's action buttons, including
-// the exact example from the request: Ctrl+G for "Generate missing queries".
-func TestSyncButtonShortcuts(t *testing.T) {
-	dir := t.TempDir()
-	cfg := testConfig()
-	cfg.SQLC.SchemaDir = "./sql/migrations"
-	cfg.SQLC.QueriesDir = "./sql/queries"
-	e := New(cfg, filepath.Join(dir, "yaga.yaml"))
-
-	labels := buttonLabels(findFormIn(e.syncPage()))
-	if !hasLabel(labels, "Generate missing queries (Ctrl+G)") {
-		t.Errorf("expected Generate missing queries (Ctrl+G), got %v", labels)
-	}
-	if !hasLabel(labels, "Refresh (Ctrl+R)") {
-		t.Errorf("expected Refresh (Ctrl+R), got %v", labels)
-	}
-	if !hasLabel(labels, "Back (Ctrl+B)") {
-		t.Errorf("expected Back (Ctrl+B), got %v", labels)
 	}
 }
 
@@ -171,57 +147,4 @@ func captionKey(caption string) tcell.Key {
 		return ctrlKey(r)
 	}
 	return 0
-}
-
-// TestShortcutGenerateQueries drives the Generate missing queries button from
-// the keyboard end to end: pressing its Ctrl shortcut on the sync page writes
-// the missing users.sql file.
-func TestShortcutGenerateQueries(t *testing.T) {
-	dir := t.TempDir()
-	migrations := filepath.Join(dir, "sql", "migrations")
-	queries := filepath.Join(dir, "sql", "queries")
-	if err := os.MkdirAll(migrations, 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(queries, 0755); err != nil {
-		t.Fatal(err)
-	}
-	schemaSQL := `CREATE TABLE users (
-  id INTEGER PRIMARY KEY,
-  email TEXT NOT NULL,
-  name TEXT
-);`
-	if err := os.WriteFile(filepath.Join(migrations, "001.sql"), []byte(schemaSQL), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg := testConfig()
-	cfg.SQLC.SchemaDir = "./sql/migrations"
-	cfg.SQLC.QueriesDir = "./sql/queries"
-	cfg.Connections["default"] = types.Connection{Driver: "sqlite"}
-	e := New(cfg, filepath.Join(dir, "yaga.yaml"))
-	e.pages = tview.NewPages()
-	e.app = tview.NewApplication()
-
-	e.history = []string{"home"}
-	e.showPage("Sync", e.syncPage())
-
-	// Locate the Generate missing queries button's shortcut from its caption
-	// and press it.
-	_, front := e.pages.GetFrontPage()
-	key := tcell.Key(0)
-	for _, l := range buttonLabels(findFormIn(front)) {
-		if strings.HasPrefix(l, "Generate missing queries (") {
-			key = captionKey(l)
-			break
-		}
-	}
-	if key == 0 {
-		t.Fatal("Generate missing queries button has no Ctrl shortcut caption")
-	}
-	e.capture(tcell.NewEventKey(key, ' ', tcell.ModCtrl))
-
-	if _, err := os.Stat(filepath.Join(queries, "users.sql")); err != nil {
-		t.Errorf("Generate should write users.sql: %v", err)
-	}
 }

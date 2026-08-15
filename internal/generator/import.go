@@ -71,11 +71,12 @@ func ImportCSV(db *sql.DB) http.HandlerFunc {
         }
 
         cols := []string{%s}
+        sqlCols := []string{%s}
         placeholders := make([]string, len(cols))
         for i := range cols {
             placeholders[i] = fmt.Sprintf("$%%d", i+1)
         }
-        query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(cols, ", "), strings.Join(placeholders, ", "))
+        query := fmt.Sprintf("INSERT INTO %%s (%%s) VALUES (%%s)", %q, strings.Join(sqlCols, ", "), strings.Join(placeholders, ", "))
 
         inserted, skipped := 0, 0
         var errs []string
@@ -130,7 +131,7 @@ func ImportCSV(db *sql.DB) http.HandlerFunc {
 }
 `, pkgName, g.moduleImport("internal/panel/httperr"),
 		listPath, listPath,
-		colsLiteral(colNames), tName, listPath)
+		colsLiteral(colNames), g.colsLiteralQuoted(colNames), g.quoteIdent(tName), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "import.go"), []byte(code), 0644)
 }

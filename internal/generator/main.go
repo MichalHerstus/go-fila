@@ -54,9 +54,9 @@ func (g *Generator) generateMain() error {
 		break
 	}
 
-	sanityQuery := fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", authTable)
+	sanityQuery := fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", g.quoteIdent(authTable))
 	if g.isMSSQL() {
-		sanityQuery = fmt.Sprintf("SELECT TOP 1 1 FROM %s", authTable)
+		sanityQuery = fmt.Sprintf("SELECT TOP 1 1 FROM %s", g.quoteIdent(authTable))
 	}
 
 	code := fmt.Sprintf(`package main

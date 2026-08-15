@@ -166,8 +166,10 @@ type findingJSON struct {
 }
 
 // handleValidate runs the full health check (structural validation of a YAML
-// copy so defaults are not injected, plus the schema/queries reference pass)
-// and returns every finding.
+// copy so defaults are not injected, plus a schema-block reference pass) and
+// returns every finding. Since D11 the captured `schema:` block is the source
+// of truth: a resource's table must exist in it and every referenced column
+// must be a column of that table.
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.cfg
@@ -194,24 +196,53 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		findings = append(findings, findingJSON{kind, verr.Error(), ""})
 	}
 
-	rep := s.analyze(&copyCfg)
-	if rep.Err != "" {
-		findings = append(findings, findingJSON{"error", rep.Err, ""})
+	if copyCfg.Schema == nil {
+		findings = append(findings, findingJSON{"warning", "no schema block captured (re-run `yaga init --db`)", ""})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"findings": findings})
+		return
 	}
-	for _, m := range rep.MissingQueries {
-		findings = append(findings, findingJSON{"error", "missing query: " + m.Name, m.Origin})
-	}
-	for _, t := range rep.MissingTables {
-		findings = append(findings, findingJSON{"error", "missing table: " + t, ""})
-	}
-	for _, c := range rep.MissingColumns {
-		findings = append(findings, findingJSON{"warning", "missing column: " + c.Resource + "." + c.Section + "." + c.Column, ""})
-	}
-	for _, f := range rep.FKTargets {
-		findings = append(findings, findingJSON{"warning", "missing FK List query: " + f, ""})
+	refs := schema.CollectReferences(&copyCfg)
+	for _, r := range copyCfg.Resources {
+		table := refs.Tables[r.Name]
+		st := schemaBlockTable(copyCfg, table)
+		if st == nil {
+			findings = append(findings, findingJSON{"error", r.Name + ": table not found in schema block: " + table, ""})
+			continue
+		}
+		for _, c := range refs.ColumnRefs[r.Name] {
+			if !schemaBlockHasColumn(st, c.Column) {
+				findings = append(findings, findingJSON{"warning", "missing column: " + r.Name + "." + c.Section + "." + c.Column, ""})
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{"findings": findings})
+}
+
+// schemaBlockTable returns the captured `schema:` block entry for a table by
+// name (case-insensitive), or nil when the block has no such table.
+func schemaBlockTable(cfg types.Config, name string) *types.SchemaTable {
+	if cfg.Schema == nil {
+		return nil
+	}
+	for i := range cfg.Schema.Tables {
+		t := &cfg.Schema.Tables[i]
+		if strings.EqualFold(t.Name, name) {
+			return t
+		}
+	}
+	return nil
+}
+
+// schemaBlockHasColumn reports whether a schema-block table carries a column
+// with the given name, trying exact and case-insensitive matches.
+func schemaBlockHasColumn(st *types.SchemaTable, name string) bool {
+	for _, c := range st.Columns {
+		if c.Name == name || strings.EqualFold(c.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // analyzeReport mirrors the TUI editor's syncReport, JSON-flavored.
@@ -349,43 +380,6 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, rep)
-}
-
-// handleGenerateQueries writes SQLC query files for schema tables that do not
-// yet have a file in sql/queries. Existing files are never overwritten.
-func (s *Server) handleGenerateQueries(w http.ResponseWriter, r *http.Request) {
-	s.mu.RLock()
-	cfg := s.cfg
-	s.mu.RUnlock()
-
-	rep := s.analyze(cfg)
-	if rep.Err != "" {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": rep.Err})
-		return
-	}
-	matches, _ := filepath.Glob(filepath.Join(s.schemaDir(cfg), "*.sql"))
-	tables, err := schema.ParseSchema(matches...)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
-		return
-	}
-	dir := s.queriesDir(cfg)
-	generated := schema.GenerateQueries(tables, schema.Driver(cfg))
-	var written []string
-	written = make([]string, 0)
-	for fname, content := range generated {
-		path := filepath.Join(dir, fname)
-		if _, err := os.Stat(path); err == nil {
-			continue
-		}
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
-			return
-		}
-		written = append(written, fname)
-	}
-	sort.Strings(written)
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "written": written})
 }
 
 // handleQueryGet returns one SQLC query's current body (staged rewrite overlay

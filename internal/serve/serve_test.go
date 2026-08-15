@@ -259,20 +259,52 @@ func TestValidateFindings(t *testing.T) {
 		}
 	}
 
-	// A config with a bogus query reference produces a missing-query finding.
+	// A resource whose table is absent from the schema block produces a
+	// missing-table finding; a column ref outside the block's table columns
+	// produces a missing-column finding.
 	cfg2 := testConfig()
-	cfg2.Resources[0].List.Query = "DoesNotExist"
+	cfg2.Schema = &types.Schema{
+		Tables: []types.SchemaTable{{
+			Name: "users",
+			PK:   "id",
+			Columns: []types.SchemaColumn{
+				{Name: "id", Type: "integer", PrimaryKey: true},
+				{Name: "email", Type: "string"},
+			},
+		}},
+	}
+	// Resource "User" maps to users (present), but its detail field "email" is
+	// a real column while list.query exists; so no missing table/column.
 	s2, _ := setupServer(t, cfg2)
 	rec, data = get(t, s2.Handler(), "GET", "/api/validate", nil)
 	findings = data["findings"].([]interface{})
+	for _, f := range findings {
+		label := f.(map[string]interface{})["label"].(string)
+		if strings.Contains(label, "missing table") || strings.Contains(label, "missing column") {
+			t.Errorf("unexpected missing ref finding for valid schema: %v", f)
+		}
+	}
+
+	// A resource referencing a column the schema table lacks.
+	cfg3 := testConfig()
+	cfg3.Schema = &types.Schema{
+		Tables: []types.SchemaTable{{
+			Name:    "users",
+			PK:      "id",
+			Columns: []types.SchemaColumn{{Name: "id", Type: "integer", PrimaryKey: true}},
+		}},
+	}
+	s3, _ := setupServer(t, cfg3)
+	rec, data = get(t, s3.Handler(), "GET", "/api/validate", nil)
+	findings = data["findings"].([]interface{})
 	found := false
 	for _, f := range findings {
-		if strings.Contains(f.(map[string]interface{})["label"].(string), "missing query") {
+		if strings.Contains(f.(map[string]interface{})["label"].(string), "missing column") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected a missing-query finding, got %v", findings)
+		t.Errorf("expected a missing-column finding, got %v", findings)
 	}
 }
 
@@ -307,34 +339,6 @@ func TestAnalyze(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected missing FK ListRole query, got %v", fkTargets)
-	}
-}
-
-func TestGenerateQueries(t *testing.T) {
-	cfg := testConfig()
-	s, dir := setupServer(t, cfg)
-	writeFile(t, filepath.Join(dir, "sql/migrations/users.sql"),
-		"-- users\nCREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  email TEXT\n);\n")
-
-	rec, data := get(t, s.Handler(), "POST", "/api/generate-queries", nil)
-	if rec.Code != 200 {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	written := data["written"].([]interface{})
-	if len(written) != 1 || written[0] != "users.sql" {
-		t.Errorf("written = %v, want [users.sql]", written)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "sql/queries/users.sql")); err != nil {
-		t.Fatalf("generated file missing: %v", err)
-	}
-
-	// Second run: nothing new to write (never overwrites).
-	rec, data = get(t, s.Handler(), "POST", "/api/generate-queries", nil)
-	if rec.Code != 200 {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	if len(data["written"].([]interface{})) != 0 {
-		t.Errorf("second run wrote: %v", data["written"])
 	}
 }
 

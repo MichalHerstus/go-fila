@@ -147,7 +147,7 @@ func (g *Generator) generateAuditSchema() error {
     values_json TEXT,
     created_at DATETIME DEFAULT (datetime('now'))
 );
-`, table)
+`, g.quoteIdent(table))
 	} else {
 		ddl = fmt.Sprintf(`CREATE TABLE %s (
     id BIGSERIAL PRIMARY KEY,
@@ -159,7 +159,7 @@ func (g *Generator) generateAuditSchema() error {
     values_json JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
-`, table)
+`, g.quoteIdent(table))
 	}
 	return os.WriteFile(path, []byte(ddl), 0644)
 }
@@ -262,7 +262,7 @@ func auditTxCommitStr(indent string) string {
 // indent (Go source indentation).
 // Returns: the Go source for the audit INSERT.
 func (g *Generator) auditInsertStr(r types.Resource, action, rowID, valuesArg, indent string) string {
-	stmt := fmt.Sprintf("INSERT INTO %s (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1, $2, $3, $4, $5, $6)", g.auditTable())
+	stmt := fmt.Sprintf("INSERT INTO %s (user_id, user_name, table_name, action, row_id, values_json) VALUES ($1, $2, $3, $4, $5, $6)", g.quoteIdent(g.auditTable()))
 	return fmt.Sprintf(`%sif _, err := tx.ExecContext(r.Context(), %q, auth.UserID(r), auth.UserName(r), %q, %q, %s, %s); err != nil {
 %s    httperr.Internal(w, err)
 %s    return

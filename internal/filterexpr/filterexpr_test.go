@@ -9,16 +9,16 @@ func TestSQLBasicOps(t *testing.T) {
 	cases := []struct {
 		expr, driver, want string
 	}{
-		{`price = 1000`, "postgres", `t.price = 1000`},
-		{`price > 1000`, "sqlite", `t.price > 1000`},
-		{`price <= 1000`, "mssql", `t.price <= 1000`},
-		{`prod_name != 'x'`, "postgres", `t.prod_name != 'x'`},
-		{`prod_name <> 'abc'`, "sqlite", `t.prod_name <> 'abc'`},
-		{`prod_name contains 'abc'`, "postgres", `t.prod_name ILIKE '%abc%'`},
-		{`prod_name contains 'abc'`, "sqlite", `t.prod_name LIKE '%abc%'`},
-		{`prod_name not_contains 'a''b'`, "mssql", `t.prod_name NOT LIKE '%a''b%'`},
-		{`x is_null`, "postgres", `t.x IS NULL`},
-		{`x is_not_null`, "sqlite", `t.x IS NOT NULL`},
+		{`price = 1000`, "postgres", `t."price" = 1000`},
+		{`price > 1000`, "sqlite", `t."price" > 1000`},
+		{`price <= 1000`, "mssql", `t.[price] <= 1000`},
+		{`prod_name != 'x'`, "postgres", `t."prod_name" != 'x'`},
+		{`prod_name <> 'abc'`, "sqlite", `t."prod_name" <> 'abc'`},
+		{`prod_name contains 'abc'`, "postgres", `t."prod_name" ILIKE '%abc%'`},
+		{`prod_name contains 'abc'`, "sqlite", `t."prod_name" LIKE '%abc%'`},
+		{`prod_name not_contains 'a''b'`, "mssql", `t.[prod_name] NOT LIKE '%a''b%'`},
+		{`x is_null`, "postgres", `t."x" IS NULL`},
+		{`x is_not_null`, "sqlite", `t."x" IS NOT NULL`},
 	}
 	for _, c := range cases {
 		e, err := Parse(c.expr)
@@ -46,7 +46,7 @@ func TestSQLPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SQL: %v", err)
 	}
-	want := `((t.price > 1000 AND t.prod_name ILIKE '%abc%') OR t.prod_code = __GFP__)`
+	want := `((t."price" > 1000 AND t."prod_name" ILIKE '%abc%') OR t."prod_code" = __GFP__)`
 	if c.Frag != want {
 		t.Errorf("frag = %q, want %q", c.Frag, want)
 	}
@@ -70,7 +70,7 @@ func TestParamOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SQL: %v", err)
 	}
-	if c.Frag != `(a = __GFP__ OR b = __GFP__)` {
+	if c.Frag != `("a" = __GFP__ OR "b" = __GFP__)` {
 		t.Errorf("frag = %q", c.Frag)
 	}
 	if len(c.Bindings) != 2 {
@@ -91,7 +91,7 @@ func TestRepeatedParam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SQL: %v", err)
 	}
-	if c.Frag != `(a = __GFP__ AND b = __GFP__)` || len(c.Bindings) != 2 {
+	if c.Frag != `([a] = __GFP__ AND [b] = __GFP__)` || len(c.Bindings) != 2 {
 		t.Errorf("frag=%q bindings=%d", c.Frag, len(c.Bindings))
 	}
 }
@@ -133,8 +133,30 @@ func TestQualification(t *testing.T) {
 	}
 	unqualified, _ := e.SQL("postgres", "")
 	qualified, _ := e.SQL("postgres", "t.")
-	if unqualified.Frag != `name = 'x'` || qualified.Frag != `t.name = 'x'` {
+	if unqualified.Frag != `"name" = 'x'` || qualified.Frag != `t."name" = 'x'` {
 		t.Errorf("unqualified=%q qualified=%q", unqualified.Frag, qualified.Frag)
+	}
+}
+
+func TestQuoteIdent(t *testing.T) {
+	cases := []struct {
+		driver, name, want string
+	}{
+		{"postgres", "Order", `"Order"`},
+		{"postgres", "select", `"select"`},
+		{"postgres", "a\"b", `"a""b"`},
+		{"sqlite", "Order", `"Order"`},
+		{"sqlite3", "Order", `"Order"`},
+		{"mssql", "Order", `[Order]`},
+		{"mssql", "CeleJmeno", `[CeleJmeno]`},
+		{"mssql", "a]b", `[a]]b]`},
+		{"sqlserver", "Order", `[Order]`},
+		{"", "Order", `"Order"`},
+	}
+	for _, c := range cases {
+		if got := QuoteIdent(c.driver, c.name); got != c.want {
+			t.Errorf("QuoteIdent(%q, %q) = %q, want %q", c.driver, c.name, got, c.want)
+		}
 	}
 }
 
