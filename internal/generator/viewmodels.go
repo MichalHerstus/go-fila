@@ -119,7 +119,9 @@ type ColumnDef struct {
 	Sortable   bool
 	Searchable bool
 	Picker     bool
+	Locked     bool
 	Options    map[string]string
+	CopyData   map[string]map[string]string
 }
 `,
 		panel.Theme.DarkMode, primary, secondary, panel.Theme.Font.Family, panel.Theme.Font.Mono,
@@ -151,6 +153,28 @@ type DetailData struct {
 	Resource  string
 	PanelPath string
 	CSRFToken string
+	Lines     []ChildLinesData
+}
+
+// ChildLinesData describes one master-detail section on a header resource
+// (D14): the heading, the child resource it links to, the FK column used to
+// scope the lines, the columns and rows of the embedded child table, and the
+// navigation info needed to build pre-bound child links. Fields is the child
+// column definitions (Label for the header) and Rows holds the selected child
+// rows keyed by raw column name.
+type ChildLinesData struct {
+	Heading       string
+	Resource      string
+	ResourceLower string
+	IDColumn      string
+	FKColumn      string
+	ParentID      string
+	PanelPath     string
+	CSRFToken     string
+	ReturnURL     string
+	Fields        []ColumnDef
+	Rows          []map[string]interface{}
+	Count         int
 }
 
 type CardColumnData struct {
@@ -207,6 +231,12 @@ type FormData struct {
 	PanelPath string
 	IsCreate  bool
 	CSRFToken string
+	Lines     []ChildLinesData
+	// Return, when non-empty, is the same-site path the form POST should
+	// redirect to on success (master-detail "back to header" navigation, D14).
+	// It is submitted as a hidden _return field so the POST handler honors it
+	// without needing the query string.
+	Return string
 }
 
 type PageData struct {
@@ -369,6 +399,18 @@ func ItemValue(item map[string]interface{}, name string) string {
 	return ""
 }
 
+// FieldLocked reports whether a form field's record picker is locked (D14): a
+// field seeded from a parent context hides its Browse button and modal script
+// while still showing the read-only display, submitting the hidden value.
+func FieldLocked(fields []ColumnDef, name string) bool {
+	for _, fd := range fields {
+		if fd.Name == name {
+			return fd.Locked
+		}
+	}
+	return false
+}
+
 // FormTimeValue renders a form item's datetime/date value in the layout a
 // browser expects (datetime-local / date inputs), unwrapping sql.NullTime and
 // converting to local time so the displayed wall time matches the user's tz.
@@ -393,6 +435,27 @@ func DateInputValue(item map[string]interface{}, name string) string {
 	return FormTimeValue(item, name, "2006-01-02")
 }
 
+// PickCopyValue formats a raw value loaded from a picker's related row for
+// auto-filling a form field of the given type (the 'copies:' config). nil and
+// NULL scan as "". datetime/date targets are formatted into the layout the
+// browser inputs expect; everything else falls back to Stringify.
+func PickCopyValue(v interface{}, fieldType string) string {
+	if v == nil {
+		return ""
+	}
+	switch fieldType {
+	case "date":
+		if t, ok := TimeValue(v); ok {
+			return t.Format("2006-01-02")
+		}
+	case "datetime", "time":
+		if t, ok := TimeValue(v); ok {
+			return t.Format("2006-01-02T15:04")
+		}
+	}
+	return Stringify(v)
+}
+
 // OptionsJS renders a field's option map as a JSON object literal (keys
 // sorted, proper escaping) for use by the modal picker. Returns "{}" when the
 // field is unknown or has no options.
@@ -400,6 +463,23 @@ func OptionsJS(fields []ColumnDef, name string) string {
 	for _, fd := range fields {
 		if fd.Name == name {
 			b, err := json.Marshal(fd.Options)
+			if err != nil {
+				return "{}"
+			}
+			return string(b)
+		}
+	}
+	return "{}"
+}
+
+// CopyDataJSON renders a picker field's per-row copy data as a JSON object
+// literal (row key → {target form field: string value}) so selecting a row can
+// auto-fill other form fields (the 'copies:' config). Returns "{}" when the
+// field is unknown or carries no copy data.
+func CopyDataJSON(fields []ColumnDef, name string) string {
+	for _, fd := range fields {
+		if fd.Name == name {
+			b, err := json.Marshal(fd.CopyData)
 			if err != nil {
 				return "{}"
 			}

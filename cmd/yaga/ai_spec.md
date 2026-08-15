@@ -126,6 +126,7 @@ Each resource (PascalCase `name`; becomes lowercased URL segment):
           options_value: id
           options_label: name
           options: {active: Active}   # static select options
+          copies: {city: city}        # auto-fill siblings on pick: target field: related column
     update:
       query: UpdateUser
       populate_query: GetUser
@@ -133,6 +134,8 @@ Each resource (PascalCase `name`; becomes lowercased URL segment):
     delete:
       query: DeleteUser
       hooks: null          # see hooks below
+  children:                 # optional master-detail sections (header->child FK)
+    - { name: Lines, resource: OrderLine, column: order_id, columns: [{name: qty, label: "Qty", type: integer}] }
   actions:
     - name: archive
       label: Archive

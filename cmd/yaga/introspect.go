@@ -1074,6 +1074,36 @@ func writeResourceYAML(b *strings.Builder, ti TableInfo, allTables []TableInfo, 
 		}
 		writeFieldYAML(b, c, ti, allTables, driver, true, "          ")
 	}
+
+	// children: every child table whose FK points back at this table's key is
+	// a potential master-detail section (D14). The FK column is recorded; the
+	// generator derives the rest (child lines SELECT, pre-bound add/edit) from
+	// the child resource and the captured schema block.
+	var children []TableInfo
+	for _, other := range allTables {
+		if other.IsView || other.Name == ti.Name {
+			continue
+		}
+		for _, fk := range other.ForeignKeys {
+			if strings.EqualFold(fk.ForeignTable, ti.Name) && strings.EqualFold(fk.ForeignColumn, pk) {
+				children = append(children, other)
+				break
+			}
+		}
+	}
+	if len(children) > 0 {
+		b.WriteString("    children:\n")
+		for _, other := range children {
+			b.WriteString(fmt.Sprintf("      - name: %s\n", toPascalCase(other.Name)))
+			b.WriteString(fmt.Sprintf("        resource: %s\n", toSingularPascal(other.Name)))
+			for _, fk := range other.ForeignKeys {
+				if strings.EqualFold(fk.ForeignTable, ti.Name) && strings.EqualFold(fk.ForeignColumn, pk) {
+					b.WriteString(fmt.Sprintf("        column: %s\n", fk.Column))
+					break
+				}
+			}
+		}
+	}
 }
 
 // writeColumnYAML writes a list column definition.

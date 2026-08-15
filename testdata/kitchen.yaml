@@ -78,6 +78,17 @@ schema:
       foreign_keys:
         - { column: customer_id, foreign_table: customers, foreign_column: id, label: name }
         - { column: product_id, foreign_table: products, foreign_column: id, label: name }
+    - name: order_lines
+      pk: id
+      columns:
+        - { name: id, type: integer, primary_key: true }
+        - { name: order_id, type: integer }
+        - { name: product_id, type: integer }
+        - { name: qty, type: integer }
+        - { name: total, type: float }
+      foreign_keys:
+        - { column: order_id, foreign_table: orders, foreign_column: id, label: id }
+        - { column: product_id, foreign_table: products, foreign_column: id, label: name }
 navigation:
   - group: Shop
     icon: cart
@@ -86,6 +97,7 @@ navigation:
       - { page: Dashboard }
       - { resource: Customer }
       - { resource: Order }
+      - { resource: OrderLine }
       - { type: link, label: Help, url: "https://example.com", opens_in_new_tab: true }
   - group: Catalog
     icon: box
@@ -227,6 +239,12 @@ resources:
           - { name: status, label: "Status", type: select, options: { new: New, shipped: Shipped, done: Done, cancelled: Cancelled } }
           - { name: shipped_at, label: "Shipped", type: datetime }
       delete: {}
+    children:
+      - name: Lines
+        resource: OrderLine
+        columns:
+          - { name: qty, label: "Qty", type: integer }
+          - { name: total, label: "Total", type: float }
     actions:
       - name: cancel
         label: "Cancel"
@@ -234,6 +252,44 @@ resources:
         requires_confirmation: true
         query: "UPDATE orders SET status = 'cancelled' WHERE id = $1"
         bulk: true
+  - name: OrderLine
+    label: Order Lines
+    icon: list
+    table: order_lines
+    list:
+      columns:
+        - { name: order_id, label: "Order", type: relation }
+        - { name: product_id_label, label: "Product", type: string }
+        - { name: qty, label: "Qty", type: integer }
+        - { name: total, label: "Total", type: float }
+    detail:
+      query: GetOrderLine
+      fields:
+        - { name: qty, label: "Qty", type: integer }
+        - { name: total, label: "Total", type: float }
+    form:
+      create:
+        query: CreateOrderLine
+        fields:
+          - name: product_id
+            label: "Product"
+            type: relation
+            options_value: id
+            options_label: name
+            copies:
+              total: price
+          - { name: qty, label: "Qty", type: integer }
+          - { name: total, label: "Total", type: float }
+          - { name: order_id, label: "Order", type: relation, options_value: id, options_label: id }
+      update:
+        query: UpdateOrderLine
+        populate_query: GetOrderLine
+        fields:
+          - { name: product_id, label: "Product", type: relation, options_value: id, options_label: name }
+          - { name: qty, label: "Qty", type: integer }
+          - { name: total, label: "Total", type: float }
+          - { name: order_id, label: "Order", type: relation, options_value: id, options_label: id }
+      delete: {}
   - name: Product
     label: Products
     icon: box

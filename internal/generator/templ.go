@@ -473,6 +473,16 @@ func (g *Generator) generateDetailTempl(dir string, r types.Resource) error {
 `, panelPath, resLower, idCol)
 	}
 
+	// D14: master-detail lines below the detail table, view-only links.
+	childSections := ""
+	if len(r.Children) > 0 {
+		childSections = `        if len(data.Lines) > 0 {
+            for _, sec := range data.Lines {
+` + childLinesSection(false) + `            }
+        }
+`
+	}
+
 	code := fmt.Sprintf(`package views
 
 import "internal/viewmodels"
@@ -492,9 +502,9 @@ templ %s(data *viewmodels.DetailData) {
 %s                </tbody>
             </table>
         </div>
-    </div>
+%s    </div>
 }
-`, templName, resName, panelPath, resLower, detailEditBtn, actionBtns.String(), rows.String())
+`, templName, resName, panelPath, resLower, detailEditBtn, actionBtns.String(), rows.String(), childSections)
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
 	return os.WriteFile(filepath.Join(dir, "detail.templ"), []byte(code), 0644)
@@ -715,6 +725,46 @@ func (g *Generator) generateFormTempl(dir string, r types.Resource) error {
 		footerStr = pickerFooter()
 	}
 
+	// D14 master-detail: the shared form carries a hidden _return field so a
+	// child POST redirects back to the header edit; the edit form embeds the
+	// child-lines table below the header fields, and create shows a note.
+	hasParentCtx := len(r.Children) > 0
+	if !hasParentCtx && r.Form != nil {
+		for _, fa := range []*types.FormAction{r.Form.Create, r.Form.Update} {
+			if fa == nil {
+				continue
+			}
+			for _, f := range fa.Fields {
+				if g.isPickerField(r, f) {
+					hasParentCtx = true
+					break
+				}
+			}
+			if hasParentCtx {
+				break
+			}
+		}
+	}
+	returnInput := ""
+	if hasParentCtx {
+		returnInput = `                <input type="hidden" name="_return" value={ data.Return } />
+`
+	}
+	childCode := ""
+	if len(r.Children) > 0 {
+		childCode = `        if data.IsCreate {
+            <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 mt-4">
+                <p class="text-sm text-gray-500 dark:text-gray-400">Save the header, then add lines.</p>
+            </div>
+        } else {
+            if len(data.Lines) > 0 {
+                for _, sec := range data.Lines {
+` + childLinesSection(true) + `                }
+            }
+        }
+`
+	}
+
 	code := fmt.Sprintf(`package views
 
 import "internal/viewmodels"
@@ -735,7 +785,7 @@ templ %s(data *viewmodels.FormData) {
         <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-6">
             <form action={ templ.SafeURL(data.Action) } method="POST"%s class="space-y-6">
                 <input type="hidden" name="_csrf" value={ data.CSRFToken } />
-%s                <div class="flex justify-end pt-4">
+%s%s                <div class="flex justify-end pt-4">
                     <button type="submit" class="bg-brand-primary text-white px-6 py-2 rounded-lg text-sm hover:opacity-90">
                         if data.IsCreate {
                             Create
@@ -746,9 +796,9 @@ templ %s(data *viewmodels.FormData) {
                 </div>
             </form>
         </div>
-    </div>
+%s    </div>
 %s}
-`, templName, resLabel, resLabel, listPath, enctype, inputs.String(), footerStr)
+`, templName, resLabel, resLabel, listPath, enctype, returnInput, inputs.String(), childCode, footerStr)
 
 	code = prefixImports(code, g.moduleImport("internal/viewmodels"))
 
@@ -801,54 +851,129 @@ func (g *Generator) isPickerField(r types.Resource, f types.Field) bool {
 // raw text and never evaluates expressions there.
 func pickerMarkup(f types.Field, label string) string {
 	display := fmt.Sprintf(`viewmodels.OptionLabel(data.Fields, %q, viewmodels.ItemValue(data.Item, %q))`, f.Name, f.Name)
-	return fmt.Sprintf(`                <div hidden data-field="%s" data-picker-options={ viewmodels.OptionsJS(data.Fields, %q) }></div>
-                <input type="hidden" id="%s" name="%s" value={ viewmodels.ItemValue(data.Item, %q) } />
+	copiesAttr := ""
+	if len(f.Copies) > 0 {
+		copiesAttr = fmt.Sprintf(` data-picker-copies={viewmodels.CopyDataJSON(data.Fields, %q)}`, f.Name)
+	}
+	return fmt.Sprintf(`                <div hidden data-field="%[1]s" data-picker-options={ viewmodels.OptionsJS(data.Fields, %[1]q) }%[2]s></div>
+                <input type="hidden" id="%[1]s" name="%[1]s" value={ viewmodels.ItemValue(data.Item, %[1]q) } />
                 <div class="flex items-center gap-2">
-                    <input type="text" id="%s-display" value={ %s } readonly class="flex-1 w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 bg-gray-50 dark:bg-gray-700" />
-                    <button type="button" data-picker-open="%s" class="whitespace-nowrap border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 px-3 py-2 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Browse…</button>
-                </div>
-                <script data-picker="%s">
-                    (function() {
-                    const pickerBtn = document.querySelector('[data-picker-open="%s"]');
-                    const pickerHidden = document.getElementById('%s');
-                    const pickerDisplay = document.getElementById('%s-display');
-                    const pickerOptionsEl = document.querySelector('[data-picker-options][data-field="%s"]');
-                    if (pickerBtn) {
-                        pickerBtn.addEventListener('click', () => {
-                            const pickerModal = document.getElementById('record-picker-modal');
-                            if (!pickerModal) return;
-                            let opts = {};
-                            try {
-                                opts = JSON.parse(pickerOptionsEl ? pickerOptionsEl.dataset.pickerOptions : '{}');
-                            } catch (e) {
-                                opts = {};
-                            }
-                            let html = '<tr><td class="px-4 py-2 text-gray-500 dark:text-gray-400 text-sm">No matches</td></tr>';
-                            const keys = Object.keys(opts).sort();
-                            if (keys.length > 0) {
-                                html = keys.map(k => {
-                                    const v = opts[k] == null ? k : String(opts[k]);
-                                    return '<tr class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700" data-value="' + k.replace(/"/g, '&quot;') + '"><td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-300">' + v + '</td></tr>';
-                                }).join('');
-                            }
-                            pickerModal.querySelector('[data-picker-rows]').innerHTML = html;
-                            pickerModal.querySelector('[data-picker-title]').textContent = 'Pick ' + %q;
-                            const modalList = pickerModal.querySelector('[data-picker-list]');
-                            if (modalList) modalList.value = '';
-                            pickerModal.querySelectorAll('tr[data-value]').forEach(row => {
-                                row.style.display = '';
-                                row.addEventListener('click', () => {
-                                    pickerHidden.value = row.dataset.value;
-                                    pickerDisplay.value = opts[row.dataset.value] == null ? row.dataset.value : String(opts[row.dataset.value]);
-                                    pickerModal.classList.add('hidden');
-                                });
-                            });
-                            pickerModal.classList.remove('hidden');
-                        });
+                    <input type="text" id="%[1]s-display" value={ %[3]s } readonly class="flex-1 w-full rounded-md border-gray-300 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 shadow-sm focus:border-brand-primary focus:ring-brand-primary sm:text-sm border px-3 py-2 bg-gray-50 dark:bg-gray-700" />
+                    if !viewmodels.FieldLocked(data.Fields, %[1]q) {
+                        <button type="button" data-picker-open="%[1]s" class="whitespace-nowrap border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 px-3 py-2 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Browse…</button>
                     }
+                </div>
+                if !viewmodels.FieldLocked(data.Fields, %[1]q) {
+                    <script data-picker="%[1]s">
+                        (function() {
+                        const pickerBtn = document.querySelector('[data-picker-open="%[1]s"]');
+                        const pickerHidden = document.getElementById('%[1]s');
+                        const pickerDisplay = document.getElementById('%[1]s-display');
+                        const pickerOptionsEl = document.querySelector('[data-picker-options][data-field="%[1]s"]');
+                        const pickerCopiesEl = document.querySelector('[data-picker-copies][data-field="%[1]s"]');
+                        if (pickerBtn) {
+                            pickerBtn.addEventListener('click', () => {
+                                const pickerModal = document.getElementById('record-picker-modal');
+                                if (!pickerModal) return;
+                                let opts = {};
+                                try {
+                                    opts = JSON.parse(pickerOptionsEl ? pickerOptionsEl.dataset.pickerOptions : '{}');
+                                } catch (e) {
+                                    opts = {};
+                                }
+                                let copyData = {};
+                                try {
+                                    copyData = JSON.parse(pickerCopiesEl ? pickerCopiesEl.dataset.pickerCopies : '{}');
+                                } catch (e) {
+                                    copyData = {};
+                                }
+                                let html = '<tr><td class="px-4 py-2 text-gray-500 dark:text-gray-400 text-sm">No matches</td></tr>';
+                                const keys = Object.keys(opts).sort();
+                                if (keys.length > 0) {
+                                    html = keys.map(k => {
+                                        const v = opts[k] == null ? k : String(opts[k]);
+                                        return '<tr class="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700" data-value="' + k.replace(/"/g, '&quot;') + '"><td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-300">' + v + '</td></tr>';
+                                    }).join('');
+                                }
+                                pickerModal.querySelector('[data-picker-rows]').innerHTML = html;
+                                pickerModal.querySelector('[data-picker-title]').textContent = 'Pick ' + %[4]q;
+                                const modalList = pickerModal.querySelector('[data-picker-list]');
+                                if (modalList) modalList.value = '';
+                                pickerModal.querySelectorAll('tr[data-value]').forEach(row => {
+                                    row.style.display = '';
+                                    row.addEventListener('click', () => {
+                                        pickerHidden.value = row.dataset.value;
+                                        pickerDisplay.value = opts[row.dataset.value] == null ? row.dataset.value : String(opts[row.dataset.value]);
+                                        const rowCopies = copyData[row.dataset.value];
+                                        if (rowCopies) {
+                                            Object.keys(rowCopies).forEach(t => {
+                                                const tEl = document.querySelector('[name="' + t + '"]');
+                                                if (tEl) tEl.value = rowCopies[t] == null ? '' : String(rowCopies[t]);
+                                            });
+                                        }
+                                        pickerModal.classList.add('hidden');
+                                    });
+                                });
+                                pickerModal.classList.remove('hidden');
+                            });
+                        }
                     })();
-                </script>
-`, f.Name, f.Name, f.Name, f.Name, f.Name, f.Name, display, f.Name, f.Name, f.Name, f.Name, f.Name, f.Name, label)
+                    </script>
+                }
+`, f.Name, copiesAttr, display, label)
+}
+
+// childLinesSection renders one master-detail children section (D14) inside a
+// detail or edit template. sec is the template loop variable bound to a
+// viewmodels.ChildLinesData. withActions adds per-row Edit + Delete links (and
+// an "Add Line" button) for the header's edit form; without actions only a
+// "View" link to the child's detail is shown. Reference style only — the
+// prefixed class names are all stock Tailwind, so TestGenerateStylesEmbedded
+// stays green without a rebuild.
+func childLinesSection(withActions bool) string {
+	head := ""
+	rowActions := `                                    <a href={ templ.SafeURL(fmt.Sprintf("%s/%s/%s", sec.PanelPath, sec.ResourceLower, viewmodels.Stringify(row[sec.IDColumn]))) } class="text-brand-primary hover:opacity-90">View</a>`
+	if withActions {
+		head = `                <div class="mb-3">
+                    <a href={ templ.SafeURL(fmt.Sprintf("%s/%s/new?%s=%s", sec.PanelPath, sec.ResourceLower, sec.FKColumn, sec.ParentID)) } class="bg-brand-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">Add Line</a>
+                </div>
+`
+		rowActions = `                                    <div class="flex items-center gap-2">
+                                        <a href={ templ.SafeURL(fmt.Sprintf("%s/%s/%s/edit?%s=%s&return=%s", sec.PanelPath, sec.ResourceLower, viewmodels.Stringify(row[sec.IDColumn]), sec.FKColumn, sec.ParentID, sec.ReturnURL)) } class="text-brand-primary hover:opacity-90">Edit</a>
+                                        <form action={ templ.SafeURL(fmt.Sprintf("%s/%s/%s/delete?return=%s", sec.PanelPath, sec.ResourceLower, viewmodels.Stringify(row[sec.IDColumn]), sec.ReturnURL)) } method="POST" class="inline" onsubmit="return confirm('Delete this line?')">
+                                            <input type="hidden" name="_csrf" value={ sec.CSRFToken } />
+                                            <button type="submit" class="text-red-600 hover:opacity-90">Delete</button>
+                                        </form>
+                                    </div>`
+	}
+	return head + `            <div class="bg-white dark:bg-gray-800 shadow rounded-lg p-6 mt-4">
+                <h2 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-3">{ sec.Heading }</h2>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                        <thead class="bg-gray-50 dark:bg-gray-700">
+                            <tr>
+                                for _, fd := range sec.Fields {
+                                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">{ fd.Label }</th>
+                                }
+                                <th class="px-4 py-3"></th>
+                            </tr>
+                        </thead>
+                        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                            for _, row := range sec.Rows {
+                                <tr>
+                                    for _, fd := range sec.Fields {
+                                        <td class="px-4 py-2 text-sm text-gray-700 dark:text-gray-300">{ viewmodels.Stringify(row[fd.Name]) }</td>
+                                    }
+                                    <td class="px-4 py-2 whitespace-nowrap text-right text-sm">
+` + rowActions + `
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+`
 }
 
 // pickerFooter is the shared modal markup + wiring emitted at the end of a

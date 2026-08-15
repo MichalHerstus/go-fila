@@ -62,7 +62,54 @@ func (g *Generator) generateResource(r types.Resource) error {
 			return err
 		}
 	}
+	// D14: the loadChildLines helper is package-scoped, so it lives in its own
+	// file (shared by detail.go/update.go) instead of being duplicated.
+	if len(r.Children) > 0 {
+		if err := g.generateChildLinesHelper(dir, r); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// generateChildLinesHelper writes childlines.go with the package-level
+// loadChildLines helper used by the detail and update handlers to fetch a
+// header's child lines (D14).
+func (g *Generator) generateChildLinesHelper(dir string, r types.Resource) error {
+	code := fmt.Sprintf(`package %s
+
+import (
+    "context"
+    "database/sql"
+)
+
+func loadChildLines(ctx context.Context, db *sql.DB, query string, parentID int64) []map[string]interface{} {
+    rows, err := db.QueryContext(ctx, query, parentID)
+    if err != nil {
+        return nil
+    }
+    defer rows.Close()
+    cols, _ := rows.Columns()
+    var out []map[string]interface{}
+    for rows.Next() {
+        vals := make([]interface{}, len(cols))
+        ptrs := make([]interface{}, len(cols))
+        for i := range vals {
+            ptrs[i] = &vals[i]
+        }
+        if err := rows.Scan(ptrs...); err != nil {
+            continue
+        }
+        m := make(map[string]interface{}, len(cols))
+        for i, c := range cols {
+            m[c] = vals[i]
+        }
+        out = append(out, m)
+    }
+    return out
+}
+`, strings.ToLower(r.Name))
+	return os.WriteFile(filepath.Join(dir, "childlines.go"), []byte(code), 0644)
 }
 
 // hasBulkActions reports whether any action on the resource declares the bulk
@@ -1284,6 +1331,13 @@ func (g *Generator) generateDetailHandler(dir string, r types.Resource) error {
 	if queryName == "" {
 		queryName = "GetByID"
 	}
+	idCol := idColumn(r)
+	parentIDExpr := fmt.Sprintf("fmt.Sprintf(\"%%v\", item[%q])", idCol)
+	childLoad, childLines, hasChildren := g.childLinesParts(r, parentIDExpr, "int64(id)")
+	fmtImport := ""
+	if hasChildren {
+		fmtImport = "    \"fmt\"\n"
+	}
 
 	code := fmt.Sprintf(`package %s
 
@@ -1291,7 +1345,7 @@ import (
     "database/sql"
     "net/http"
     "strconv"
-
+    %s
     %q
     %q
     %q
@@ -1315,6 +1369,7 @@ func Detail(db *sql.DB) http.HandlerFunc {
             return
         }
 
+%s
         vd := &viewmodels.DetailData{
             Item: item,
             Fields: []viewmodels.ColumnDef{
@@ -1323,19 +1378,22 @@ func Detail(db *sql.DB) http.HandlerFunc {
             Resource:  %q,
             PanelPath: %q,
             CSRFToken: auth.CSRFToken(r, w),
-        }
+%s        }
 
         layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sDetail(vd)).Render(r.Context(), w)
     }
 }
 `, pkgName,
+		fmtImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		queryName,
 		g.idGoTypeForResource(r),
+		childLoad,
 		fieldDefsFromDetail(r.Detail.Fields),
 		r.Name,
 		g.Config.Panel.Path,
+		childLines,
 		resourceTitle(r),
 		g.Config.Panel.Path,
 		r.Name)
@@ -1389,6 +1447,27 @@ func (g *Generator) generateFormHandlers(dir string, r types.Resource) error {
 	return nil
 }
 
+// resourceHasPicker reports whether any create or update form field of a
+// resource renders as a modal record picker. Used to gate master-detail return
+// navigation on the delete handler (a child deleted from a parent's edit screen
+// posts ?return= back to it, D14).
+func (g *Generator) resourceHasPicker(r types.Resource) bool {
+	if r.Form == nil {
+		return false
+	}
+	for _, fa := range []*types.FormAction{r.Form.Create, r.Form.Update} {
+		if fa == nil {
+			continue
+		}
+		for _, f := range fa.Fields {
+			if g.isPickerField(r, f) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // generateDeleteHandler writes delete.go: a Delete(db) handler that parses the
 // :id path parameter, runs "DELETE FROM {table} WHERE id = $1" via ExecContext
 // and redirects back to the resource list.
@@ -1410,6 +1489,18 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 	authImport := ""
 	if g.auditFor(r) != nil {
 		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
+	}
+	// Return navigation (D14): a child deleted from a parent's lines section
+	// carries ?return=/panel/... and redirects back instead of to the list.
+	returnRet := ""
+	stringsImport := ""
+	if g.resourceHasPicker(r) {
+		returnRet = `        if ret := r.URL.Query().Get("return"); ret != "" && strings.HasPrefix(ret, "/") {
+            http.Redirect(w, r, ret, http.StatusFound)
+            return
+        }
+`
+		stringsImport = "    \"strings\"\n"
 	}
 
 	hasHooks := g.hookBlockEmits(r.Form.Delete.Hooks)
@@ -1451,8 +1542,9 @@ import (
     "database/sql"
     "net/http"
     "strconv"
+    %s%s%s
     httperr %q
-%s%s%s)
+%s)
 
 func Delete(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1464,10 +1556,10 @@ func Delete(db *sql.DB) http.HandlerFunc {
         }
 
 %s
-        http.Redirect(w, r, %q, http.StatusFound)
+%s        http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, procsImport, middle, listPath)
+`, pkgName, stringsImport, authImport, hooksImport, g.moduleImport("internal/panel/httperr"), procsImport, middle, returnRet, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
@@ -1856,8 +1948,8 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	create := r.Form.Create
 
 	var optLoadCode string
-	var optVars map[string]string
-	optVars, optLoadCode = g.buildOptionsLoader(r, paramFields)
+	var optVars, copyVars map[string]string
+	optVars, copyVars, optLoadCode = g.buildOptionsLoader(r, paramFields)
 
 	var colNames []string
 	var valExprs []string
@@ -2087,6 +2179,45 @@ func safeUploadExt(ext string) bool {
 		preInsertCode = formMapCode
 	}
 
+	// Parent-context FK seeding (D14): when the create form is opened as a
+	// child from a header (e.g. "Add Line" carrying ?order_id=<header id>), the
+	// matching picker field is pre-seeded and locked. The runtime `locked` map
+	// drives the ColumnDef.Locked flags emitted by formFieldDefsWithOpts.
+	seedPickers := g.seedPickersOf(r, paramFields)
+	seedCode := ""
+	itemExpr := "make(map[string]interface{})"
+	if len(seedPickers) > 0 {
+		var seedLines []string
+		for f := range seedPickers {
+			seedLines = append(seedLines, fmt.Sprintf(`        if v := r.URL.Query().Get(%q); v != "" {
+            item[%q] = v
+            locked[%q] = true
+        }
+`, f, f, f))
+		}
+		seedCode = "        item := make(map[string]interface{})\n        locked := map[string]bool{}\n" + strings.Join(seedLines, "")
+		itemExpr = "item"
+	}
+
+	// Return navigation (D14): a child POST may carry ?return=/panel/... to
+	// redirect back to the header's edit screen instead of the child list.
+	// Only same-site (path-only) returns are honored to avoid an open redirect.
+	redirectRet := ""
+	returnField := ""
+	if len(r.Children) > 0 || len(seedPickers) > 0 {
+		redirectRet = `        ret := r.FormValue("_return")
+        if ret == "" {
+            ret = r.URL.Query().Get("return")
+        }
+        if ret != "" && strings.HasPrefix(ret, "/") {
+            http.Redirect(w, r, ret, http.StatusFound)
+            return
+        }
+`
+		returnField = fmt.Sprintf(`Return:        r.URL.Query().Get("return"),
+`)
+	}
+
 	code := fmt.Sprintf(`package %s
 
 import (
@@ -2106,8 +2237,9 @@ func Create(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
         if r.Method == http.MethodGet {
             %s
+%s
             vd := &viewmodels.FormData{
-                Item:      make(map[string]interface{}),
+                Item: %s,
                 Fields: []viewmodels.ColumnDef{
                     %s,
                 },
@@ -2117,7 +2249,7 @@ func Create(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  true,
                 CSRFToken: auth.CSRFToken(r, w),
-            }
+%s            }
             layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
@@ -2129,7 +2261,7 @@ func Create(db *sql.DB) http.HandlerFunc {
 
 %s
 %s
-        http.Redirect(w, r, %q, http.StatusFound)
+%s        http.Redirect(w, r, %q, http.StatusFound)
     }
 }
 %s`, pkgName,
@@ -2141,16 +2273,20 @@ func Create(db *sql.DB) http.HandlerFunc {
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		optLoadCode,
-		formFieldDefsWithOpts(paramFields, optVars),
+		seedCode,
+		itemExpr,
+		formFieldDefsWithOpts(paramFields, optVars, copyVars, seedPickers),
 		fmt.Sprintf("%s/%s/new", g.Config.Panel.Path, pkgName),
 		r.Name,
 		g.Config.Panel.Path,
+		returnField,
 		resourceTitle(r),
 		g.Config.Panel.Path,
 		r.Name,
 		formParseCode,
 		preInsertCode,
 		postCode,
+		redirectRet,
 		listPath,
 		uploadHelper+buildParamsCode)
 
@@ -2158,17 +2294,21 @@ func Create(db *sql.DB) http.HandlerFunc {
 }
 
 // buildOptionsLoader generates code to load dynamic select options from DB.
-// Returns: fieldName→goVarName map, and the code to load them at request time.
-// Params: r (the resource), fields (the form fields to inspect).
-// Returns: optVars (map from field name to the generated Go variable holding
-// its options) and loadCode (Go source that fills those variables at request
-// time by running "SELECT value, label FROM (rawSQL) AS _opt").
-// The SQL per field resolves in order: options_sql (explicit), FK-derived
-// SQL from the schema block (a field matching a foreign key with
-// options_value/options_label), else nothing. Fields sharing the same
-// resolved SQL reuse a single options variable (batched loader).
-func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (optVars map[string]string, loadCode string) {
+// Returns: fieldName→goVarName map for the value→label options, a second
+// fieldName→varName map for the per-field `copies:` auto-fill data (key → map
+// of {target form field: string value}), and the code to load them at request
+// time by running "SELECT value, label [, copy columns…] FROM (rawSQL) AS _opt".
+// The SQL per field resolves in order: options_sql (explicit), FK-derived SQL
+// from the schema block (a field matching a foreign key with
+// options_value/options_label), else nothing. Fields sharing the same resolved
+// SQL AND the same copies mapping reuse a single options variable (batched
+// loader). For FK-derived SQL the copies' source columns are appended to the
+// loader SELECT; a custom options_sql is wrapped verbatim and must expose them
+// itself. Each copy value is formatted for its target field type via
+// viewmodels.PickCopyValue.
+func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (optVars, copyVars map[string]string, loadCode string) {
 	optVars = make(map[string]string)
+	copyVars = make(map[string]string)
 	var loads []string
 	loaded := map[string]string{}
 	for _, f := range fields {
@@ -2176,13 +2316,36 @@ func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (
 		if sql == "" {
 			continue
 		}
-		if varName, ok := loaded[sql]; ok {
+		targets := sortedCopyTargets(f)
+		inner := sql
+		if len(targets) > 0 && f.OptionsSQL == "" && f.OptionsValue != "" && f.OptionsLabel != "" {
+			if st := g.schemaTable(tableName(r)); st != nil {
+				for _, fk := range st.ForeignKeys {
+					if strings.EqualFold(fk.Column, f.Name) {
+						var srcs []string
+						for _, t := range targets {
+							srcs = append(srcs, f.Copies[t])
+						}
+						inner = fmt.Sprintf("SELECT %s, %s, %s FROM %s", f.OptionsValue, f.OptionsLabel, strings.Join(srcs, ", "), fk.ForeignTable)
+						break
+					}
+				}
+			}
+		}
+		dedupKey := inner
+		if len(targets) > 0 {
+			dedupKey += "|" + strings.Join(targets, ",") + "|" + strings.Join(scanSources(f, targets), ",")
+		}
+		if varName, ok := loaded[dedupKey]; ok {
 			optVars[f.Name] = varName
+			if len(targets) > 0 {
+				copyVars[f.Name] = copyVarsOf(varName)
+			}
 			continue
 		}
 		varName := f.Name + "Opts"
 		optVars[f.Name] = varName
-		loaded[sql] = varName
+		loaded[dedupKey] = varName
 		optField := f.OptionsValue
 		if optField == "" {
 			optField = "id"
@@ -2191,10 +2354,263 @@ func (g *Generator) buildOptionsLoader(r types.Resource, fields []types.Field) (
 		if optLabel == "" {
 			optLabel = "name"
 		}
+
+		if len(targets) > 0 {
+			copyVar := f.Name + "Copies"
+			copyVars[f.Name] = copyVar
+			srcs := scanSources(f, targets)
+			var scanVars []string
+			var ampVars []string
+			var copyExprs []string
+			for i, t := range targets {
+				vname := fmt.Sprintf("cpy%d", i)
+				scanVars = append(scanVars, vname)
+				ampVars = append(ampVars, "&"+vname)
+				ft := fieldTypeOf(fields, t)
+				copyExprs = append(copyExprs, fmt.Sprintf("%q: viewmodels.PickCopyValue(%s, %q)", t, vname, ft))
+			}
+			loads = append(loads, fmt.Sprintf(`        %s := map[string]string{}
+        %s := map[string]map[string]string{}
+        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label, %s interface{}; if err := optRows.Scan(&val, &label, %s); err == nil { k := fmt.Sprintf("%%v", val); %s[k] = fmt.Sprintf("%%v", label); %s[k] = map[string]string{%s} } } } }`,
+				varName, copyVar, optField, optLabel, strings.Join(srcs, ", "), inner, strings.Join(scanVars, ", "), strings.Join(ampVars, ", "), varName, copyVar, strings.Join(copyExprs, ", ")))
+			continue
+		}
 		loads = append(loads, fmt.Sprintf(`        %s := map[string]string{}
-        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, optField, optLabel, sql, varName))
+        { optRows, err := db.QueryContext(r.Context(), "SELECT %s, %s FROM ("+%q+") AS _opt"); if err == nil { defer optRows.Close(); for optRows.Next() { var val, label interface{}; if err := optRows.Scan(&val, &label); err == nil { %s[fmt.Sprintf("%%v", val)] = fmt.Sprintf("%%v", label) } } } }`, varName, optField, optLabel, inner, varName))
 	}
-	return optVars, strings.Join(loads, "\n")
+	return optVars, copyVars, strings.Join(loads, "\n")
+}
+
+// sortedCopyTargets returns the sorted target form-field names from a field's
+// copies mapping (deterministic SQL/scan order in the emitted loader).
+func sortedCopyTargets(f types.Field) []string {
+	if len(f.Copies) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(f.Copies))
+	for t := range f.Copies {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// scanSources returns the distinct source columns of a copies mapping in the
+// order of the given sorted targets (deduped, order preserved).
+func scanSources(f types.Field, targets []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, t := range targets {
+		s := f.Copies[t]
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// fieldTypeOf returns the field type of a named form field, or "string" when
+// the field is unknown (a cross-form target falls back to plain string copy).
+func fieldTypeOf(fields []types.Field, name string) string {
+	for _, f := range fields {
+		if f.Name == name {
+			if f.Type == "" {
+				return "string"
+			}
+			return f.Type
+		}
+	}
+	return "string"
+}
+
+// copyVarsOf derives the copy-data variable name from an options var name.
+func copyVarsOf(optVar string) string {
+	return optVar[:len(optVar)-len("Opts")] + "Copies"
+}
+
+// childRel is a resolved master-detail relation from a header resource's
+// `children:` block: the section heading, the child's URL/package segment,
+// its row-key column, the FK column scoping the lines, the display columns and
+// the child table name, plus a per-child load var name for the emitted handler.
+type childRel struct {
+	heading    string
+	resName    string
+	childLower string
+	childTable string
+	childID    string
+	fkCol      string
+	cols       []types.Column
+	varName    string
+}
+
+// childRels resolves the `children:` block of a header resource into concrete
+// relations (D14). The child FK column is taken from the entry or derived by
+// scanning the `schema:` block for a reverse FK (a foreign key on the child's
+// table pointing at the parent's table/pk). Display columns default to the
+// child resource's list columns, filtered to columns present in the child's
+// schema table (label-join columns like {fk}_label are dropped — they cannot
+// be selected from the child table directly). Entries whose child resource or
+// schema table cannot be resolved are skipped (the parser already flags them).
+func (g *Generator) childRels(r types.Resource) []childRel {
+	var out []childRel
+	byName := map[string]types.Resource{}
+	for _, cr := range g.Config.Resources {
+		byName[cr.Name] = cr
+	}
+	parentTable := tableName(r)
+	parentPK := idColumn(r)
+	if st := g.schemaTable(parentTable); st != nil && st.PK != "" {
+		parentPK = st.PK
+	}
+	for i, ch := range r.Children {
+		cr, ok := byName[ch.Resource]
+		if !ok {
+			continue
+		}
+		childTable := tableName(cr)
+		fkCol := ch.Column
+		if fkCol == "" {
+			cst := g.schemaTable(childTable)
+			if cst == nil {
+				continue
+			}
+			for _, fk := range cst.ForeignKeys {
+				if strings.EqualFold(fk.ForeignTable, parentTable) && strings.EqualFold(fk.ForeignColumn, parentPK) {
+					fkCol = fk.Column
+					break
+				}
+			}
+			if fkCol == "" {
+				continue
+			}
+		}
+		cols := ch.Columns
+		if len(cols) == 0 && cr.List != nil {
+			cols = g.childTableColumns(cr, cr.List.Columns)
+		}
+		heading := ch.Name
+		if heading == "" {
+			heading = cr.Label
+			if heading == "" {
+				heading = cr.Name
+			}
+		}
+		out = append(out, childRel{
+			heading:    heading,
+			resName:    cr.Name,
+			childLower: strings.ToLower(cr.Name),
+			childTable: childTable,
+			childID:    idColumn(cr),
+			fkCol:      fkCol,
+			cols:       cols,
+			varName:    fmt.Sprintf("childLines%d", i+1),
+		})
+	}
+	return out
+}
+
+// childTableColumns filters a column list down to the real columns of a
+// resource's schema table (case-insensitive). Columns not present in the
+// schema (e.g. FK label columns like role_id_label) are dropped so a raw
+// SELECT on the child table stays valid. The row-key column is always kept.
+func (r *Generator) childTableColumns(cr types.Resource, cols []types.Column) []types.Column {
+	st := r.schemaTable(tableName(cr))
+	if st == nil {
+		return cols
+	}
+	key := idColumn(cr)
+	var out []types.Column
+	seen := map[string]bool{key: true}
+	out = append(out, types.Column{Name: key})
+	for _, c := range cols {
+		if strings.EqualFold(c.Name, key) || seen[c.Name] {
+			continue
+		}
+		if !schemaColPresent(st, c.Name) {
+			continue
+		}
+		seen[c.Name] = true
+		out = append(out, c)
+	}
+	return out
+}
+
+// schemaColPresent reports whether a schema table has a column with the given
+// name (exact or case-insensitive).
+func schemaColPresent(st *types.SchemaTable, name string) bool {
+	for _, c := range st.Columns {
+		if c.Name == name || strings.EqualFold(c.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// childLinesParts emits the Go source that loads a header resource's child
+// lines and the `Lines: []viewmodels.ChildLinesData{…}` literal for a detail or
+// update handler. parentIDExpr is the Go expression for the parent key string,
+// and parentIDArg the Go expression bound to the child FK placeholder (both
+// derive from the same value). Returns the loadCode (childLinesN :=
+// loadChildLines(…)), the Lines literal block, and whether the loadChildLines
+// helper must be emitted into the handler file.
+func (g *Generator) childLinesParts(r types.Resource, parentIDExpr, parentIDArg string) (loadCode, linesCode string, has bool) {
+	rels := g.childRels(r)
+	if len(rels) == 0 {
+		return "", "", false
+	}
+	parentLower := strings.ToLower(r.Name)
+	panelPath := g.Config.Panel.Path
+	var loads []string
+	var parts []string
+	for _, rel := range rels {
+		// SELECT child key + display columns (deduped), driver-aware FK param.
+		var sel []string
+		seen := map[string]bool{}
+		add := func(c string) {
+			if !seen[c] {
+				seen[c] = true
+				sel = append(sel, c)
+			}
+		}
+		add(rel.childID)
+		for _, c := range rel.cols {
+			add(c.Name)
+		}
+		query := fmt.Sprintf("SELECT %s FROM %s t WHERE t.%s = %s", strings.Join(sel, ", "), rel.childTable, rel.fkCol, g.placeholder(1))
+		loads = append(loads, fmt.Sprintf(`        %s := loadChildLines(r.Context(), db, %q, %s)`, rel.varName, query, parentIDArg))
+
+		var colDefs []string
+		for _, c := range rel.cols {
+			label := c.Label
+			if label == "" {
+				label = c.Name
+			}
+			ft := c.Type
+			if ft == "" {
+				ft = "string"
+			}
+			colDefs = append(colDefs, fmt.Sprintf("{Name: %q, Label: %q, FieldType: %q}", c.Name, label, ft))
+		}
+		parts = append(parts, fmt.Sprintf(`        {
+            Heading:       %q,
+            Resource:      %q,
+            ResourceLower: %q,
+            IDColumn:      %q,
+            FKColumn:      %q,
+            ParentID:      %s,
+            PanelPath:     %q,
+            CSRFToken:     auth.CSRFToken(r, w),
+            ReturnURL:     fmt.Sprintf("%%s/%%s/%%s/edit", %q, %q, %s),
+            Fields: []viewmodels.ColumnDef{
+                %s,
+            },
+            Rows:   %s,
+            Count:  len(%s),
+        },`, rel.heading, rel.resName, rel.childLower, rel.childID, rel.fkCol, parentIDExpr, g.Config.Panel.Path,
+			panelPath, parentLower, parentIDExpr, strings.Join(colDefs, ",\n"), rel.varName, rel.varName))
+	}
+	return strings.Join(loads, "\n"), "Lines: []viewmodels.ChildLinesData{\n" + strings.Join(parts, "\n") + "\n        },", true
 }
 
 // optionSQL resolves the option-list SQL for a form field: options_sql wins,
@@ -2224,10 +2640,16 @@ func (g *Generator) optionSQL(r types.Resource, f types.Field) string {
 // formFieldDefsWithOpts renders the []viewmodels.ColumnDef literal for form
 // fields, wiring each field's Options to the runtime-loaded variable when the
 // field has an option loader, or to the inline static options map otherwise.
-// Params: fields (form field definitions), optVars (map from field name to the
-// generated options variable, as returned by buildOptionsLoader).
+// copyVars adds the runtime-loaded `copies:` auto-fill data
+// (CopyData: <var>). seedPickers lists picker fields that may be locked from a
+// parent context (D14: the handler declares a `locked map[string]bool` and the
+// emitted def references it, so the same form renders the picker locked only
+// when opened with ?<fk>=<parent id>).
+// Params: fields (form field definitions), optVars/copyVars (field name to
+// generated option/copy variables from buildOptionsLoader), seedPickers (names
+// of picker fields participating in parent-context FK lock).
 // Returns: the comma-joined Go source string for the field defs.
-func formFieldDefsWithOpts(fields []types.Field, optVars map[string]string) string {
+func formFieldDefsWithOpts(fields []types.Field, optVars, copyVars map[string]string, seedPickers map[string]bool) string {
 	var defs []string
 	for _, f := range fields {
 		label := f.Label
@@ -2248,9 +2670,28 @@ func formFieldDefsWithOpts(fields []types.Field, optVars map[string]string) stri
 		if _, ok := optVars[f.Name]; ok && (f.Type == "select" || f.Type == "relation") {
 			picker = true
 		}
-		defs = append(defs, fmt.Sprintf("{Name: %q, Label: %q, FieldType: %q, Picker: %t, Options: %s}", f.Name, label, f.Type, picker, opts))
+		extra := ""
+		if copyName, ok := copyVars[f.Name]; ok {
+			extra += fmt.Sprintf(", CopyData: %s", copyName)
+		}
+		if picker && seedPickers[f.Name] {
+			extra += fmt.Sprintf(", Locked: locked[%q]", f.Name)
+		}
+		defs = append(defs, fmt.Sprintf("{Name: %q, Label: %q, FieldType: %q, Picker: %t, Options: %s%s}", f.Name, label, f.Type, picker, opts, extra))
 	}
 	return strings.Join(defs, ",\n")
+}
+
+// seedPickersOf returns the picker field names of a field list whose value can
+// be seeded and locked from the URL (a parent context in master-detail, D14).
+func (g *Generator) seedPickersOf(r types.Resource, fields []types.Field) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range fields {
+		if g.isPickerField(r, f) {
+			out[f.Name] = true
+		}
+	}
+	return out
 }
 
 // colsLiteral renders a list of double-quoted Go string literals for the given
@@ -2285,8 +2726,8 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	update := r.Form.Update
 
 	var optLoadCode string
-	var optVars map[string]string
-	optVars, optLoadCode = g.buildOptionsLoader(r, paramFields)
+	var optVars, copyVars map[string]string
+	optVars, copyVars, optLoadCode = g.buildOptionsLoader(r, paramFields)
 
 	var colNames []string
 	var valExprs []string
@@ -2425,6 +2866,45 @@ func safeUploadExt(ext string) bool {
 		postCode += g.hookCallsStr(update.Hooks.After, "scope", "        ") + "\n"
 	}
 
+	// D14: parent-context FK seeding/locking, child-lines loading and return
+	// navigation for the edit form. seedPickers lists picker fields that can be
+	// locked from a parent context (?fk=<parent id>); the runtime `locked` map
+	// drives the ColumnDef.Locked flags.
+	seedPickers := g.seedPickersOf(r, paramFields)
+	gateCode := ""
+	if len(seedPickers) > 0 {
+		var seedLines []string
+		for f := range seedPickers {
+			seedLines = append(seedLines, fmt.Sprintf(`        if v := r.URL.Query().Get(%q); v != "" {
+            item[%q] = v
+            locked[%q] = true
+        }
+`, f, f, f))
+		}
+		gateCode = "        locked := map[string]bool{}\n" + strings.Join(seedLines, "")
+	}
+	childLoad, childLines, hasChildren := g.childLinesParts(r, `fmt.Sprintf("%d", id)`, "int64(id)")
+	gateCode += childLoad
+	linesField := childLines
+	derivable := len(seedPickers) > 0 || hasChildren
+	returnField := ""
+	if derivable {
+		returnField = fmt.Sprintf(`Return:        r.URL.Query().Get("return"),
+`)
+	}
+	redirectRet := ""
+	if derivable {
+		redirectRet = `        ret := r.FormValue("_return")
+        if ret == "" {
+            ret = r.URL.Query().Get("return")
+        }
+        if ret != "" && strings.HasPrefix(ret, "/") {
+            http.Redirect(w, r, ret, http.StatusFound)
+            return
+        }
+`
+	}
+
 	code := fmt.Sprintf(`package %s
 
 import (
@@ -2459,9 +2939,10 @@ func Update(db *sql.DB) http.HandlerFunc {
             }
 
             %s
+%s
             vd := &viewmodels.FormData{
                 Item: item,
-                Fields: []viewmodels.ColumnDef{
+%s                Fields: []viewmodels.ColumnDef{
                     %s,
                 },
                 Action:    %s,
@@ -2470,7 +2951,7 @@ func Update(db *sql.DB) http.HandlerFunc {
                 PanelPath: %q,
                 IsCreate:  false,
                 CSRFToken: auth.CSRFToken(r, w),
-            }
+%s            }
             layoutviews.Base(%q, %q, viewmodels.DefaultTheme(), auth.UserName(r), auth.CSRFToken(r, w), views.%sForm(vd)).Render(r.Context(), w)
             return
         }
@@ -2481,7 +2962,7 @@ func Update(db *sql.DB) http.HandlerFunc {
         }
 
 %s
-        http.Redirect(w, r, %q, http.StatusFound)
+%s        http.Redirect(w, r, %q, http.StatusFound)
     }
 }
 %s`, pkgName,
@@ -2494,15 +2975,19 @@ func Update(db *sql.DB) http.HandlerFunc {
 		populateQuery,
 		g.idGoTypeForResource(r),
 		optLoadCode,
-		formFieldDefsWithOpts(paramFields, optVars),
+		gateCode,
+		linesField,
+		formFieldDefsWithOpts(paramFields, optVars, copyVars, seedPickers),
 		fmt.Sprintf("fmt.Sprintf(\"%%s/%%s/%%d\", %q, %q, id)", g.Config.Panel.Path, pkgName),
 		r.Name,
 		g.Config.Panel.Path,
+		returnField,
 		resourceTitle(r),
 		g.Config.Panel.Path,
 		r.Name,
 		formParseCode,
 		postCode,
+		redirectRet,
 		listPath,
 		uploadHelper)
 

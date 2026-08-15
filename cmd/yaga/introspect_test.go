@@ -157,6 +157,54 @@ func TestWriteResourceYAMLRelationField(t *testing.T) {
 	}
 }
 
+// TestWriteResourceYAMLChildren ensures a table with children who FK back to
+// its primary key emits a `children:` block (D14) with the reverse-FK column,
+// and that FK columns pointing at a NON-key column are ignored.
+func TestWriteResourceYAMLChildren(t *testing.T) {
+	var b strings.Builder
+	tables := []TableInfo{
+		{
+			Name: "orders",
+			Columns: []ColumnInfo{
+				{Name: "id", DBType: "integer", IsPrimaryKey: true},
+				{Name: "customer_name", DBType: "character varying"},
+			},
+		},
+		{
+			Name: "order_lines",
+			Columns: []ColumnInfo{
+				{Name: "id", DBType: "integer", IsPrimaryKey: true},
+				{Name: "order_id", DBType: "integer"},
+				{Name: "qty", DBType: "integer"},
+			},
+			ForeignKeys: []ForeignKeyInfo{{Column: "order_id", ForeignTable: "orders", ForeignColumn: "id"}},
+		},
+	}
+	writeResourceYAML(&b, tables[0], tables, "postgres")
+	out := b.String()
+
+	if !strings.Contains(out, "    children:\n") {
+		t.Fatalf("orders must emit a children block, got:\n%s", out)
+	}
+	if !strings.Contains(out, "      - name: OrderLines\n") {
+		t.Fatalf("children must list the child by its plural name, got:\n%s", out)
+	}
+	if !strings.Contains(out, "        resource: OrderLine\n") {
+		t.Fatalf("children must reference the child resource name, got:\n%s", out)
+	}
+	if !strings.Contains(out, "        column: order_id\n") {
+		t.Fatalf("children must record the reverse FK column, got:\n%s", out)
+	}
+
+	// sklad_zasoby.pn references sklad_zbozi.pn which is NOT the parent's key,
+	// so sklad_zbozi gets no children entry.
+	var b2 strings.Builder
+	writeResourceYAML(&b2, fkSchemaTables()[1], fkSchemaTables(), "postgres")
+	if strings.Contains(b2.String(), "children:") {
+		t.Fatalf("non-PK FK target must not emit a children block, got:\n%s", b2.String())
+	}
+}
+
 // viewTables returns tables for a schema where order_summary is a database view
 // (no primary key, no foreign keys) alongside a real orders table.
 func viewTables() []TableInfo {

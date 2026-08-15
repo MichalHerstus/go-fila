@@ -359,6 +359,7 @@ func (e *Editor) resDetailFieldsPath(i int) string { return e.resDetailPath(i) +
 func (e *Editor) resFormPath(i int) string         { return e.resPath(i) + "/Form" }
 func (e *Editor) resActionsPath(i int) string      { return e.resPath(i) + "/Actions" }
 func (e *Editor) resPoliciesPath(i int) string     { return e.resPath(i) + "/Policies" }
+func (e *Editor) resChildrenPath(i int) string     { return e.resPath(i) + "/Children" }
 func (e *Editor) resSQLPath(i int) string          { return e.resPath(i) + "/SQL" }
 
 func (e *Editor) resColumnPath(i, ci int) string {
@@ -432,8 +433,55 @@ func (e *Editor) resolveResources(rest []string) (navTarget, error) {
 		if len(rest) == 1 {
 			return navTarget{base + "/Policies", func() tview.Primitive { return e.policiesPage(ridx) }}, nil
 		}
+	case "children":
+		return e.resolveResChildren(ridx, base, rest[1:])
 	case "sql":
 		return e.resolveResSQL(ridx, base, rest[1:])
+	}
+	return navTarget{}, navErr(strings.Join(rest, "/"))
+}
+
+// resolveResChildren resolves .../Children[/<child>[/Columns]].
+func (e *Editor) resolveResChildren(ridx int, base string, rest []string) (navTarget, error) {
+	childrenPath := base + "/Children"
+	if len(rest) == 0 {
+		return navTarget{childrenPath, func() tview.Primitive { return e.childrenPage(ridx) }}, nil
+	}
+	r := &e.cfg.Resources[ridx]
+	ci := -1
+	for i := range r.Children {
+		label := r.Children[i].Name
+		if label == "" {
+			label = r.Children[i].Resource
+		}
+		if matchesSeg(label, rest[0]) {
+			ci = i
+			break
+		}
+	}
+	if ci < 0 {
+		labels := make([]string, len(r.Children))
+		for i := range r.Children {
+			label := r.Children[i].Name
+			if label == "" {
+				label = r.Children[i].Resource
+			}
+			labels[i] = segName(label, i)
+		}
+		ci = findSeg(labels, rest[0])
+	}
+	if ci < 0 {
+		return navTarget{}, navErr(rest[0])
+	}
+	chPath := childrenPath + "/" + segName(r.Children[ci].Name, ci)
+	rest = rest[1:]
+	if len(rest) == 0 {
+		return navTarget{chPath, func() tview.Primitive { return e.childResourcePage(ridx, ci) }}, nil
+	}
+	if matchesSeg(rest[0], "Columns") && len(rest) == 1 {
+		return navTarget{chPath + "/Columns", func() tview.Primitive {
+			return e.childColumnsPage(&e.cfg.Resources[ridx].Children[ci])
+		}}, nil
 	}
 	return navTarget{}, navErr(strings.Join(rest, "/"))
 }
@@ -692,6 +740,12 @@ func (e *Editor) resolveResFields(ridx int, fp, title string, get func() *[]type
 				return e.tagsPage(fieldPath+"/Visible", "Field visible in", visibleOptions,
 					func() []string { return fld.Visible },
 					func(v []string) { fld.Visible = v })
+			}}, nil
+		case matchesSeg(rest[0], "Copies"):
+			return navTarget{fieldPath + "/Copies", func() tview.Primitive {
+				return e.stringMapPage(fieldPath+"/Copies", "Copy into fields (field: related column)",
+					func() map[string]string { return fld.Copies },
+					func(v map[string]string) { fld.Copies = v })
 			}}, nil
 		}
 	}

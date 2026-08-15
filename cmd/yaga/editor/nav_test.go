@@ -84,6 +84,8 @@ func TestResolvePath(t *testing.T) {
 	check("Resources/User/Detail", "Resources/User/Detail")
 	check("Resources/User/Detail/Fields/email", "Resources/User/Detail/Fields/email")
 	check("Resources/User/Form/Create/Fields/email", "Resources/User/Form/Create/Fields/email")
+	check("Resources/User/Form/Create/Fields/email/Copies", "Resources/User/Form/Create/Fields/email/Copies")
+	check("Resources/User/Children", "Resources/User/Children")
 	check("Resources/User/Form/Update", "Resources/User/Form/Update")
 	check("Resources/User/Form/Delete/Hooks/After", "Resources/User/Form/Delete/Hooks/After")
 	check("Resources/User/Actions/archive", "Resources/User/Actions/archive")

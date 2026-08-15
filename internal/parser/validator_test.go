@@ -491,3 +491,93 @@ func TestValidateWarningsNotBlocking(t *testing.T) {
 		t.Errorf("clamps applied: columns=%d max_width=%q", cfg2.Resources[0].Card.Columns, cfg2.Panel.Layout.MaxContentWidth)
 	}
 }
+
+// TestValidateCopiesWarnings ensures `copies:` problems are non-fatal warnings:
+// a copies map on a non-picker field, a copy into an unknown field, and a
+// self-copy all surface as warnings while the config still validates.
+func TestValidateCopiesWarnings(t *testing.T) {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Resources: []types.Resource{
+			{
+				Name: "User",
+				Form: &types.FormConfig{
+					Create: &types.FormAction{Fields: []types.Field{
+						{Name: "city", Type: "string"},
+						{Name: "role_id", Type: "relation", OptionsValue: "id", OptionsLabel: "name", Copies: map[string]string{"city": "city"}},
+					}},
+					Update: &types.FormAction{Fields: []types.Field{
+						{Name: "city", Type: "string"},
+						{Name: "role_id", Type: "relation", OptionsValue: "id", OptionsLabel: "name", Copies: map[string]string{"nope": "city", "role_id": "id"}},
+					}},
+				},
+			},
+		},
+	}
+	errs := ValidateAll(cfg)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("copies warnings must not block Validate: %v", err)
+	}
+	var warns []string
+	for _, e := range errs {
+		if _, ok := e.(Warning); ok {
+			warns = append(warns, e.Error())
+		}
+	}
+	joined := strings.Join(warns, "\n")
+	if !strings.Contains(joined, "copies into itself") {
+		t.Errorf("expected self-copy warning, got:\n%s", joined)
+	}
+	if !strings.Contains(joined, "not a field of the same form") {
+		t.Errorf("expected unknown-target warning, got:\n%s", joined)
+	}
+}
+
+// TestValidateChildren ensures the master-detail children block is validated:
+// an unknown child resource and an explicit FK column missing from the child
+// schema are errors; a reverse-FK-derived column resolves silently.
+func TestValidateChildren(t *testing.T) {
+	schema := &types.Schema{Tables: []types.SchemaTable{
+		{Name: "orders", PK: "id", Columns: []types.SchemaColumn{{Name: "id", Type: "integer", PrimaryKey: true}, {Name: "customer_name", Type: "string"}}},
+		{Name: "order_lines", PK: "id", Columns: []types.SchemaColumn{{Name: "id", Type: "integer", PrimaryKey: true}, {Name: "order_id", Type: "integer"}, {Name: "qty", Type: "integer"}},
+			ForeignKeys: []types.SchemaFK{{Column: "order_id", ForeignTable: "orders", ForeignColumn: "id", Label: "customer_name"}}},
+	}}
+	makeCfg := func(children []types.ChildResource) *types.Config {
+		return &types.Config{
+			Version: "1", Panel: types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+			Schema: schema,
+			Resources: []types.Resource{
+				{Name: "Order", Label: "Orders", Table: "orders", Children: children},
+				{Name: "OrderLine", Label: "Order Lines", Table: "order_lines"},
+			},
+		}
+	}
+
+	// Derived FK column resolves silently (no errors).
+	if errs := ValidateAll(makeCfg([]types.ChildResource{{Name: "Lines", Resource: "OrderLine"}})); len(errs) != 0 {
+		t.Fatalf("derived children must validate, got %v", errs)
+	}
+
+	// Unknown child resource is an error.
+	found := false
+	for _, e := range ValidateAll(makeCfg([]types.ChildResource{{Name: "Lines", Resource: "Nope"}})) {
+		if strings.Contains(e.Error(), "not a defined resource") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("unknown children.resource must be an error")
+	}
+
+	// Explicit FK column missing from the child schema is an error.
+	found = false
+	for _, e := range ValidateAll(makeCfg([]types.ChildResource{{Name: "Lines", Resource: "OrderLine", Column: "bogus"}})) {
+		if strings.Contains(e.Error(), "not a column of order_lines") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("children column missing from the child table must be an error")
+	}
+}

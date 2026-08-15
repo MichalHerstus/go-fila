@@ -23,6 +23,10 @@ type Resource struct {
 	// ImportCSV enables the POST /{res}/import/csv route and the "Import CSV"
 	// button on the list view. Imports reuse the create form's field set.
 	ImportCSV bool `yaml:"import_csv"`
+	// Children declares 1 → many master-detail sections on this header
+	// resource (D14): each entry embeds a read-only table of the child
+	// resource's rows whose FK points back at this resource's key.
+	Children []ChildResource `yaml:"children"`
 }
 
 // ListConfig defines the resource list view: the displayed columns, the rows
@@ -132,6 +136,26 @@ type Field struct {
 	OptionsLabel string            `yaml:"options_label"`
 	OptionsSQL   string            `yaml:"options_sql"`
 	Options      map[string]string `yaml:"options"`
+	// Copies, when set on a select/relation picker field, auto-fills other form
+	// fields from the selected related record. The map keys are form field
+	// names on the SAME form; the values are column names on the related table
+	// whose value is copied into that field when a picker row is selected. For
+	// FK-derived option SQL the columns are added to the loader SELECT; a
+	// custom options_sql must expose them itself.
+	Copies map[string]string `yaml:"copies"`
+}
+
+// ChildResource declares one master-detail section on a header resource (D14):
+// Name is the optional section heading (defaults to the child resource's
+// label), Resource is the child resource name, Column overrides the child's FK
+// column (auto-derived from the `schema:` reverse FK when empty) and Columns
+// overrides the child-line column list (defaults to the child resource's list
+// columns).
+type ChildResource struct {
+	Name     string   `yaml:"name"`
+	Resource string   `yaml:"resource"`
+	Column   string   `yaml:"column"`
+	Columns  []Column `yaml:"columns"`
 }
 
 // Validation declares min/max constraints for a form field.

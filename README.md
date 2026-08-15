@@ -446,11 +446,18 @@ The card view is view-only (no CRUD wiring of its own). It is served at `GET /{p
             required: true
             visible: [create]      # on create forms, only render if "create" is in
                                    #   this list; other contexts are not special-cased
-          - name: role_id
+- name: role_id
             type: select
             options_query: ListRoles   # dynamic options from a SQLC query name
             options_value: id          # column for the option value. Default: "id".
             options_label: name        # column for the option label. Default: "name".
+          - name: customer_id
+            type: relation
+            options_value: id
+            options_label: name
+            copies:                    # auto-fill siblings when a picker row is selected:
+              city: city              #   target field `city` <- related row's `city`
+              customer_since: created_at
           - name: status
             type: select
             options: { active: Active, inactive: Inactive }  # static value->label map
@@ -470,6 +477,12 @@ The card view is view-only (no CRUD wiring of its own). It is served at `GET /{p
             options_query: ListRoles
       delete: {}                    # presence enables the delete button + route
                                     #   (raw "DELETE FROM <table> WHERE id = $1")
+  children:                        # optional master-detail sections (D14)
+    - name: Lines                 #   section heading (defaults to child label)
+      resource: OrderLine          #   child resource name
+      column: order_id             #   child FK column (default: derived from schema)
+      columns:                     #   optional; default = child's list columns
+        - { name: qty, label: "Qty", type: integer }
 ```
 
 - **create** renders a GET form and performs a raw `INSERT INTO <table> (<fields>) VALUES ($1...)` on POST, then redirects to the list. `password` fields are bcrypt-hashed first. `file`/`image` fields are saved to `static/uploads/<field>/<timestamp><ext>` and the relative URL is stored.

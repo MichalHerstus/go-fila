@@ -67,6 +67,7 @@ func (e *Editor) resourcePage(idx int) tview.Primitive {
 		e.yesno(f, "Import CSV", r.ImportCSV, func(v bool) { r.ImportCSV = v })
 		e.addButton(f, "Actions", func() { e.showPage(e.resActionsPath(idx), e.actionsPage(idx)) })
 		e.addButton(f, "Policies", func() { e.showPage(e.resPoliciesPath(idx), e.policiesPage(idx)) })
+		e.addButton(f, "Children", func() { e.showPage(e.resChildrenPath(idx), e.childrenPage(idx)) })
 		e.head(f, "Queries")
 		e.addButton(f, "SQL queries", func() { e.showPage(e.resSQLPath(idx), e.sqlQueriesPage(idx)) })
 	})

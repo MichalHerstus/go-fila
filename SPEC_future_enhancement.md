@@ -947,7 +947,7 @@ byte-identical.
 
 ### D14 — Master-detail (header + child lines) navigation
 
-**Status: planned (2026-08-14), not started.** Opt-in master-detail support for
+**Status: implemented (2026-08-15).** Opt-in master-detail support for
 document-oriented resources (Order/Invoice etc.) built from two related tables with a
 1 → many relation: one header table (e.g. `orders`) plus many child-line records that
 carry an FK to the header (e.g. `order_lines.order_id → orders.id`). The header's

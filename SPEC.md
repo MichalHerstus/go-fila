@@ -275,6 +275,13 @@ resources:
             options_query: ListRoles     # SQLC query for dynamic options
             options_value: id
             options_label: name
+          - name: customer_id
+            type: relation
+            options_value: id
+            options_label: name
+            copies:                      # on select, auto-fill sibling fields
+              city: city                #   field `city`  <- related row's `city`
+              customer_since: created_at #   form field <- related column
           - name: status
             type: select
             options:
@@ -323,6 +330,22 @@ resources:
     # one transaction and the result is reported as a ?flash= topbar message.
     # File/image create fields are rejected (skipped with a per-row error).
     import_csv: true
+
+    # ── MASTER-DETAIL CHILDREN (optional, D14) ──────
+    # Opt-in 1→many navigation: the detail view and the edit form embed a
+    # read-only table of the child resource's rows whose FK points back at this
+    # resource's key. Child rows link to their own pre-bound detail/edit; the
+    # edit form gains per-line Edit/Delete and an "Add Line" button that opens
+    # the child create form with the FK pre-seeded and locked. The child FK
+    # column is derived from the schema block (a reverse FK targeting this
+    # table's key) when `column` is omitted.
+    children:
+      - name: Lines                  # optional section heading
+        resource: OrderLine          # required: child resource name
+        column: order_id             # optional; auto-derived from schema
+        columns:                     # optional; default = child's list columns
+          - { name: qty, label: "Qty", type: integer }
+          - { name: total, label: "Total", type: float }
 ```
 
 ### Hooks (v0.5+)
@@ -368,7 +391,7 @@ resources:
 | `date` | Date only |
 | `image` | Thumbnail |
 | `file` | Download link |
-| `select` | Dropdown (static or SQLC-backed); with `options_query` renders as a modal record picker (Browse button + searchable list, only row selection active) |
+| `select` | Dropdown (static or SQLC-backed); with `options_query` renders as a modal record picker (Browse button + searchable list). A `copies: {field: column}` map auto-fills those sibling form fields with the selected row's column values (datetime/date targets match the input layout); FK-derived option SQL carries the columns automatically, a custom `options_sql` must select them. Picker fields opened from a parent context (master-detail) render read-only with Browse suppressed |
 | `relation` | Link to related record |
 | `json` | Pretty-printed |
 | `float` | Decimal / number input |

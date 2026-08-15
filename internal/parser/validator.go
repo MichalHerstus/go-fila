@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/MichalHerstus/yaga/internal/types"
 )
@@ -188,6 +189,12 @@ func ValidateAll(cfg *types.Config) []error {
 		}
 		if err := validateResourceHooks(r); err != nil {
 			add(fmt.Errorf("resources[%d]: %w", i, err))
+		}
+		for _, e := range validateCopies(r, i) {
+			add(e)
+		}
+		for _, e := range validateChildren(cfg, r, i) {
+			add(e)
 		}
 	}
 	validateProcedures(cfg, add)
@@ -437,4 +444,164 @@ func validateHooks(h *types.Hooks) error {
 		}
 	}
 	return nil
+}
+
+// validateCopies checks a resource's `copies:` auto-fill mappings. Copies only
+// make sense on a select/relation picker field, and every copy target must be a
+// real field of the SAME form (the create+update union) other than the picker
+// itself. Problems are non-fatal warnings — a missing target simply no-ops at
+// runtime (the JS finds no element).
+func validateCopies(r types.Resource, idx int) []error {
+	var errs []error
+	var formNames []string
+	if r.Form != nil {
+		for _, fa := range []*types.FormAction{r.Form.Create, r.Form.Update} {
+			if fa == nil {
+				continue
+			}
+			for _, f := range fa.Fields {
+				formNames = append(formNames, f.Name)
+			}
+		}
+	}
+	inForm := func(name string) bool {
+		for _, n := range formNames {
+			if n == name {
+				return true
+			}
+		}
+		return false
+	}
+	checkAction := func(section string, fields []types.Field) {
+		for _, f := range fields {
+			if len(f.Copies) == 0 {
+				continue
+			}
+			if f.Type != "select" && f.Type != "relation" {
+				errs = append(errs, warn("resources[%d] (%s) %s field %q sets copies but is not a select/relation picker field", idx, r.Name, section, f.Name))
+				continue
+			}
+			for target := range f.Copies {
+				if target == f.Name {
+					errs = append(errs, warn("resources[%d] (%s) %s field %q copies into itself", idx, r.Name, section, f.Name))
+					continue
+				}
+				if !inForm(target) {
+					errs = append(errs, warn("resources[%d] (%s) %s field %q copies into %q which is not a field of the same form", idx, r.Name, section, f.Name, target))
+				}
+			}
+		}
+	}
+	if r.Form != nil && r.Form.Create != nil {
+		checkAction("form.create", r.Form.Create.Fields)
+	}
+	if r.Form != nil && r.Form.Update != nil {
+		checkAction("form.update", r.Form.Update.Fields)
+	}
+	return errs
+}
+
+// validateChildren checks the `children:` block of a header resource (D14):
+// every child.resource must exist, and the FK used to fetch the child lines
+// must resolve — either the explicit column is a real column of the child's
+// table, or (when empty) it is derived by scanning the `schema:` block for a
+// foreign key pointing at the parent's table/key. Column overrides must
+// reference child schema columns. When the schema block is absent the check is
+// skipped (the generator degrades for hand-written configs).
+func validateChildren(cfg *types.Config, r types.Resource, idx int) []error {
+	if len(r.Children) == 0 {
+		return nil
+	}
+	var errs []error
+	childByName := map[string]types.Resource{}
+	for _, cr := range cfg.Resources {
+		childByName[cr.Name] = cr
+	}
+	parentTable := tableName(r)
+	parentKey := resourceKey(r)
+	for j, ch := range r.Children {
+		if ch.Resource == "" {
+			errs = append(errs, fmt.Errorf("resources[%d] (%s) children[%d].resource is required", idx, r.Name, j))
+			continue
+		}
+		child, ok := childByName[ch.Resource]
+		if !ok {
+			errs = append(errs, fmt.Errorf("resources[%d] (%s) children[%d].resource %q is not a defined resource", idx, r.Name, j, ch.Resource))
+			continue
+		}
+		st := schemaTableByName(cfg, tableName(child))
+		if st == nil {
+			continue
+		}
+		fkCol := ch.Column
+		if fkCol == "" {
+			for _, fk := range st.ForeignKeys {
+				if strings.EqualFold(fk.ForeignTable, parentTable) && strings.EqualFold(fk.ForeignColumn, parentKey) {
+					fkCol = fk.Column
+					break
+				}
+			}
+			if fkCol == "" {
+				errs = append(errs, fmt.Errorf("resources[%d] (%s) children[%d]: no FK from %s to %s in the schema block; set column explicitly", idx, r.Name, j, tableName(child), parentTable))
+				continue
+			}
+		} else if !schemaHasColumn(st, fkCol) {
+			errs = append(errs, fmt.Errorf("resources[%d] (%s) children[%d].column %q is not a column of %s", idx, r.Name, j, fkCol, tableName(child)))
+		}
+		for _, c := range ch.Columns {
+			if !schemaHasColumn(st, c.Name) {
+				errs = append(errs, fmt.Errorf("resources[%d] (%s) children[%d].columns %q is not a column of %s", idx, r.Name, j, c.Name, tableName(child)))
+			}
+		}
+	}
+	return errs
+}
+
+// tableName mirrors the generator's tableName() so validation matches the table
+// the generated handlers will hit: the explicit "table" override, else the
+// lowercase plural of the resource name.
+func tableName(r types.Resource) string {
+	if r.Table != "" {
+		return r.Table
+	}
+	return strings.ToLower(r.Name) + "s"
+}
+
+// resourceKey is the row-key column of a resource: the "id_column" override if
+// set, else "id" (matches the generator's idColumn()).
+func resourceKey(r types.Resource) string {
+	if r.IDColumn != "" {
+		return r.IDColumn
+	}
+	return "id"
+}
+
+// schemaTableByName returns the schema block entry for a table, comparing exact
+// then case-insensitive (MSSQL PascalCase names). nil when the config carries
+// no schema block or the table is absent.
+func schemaTableByName(cfg *types.Config, name string) *types.SchemaTable {
+	if cfg.Schema == nil {
+		return nil
+	}
+	for i := range cfg.Schema.Tables {
+		t := &cfg.Schema.Tables[i]
+		if t.Name == name || strings.EqualFold(t.Name, name) {
+			return t
+		}
+	}
+	return nil
+}
+
+// schemaHasColumn reports whether a schema table carries a column with the
+// given name (exact or case-insensitive).
+func schemaHasColumn(st *types.SchemaTable, name string) bool {
+	if st == nil {
+		return false
+	}
+	for _, c := range st.Columns {
+		if c.Name == name || strings.EqualFold(c.Name, name) {
+			return true
+		}
+	}
+	return false
 }

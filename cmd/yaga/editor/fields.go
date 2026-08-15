@@ -79,6 +79,12 @@ func (e *Editor) fieldPage(name string, get func() *[]types.Field, idx int) tvie
 				return fld.Visible
 			}, func(v []string) { fld.Visible = v }))
 		})
+		e.addButton(f, "Copies", func() {
+			copiesPath := fieldPath + "/Copies"
+			e.showPage(copiesPath, e.stringMapPage(copiesPath, "Copy into fields (field: related column)", func() map[string]string {
+				return fld.Copies
+			}, func(v map[string]string) { fld.Copies = v }))
+		})
 	})
 }
 

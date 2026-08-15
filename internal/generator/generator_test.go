@@ -2086,6 +2086,16 @@ func readResourceFile(t *testing.T, dir, pkg, file string) string {
 	return string(b)
 }
 
+// readViewTempl reads a generated templ view file under internal/views/resources.
+func readViewTempl(t *testing.T, dir, pkg, file string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "internal/views/resources", pkg, file))
+	if err != nil {
+		t.Fatalf("read %s: %v", file, err)
+	}
+	return string(b)
+}
+
 func TestGenerateExportSubset(t *testing.T) {
 	dir := t.TempDir()
 	g := New(csvConfig(), dir)
@@ -2311,8 +2321,8 @@ func TestGenerateOptionsLoaderFKFromSchema(t *testing.T) {
 	if !strings.Contains(code, `role_idOpts := map[string]string{}`) {
 		t.Errorf("create.go must emit the role_id options var\n--- generated:\n%s", code)
 	}
-	if !strings.Contains(code, `{Name: "role_id", Label: "role_id", FieldType: "relation", Picker: true, Options: role_idOpts}`) {
-		t.Errorf("create.go must wire the relation field to role_idOpts as a picker\n--- generated:\n%s", code)
+	if !strings.Contains(code, `{Name: "role_id", Label: "role_id", FieldType: "relation", Picker: true, Options: role_idOpts, Locked: locked["role_id"]}`) {
+		t.Errorf("create.go must wire the relation field to role_idOpts as a parent-lockable picker\n--- generated:\n%s", code)
 	}
 	// The form templ must render the modal picker for the same field (the
 	// templ's isPickerField uses the same optionSQL resolution as the loader).
@@ -2490,5 +2500,249 @@ func TestGenerateNoFilterRegression(t *testing.T) {
 	// Must use the old-style whereSQL (not parts)
 	if !strings.Contains(listCode, "whereSQL") {
 		t.Error("no-filter list.go must build whereSQL")
+	}
+}
+
+// copiesConfig returns a config with a picker field carrying a `copies:` map
+// (auto-fill target fields from the selected related record).
+func copiesConfig() *types.Config {
+	cfg := schemaConfig()
+	cfg.Resources[0].Form.Create.Fields = []types.Field{
+		{Name: "name", Type: "text"},
+		{Name: "city", Type: "string"},
+		{Name: "customer_country", Type: "string"},
+		{Name: "shipped_at", Type: "datetime"},
+		{Name: "role_id", Type: "relation", OptionsValue: "id", OptionsLabel: "name",
+			Copies: map[string]string{"city": "city", "customer_country": "country", "shipped_at": "created_at"}},
+	}
+	cfg.Resources[0].Form.Update.Fields = cfg.Resources[0].Form.Create.Fields
+	return cfg
+}
+
+// TestGenerateCopiesAutoFill ensures a picker field's `copies:` map extends the
+// FK-derived loader SELECT with the copy source columns, populates a per-row
+// copy-data variable keyed by the TARGET form field, formats datetime/date
+// targets, wires CopyData into the ColumnDef, and emits the picker copies data
+// attribute + auto-fill JS in the form template.
+func TestGenerateCopiesAutoFill(t *testing.T) {
+	dir := t.TempDir()
+	g := New(copiesConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	create := readResourceFile(t, dir, "user", "create.go")
+	// FK-derived SQL must carry the copy source columns in deterministic
+	// (sorted-target: city, customer_country, shipped_at) order.
+	if !strings.Contains(create, `SELECT id, name, city, country, created_at FROM roles`) {
+		t.Errorf("create.go loader must extend the FK SQL with copy columns\n--- generated:\n%s", create)
+	}
+	if !strings.Contains(create, `role_idCopies := map[string]map[string]string{}`) {
+		t.Errorf("create.go must declare the per-row copy map\n--- generated:\n%s", create)
+	}
+	if !strings.Contains(create, `k := fmt.Sprintf("%v", val)`) {
+		t.Errorf("create.go loader must key the row map by the option value\n--- generated:\n%s", create)
+	}
+	if !strings.Contains(create, `"city": viewmodels.PickCopyValue(cpy0, "string")`) {
+		t.Errorf("create.go must format the string copy target via PickCopyValue\n--- generated:\n%s", create)
+	}
+	if !strings.Contains(create, `"shipped_at": viewmodels.PickCopyValue(cpy2, "datetime")`) {
+		t.Errorf("create.go must format the datetime copy target for the datetime-local input\n--- generated:\n%s", create)
+	}
+	if !strings.Contains(create, `CopyData: role_idCopies`) {
+		t.Errorf("create.go must wire CopyData to the per-row copy map\n--- generated:\n%s", create)
+	}
+
+	form := readViewTempl(t, dir, "user", "form.templ")
+	if !strings.Contains(form, `data-picker-copies={viewmodels.CopyDataJSON(data.Fields, "role_id")}`) {
+		t.Errorf("form.templ must carry the copies data attribute\n--- generated:\n%s", form)
+	}
+	if !strings.Contains(form, `const rowCopies = copyData[row.dataset.value];`) {
+		t.Errorf("form.templ must apply per-row copies on selection\n--- generated:\n%s", form)
+	}
+	if !strings.Contains(form, `document.querySelector('[name="' + t + '"]')`) {
+		t.Errorf("form.templ must target form fields by name\n--- generated:\n%s", form)
+	}
+}
+
+// TestGenerateCopiesNoCopyRegression ensures a picker field without copies keeps
+// the historical output: no copies loader, no CopyData literal, no
+// data-picker-copies attribute.
+func TestGenerateCopiesNoCopyRegression(t *testing.T) {
+	dir := t.TempDir()
+	g := New(schemaConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	create := readResourceFile(t, dir, "user", "create.go")
+	if strings.Contains(create, "Copies") || strings.Contains(create, "PickCopyValue") {
+		t.Errorf("copies-free create.go must stay byte-identical to the value/label loader\n--- generated:\n%s", create)
+	}
+	form := readViewTempl(t, dir, "user", "form.templ")
+	if strings.Contains(form, "viewmodels.CopyDataJSON") {
+		t.Errorf("copies-free form.templ must not emit the copies data attribute\n--- generated:\n%s", form)
+	}
+}
+
+// mdConfig returns a header resource with a children block plus the child
+// resource (D14 master-detail).
+func mdConfig() *types.Config {
+	cfg := &types.Config{
+		Version: "1",
+		Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+		Connections: map[string]types.Connection{
+			"default": {Driver: "postgres", DSN: "x"},
+		},
+		Schema: &types.Schema{
+			Tables: []types.SchemaTable{
+				{
+					Name: "orders",
+					PK:   "id",
+					Columns: []types.SchemaColumn{
+						{Name: "id", Type: "integer", PrimaryKey: true},
+						{Name: "customer_name", Type: "string"},
+					},
+				},
+				{
+					Name: "order_lines",
+					PK:   "id",
+					Columns: []types.SchemaColumn{
+						{Name: "id", Type: "integer", PrimaryKey: true},
+						{Name: "order_id", Type: "integer"},
+						{Name: "product_id", Type: "integer"},
+						{Name: "qty", Type: "integer"},
+						{Name: "total", Type: "float"},
+					},
+					ForeignKeys: []types.SchemaFK{{Column: "order_id", ForeignTable: "orders", ForeignColumn: "id", Label: "customer_name"}},
+				},
+			},
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "Order",
+				Label: "Orders",
+				Detail: &types.DetailConfig{
+					Query:  "GetOrder",
+					Fields: []types.Field{{Name: "customer_name", Type: "string"}},
+				},
+				Form: &types.FormConfig{
+					Update: &types.FormAction{
+						PopulateQuery: "GetOrder",
+						Fields:        []types.Field{{Name: "customer_name", Type: "string"}},
+					},
+				},
+				Children: []types.ChildResource{
+					{Name: "Lines", Resource: "OrderLine", Columns: []types.Column{{Name: "qty", Type: "integer"}, {Name: "total", Type: "float"}}},
+				},
+			},
+			{
+				Name:  "OrderLine",
+				Table: "order_lines",
+				Form: &types.FormConfig{
+					Create: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "qty", Type: "integer"},
+							{Name: "total", Type: "float"},
+							{Name: "order_id", Type: "relation", OptionsValue: "id", OptionsLabel: "customer_name"},
+						},
+					},
+					Update: &types.FormAction{
+						Fields: []types.Field{
+							{Name: "qty", Type: "integer"},
+							{Name: "total", Type: "float"},
+							{Name: "order_id", Type: "relation", OptionsValue: "id", OptionsLabel: "customer_name"},
+						},
+					},
+					Delete: &types.FormAction{},
+				},
+			},
+		},
+	}
+	return cfg
+}
+
+// TestGenerateMasterChildren exercises the D14 master-detail pipeline: the
+// header detail/update load child lines, the child form seeds+locks its FK and
+// honors ?return=, the delete handler redirects back, and the templates render
+// the lines section + Add Line + create note.
+func TestGenerateMasterChildren(t *testing.T) {
+	dir := t.TempDir()
+	g := New(mdConfig(), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	assertGeneratedGoParses(t, dir)
+
+	// Header detail: child lines SELECT + Lines literal + helper.
+	detail := readResourceFile(t, dir, "order", "detail.go")
+	if !strings.Contains(detail, `SELECT id, qty, total FROM order_lines t WHERE t.order_id = $1`) {
+		t.Errorf("detail.go must select child lines scoped by the reverse FK\n--- generated:\n%s", detail)
+	}
+	if !strings.Contains(detail, `childLines1 := loadChildLines(r.Context(), db, "SELECT id, qty, total FROM order_lines t WHERE t.order_id = $1", int64(id))`) {
+		t.Errorf("detail.go must load child lines into the lines var\n--- generated:\n%s", detail)
+	}
+	if !strings.Contains(detail, "Lines: []viewmodels.ChildLinesData{") || !strings.Contains(detail, `Heading:`) || !strings.Contains(detail, `"Lines"`) {
+		t.Errorf("detail.go must wire the Lines section\n--- generated:\n%s", detail)
+	}
+	childlines := readResourceFile(t, dir, "order", "childlines.go")
+	if !strings.Contains(childlines, "func loadChildLines(ctx context.Context, db *sql.DB") {
+		t.Errorf("childlines.go must define the shared loadChildLines helper\n--- generated:\n%s", childlines)
+	}
+
+	// Header edit: locked map + child lines + Return.
+	update := readResourceFile(t, dir, "order", "update.go")
+	if !strings.Contains(update, `loadChildLines(r.Context(), db, "SELECT id, qty, total FROM order_lines t WHERE t.order_id = $1", int64(id))`) {
+		t.Errorf("update.go must load child lines on GET\n--- generated:\n%s", update)
+	}
+	if !strings.Contains(update, "Return:        r.URL.Query().Get(\"return\"),") {
+		t.Errorf("update.go must echo the return query into FormData.Return\n--- generated:\n%s", update)
+	}
+
+	// Child create: FK seed + lock + _return redirect.
+	childCreate := readResourceFile(t, dir, "orderline", "create.go")
+	if !strings.Contains(childCreate, `item["order_id"] = v`) || !strings.Contains(childCreate, `locked["order_id"] = true`) {
+		t.Errorf("orderline create.go must seed + lock the FK from a parent context\n--- generated:\n%s", childCreate)
+	}
+	if !strings.Contains(childCreate, `Locked: locked["order_id"]`) {
+		t.Errorf("orderline create.go must render the seeded FK as a locked picker\n--- generated:\n%s", childCreate)
+	}
+	if !strings.Contains(childCreate, `ret := r.FormValue("_return")`) || !strings.Contains(childCreate, `strings.HasPrefix(ret, "/")`) {
+		t.Errorf("orderline create.go must honor the _return redirect\n--- generated:\n%s", childCreate)
+	}
+
+	// Child delete returns to the header edit.
+	childDelete := readResourceFile(t, dir, "orderline", "delete.go")
+	if !strings.Contains(childDelete, `strings.HasPrefix(ret, "/")`) {
+		t.Errorf("orderline delete.go must honor the return query\n--- generated:\n%s", childDelete)
+	}
+
+	readView := func(pkg, file string) string {
+		b, err := os.ReadFile(filepath.Join(dir, "internal/views/resources", pkg, file))
+		if err != nil {
+			t.Fatalf("read %s/%s: %v", pkg, file, err)
+		}
+		return string(b)
+	}
+
+	// Form templ: _return field, Add Line button, child lines on edit, note on create.
+	form := readView("order", "form.templ")
+	if !strings.Contains(form, `name="_return" value={ data.Return }`) {
+		t.Errorf("order form.templ must submit the return path\n--- generated:\n%s", form)
+	}
+	if !strings.Contains(form, `sec.PanelPath, sec.ResourceLower, sec.FKColumn, sec.ParentID`) {
+		t.Errorf("order form.templ must render the Add Line button\n--- generated:\n%s", form)
+	}
+	if !strings.Contains(form, "Save the header, then add lines.") {
+		t.Errorf("order form.templ must show the create-mode note\n--- generated:\n%s", form)
+	}
+	if !strings.Contains(form, `return=`) {
+		t.Errorf("order form.templ must link Edit/Delete back to the header\n--- generated:\n%s", form)
+	}
+
+	// Detail templ: view-only lines section + child rows.
+	detailView := readView("order", "detail.templ")
+	if !strings.Contains(detailView, `for _, sec := range data.Lines`) {
+		t.Errorf("order detail.templ must render the lines sections\n--- generated:\n%s", detailView)
 	}
 }
