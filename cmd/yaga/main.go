@@ -38,6 +38,8 @@ func main() {
 		cmdInit()
 	case "edit":
 		cmdEdit()
+	case "wedit":
+		cmdWedit()
 	case "generate":
 		cmdGenerate()
 	case "validate":
@@ -70,12 +72,14 @@ func ensureAgentGuide() {
 // printUsage prints the CLI help text to stdout, listing the available
 // subcommands and their flags.
 func printUsage() {
-	fmt.Println(`yaga — YAML-driven admin panel generator
+	fmt.Println(`YAGA —> Yaml Advanced Generator for Admin panels
+(c) 2026, White Dog Software, MIT license	
 
 Usage:
   yaga init --db DSN  Introspect an existing database and generate yaga.yaml
                       (the captured schema: block is the sole schema source)
   yaga edit           Interactive YAML config editor (TUI)
+  yaga wedit          Web-based YAML config editor (browser, local HTTP server)
   yaga generate       Generate the admin panel Go application (offline, no sqlc)
   yaga validate       Validate the YAML configuration
   yaga version        Print version information
@@ -92,14 +96,18 @@ Flags:
                  Set the initial admin password for --db scaffolding
                  (a random one is generated and printed when omitted)
 
-AI-assisted edit (edit only):
+AI-assisted edit (experimental feature only):
   --prompt TEXT  Edit yaga.yaml via AI instead of the TUI
                  (the full config is sent to the AI provider)
                  file://PATH reads the prompt from a file (~ expands to home)
   --apikey KEY   OpenRouter API key (fallback: OPENROUTER_API_KEY env, then .ENV)
   --model MODEL  Model id (fallback: .ENV, then openrouter/auto);
                  "lmstudio" uses a local LM Studio server (127.0.0.1:1234, no key)
-  --dry-run      Print proposed YAML + diff without writing`)
+  --dry-run      Print proposed YAML + diff without writing
+
+WEdit (wedit only):
+  --port N       Web editor listen port (default: 9090)
+  --open         Open the editor in the default browser after binding`)
 }
 
 // parseGlobalFlags scans os.Args[2:] for the global flags shared by all

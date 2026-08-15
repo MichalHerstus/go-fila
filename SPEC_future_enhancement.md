@@ -1356,100 +1356,115 @@ editor tests.
 
 ---
 
-### E4 — `yaga serve`: web-based config editor
+ ### E4 — `yaga wedit`: web-based config editor
 
-**Status: planned (2026-08-14), not started.** A new `yaga serve` subcommand that
-starts a local HTTP server with a REST API and an embedded single-page-application
-frontend (vanilla HTML/CSS/JS, no bundler or npm) for editing `yaga.yaml` in a
-browser. The server reuses all existing Go logic (`parser.ValidateAll`,
-`schema.ParseQueries`, `schema.CollectReferences`, `schema.GenerateQueries`, etc.)
-— the same functions the TUI editor calls — wrapped in JSON endpoints.
+ **Status: implemented (2026-08-15).** The command is `yaga wedit` (not the
+ drafted `serve`), so it is clearly the web version of the YAML editor rather
+ than a running generated dashboard; the internal Go package is still
+ `internal/serve`. A new `yaga wedit` subcommand that
+ starts a local HTTP server with a REST API and an embedded single-page-application
+ frontend (vanilla HTML/CSS/JS, no bundler or npm) for editing `yaga.yaml` in a
+ browser. The server reuses all existing Go logic (`parser.ValidateAll`,
+ `schema.ParseQueries`, `schema.CollectReferences`, `schema.GenerateQueries`, etc.)
+ — the same functions the TUI editor calls — wrapped in JSON endpoints.
 
-**Command shape:**
-```
-yaga serve              # default :9090, yaga.yaml
-yaga serve --port 9091  --config path/to/yaga.yaml
-yaga serve --open       # open browser automatically
-```
+ **Command shape:**
+ ```
+ yaga wedit              # default :9090, yaga.yaml
+ yaga wedit --port 9091  --config path/to/yaga.yaml
+ yaga wedit --open       # open browser automatically
+ ```
 
-**Architecture:**
-```
-yaga serve
-  └─ internal/serve/Server
-       ├─ GET  /api/config              → full config JSON
-       ├─ PUT  /api/config              → JSON body, validate, return errors
-       ├─ GET  /api/validate            → ValidateAll + analyze → findings JSON
-       ├─ POST /api/save                → yaml.Marshal + WriteFile to disk
-       ├─ GET  /api/analyze             → sync analysis (tables, queries, refs)
-       ├─ POST /api/generate-queries    → generate missing SQL query files
-       └─ GET  /static/*                → embedded SPA (index.html, app.js, style.css)
-```
+ **Architecture:**
+ ```
+ yaga wedit
+   └─ internal/serve/Server
+        ├─ GET  /api/config            → full config JSON
+        ├─ PUT  /api/config            → JSON body, validate, return errors
+        ├─ GET  /api/validate          → ValidateAll + analyze → findings JSON
+        ├─ POST /api/save              → yaml.Marshal + WriteFile to disk
+        ├─ GET  /api/analyze           → sync analysis (tables, queries, refs)
+        ├─ POST /api/generate-queries  → generate missing SQL query files
+        ├─ GET  /api/queries/{name}    → staged-over-disk query body
+        ├─ PUT  /api/queries           → stage a query body rewrite (pendingSQL)
+        ├─ GET  /api/raw               → raw YAML text
+        ├─ PUT  /api/raw               → replace config from raw YAML (validate)
+        └─ GET  /static/*              → embedded SPA (index.html, app.js, style.css)
+ ```
 
-**Go server (`internal/serve/serve.go` + `handlers.go`):**
+ **Go server (`internal/serve/serve.go` + `handlers.go`):**
 
-- `Server` struct holds in-memory `*types.Config`, `configPath`, `sync.RWMutex`, and
-  `pendingSQL map[string]string` (staged SQL edits, same pattern as the TUI's
-  `pendingSQL`).
-- Routes use Go 1.22+ `http.ServeMux` method patterns (`"GET /api/config"`,
-  `"PUT /api/config"`) — no chi dependency needed.
-- Handlers call the same functions as the TUI editor: `parser.ValidateAll`,
-  `schema.ParseQueries(e.queriesDir())`, `schema.CollectReferences(e.cfg)`,
-  `schema.GenerateQueries(rep.tables, driver)`. Zero logic duplication.
-- Save writes `yaml.Marshal(e.cfg)` to `configPath` and flushes staged SQL files.
-- Static files served via `//go:embed internal/serve/static/*` → `embed.FS`.
+ - `Server` struct holds in-memory `*types.Config`, `configPath`, `sync.RWMutex`, and
+   `pendingSQL map[string]string` (staged SQL edits, same pattern as the TUI's
+   `pendingSQL`).
+ - Routes use Go 1.22+ `http.ServeMux` method patterns (`"GET /api/config"`,
+   `"PUT /api/config"`) — no chi dependency needed.
+ - Handlers call the same functions as the TUI editor: `parser.ValidateAll`,
+   `schema.ParseQueries`, `schema.CollectReferences`, `schema.GenerateQueries`. The
+   config↔JSON bridge is `yaml.Marshal` → generic YAML tree → JSON (and back), so
+   the field names the SPA submits match the YAML names exactly; numbers, nulls and
+   `-created_at`-style strings round-trip.
+ - Save writes `yaml.Marshal(cfg)` to `configPath` and flushes staged SQL files.
+ - Static files served via `//go:embed internal/serve/static/*` → `embed.FS`.
+ - sqlBase/queriesDir/schemaDir reuse the TUI editor's SQL-tree resolution.
 
-**Frontend (`internal/serve/static/`, embedded SPA):**
+ **Frontend (`internal/serve/static/`, embedded SPA):**
 
-Three files, no framework, no bundler:
+ Three files, no framework, no bundler:
 
-- **`index.html`** (~80 lines) — shell with `<header>` (title, save indicator),
-  `<nav id="sidebar">` (tabs matching the TUI nav items), `<main id="content">`,
-  `<footer>` (shortcuts hint).
-- **`app.js`** (~500 lines) — vanilla JS: `fetch()` calls to the REST API,
-  page-rendering functions (one per section: panel, auth, resources list, resource
-  detail, pages, validate, sync), DOM manipulation via `innerHTML`. Pattern:
-  ```js
-  let config = null;
-  async function loadConfig() { /* GET /api/config */ }
-  function showPage(name) { /* switch(name) { case 'panel': renderPanel(); ... } */ }
-  function saveConfig() { /* PUT /api/config + POST /api/save */ }
-  ```
-  Field rendering helpers: `textField()`, `numField()`, `boolField()`, `pickField()`.
-  Resource list with add/edit/delete using `listSpec`-like callbacks.
-  Validate screen: `GET /api/validate` → red/yellow finding rows.
-  SQL queries: `GET /api/analyze` → click query name → edit `<textarea>` → staged.
-- **`style.css`** (~250 lines) — Catppuccin Mocha dark theme (same palette as E3a),
-  flex layout (sidebar 220px + content), form field styling, status colors.
+ - **`index.html`** — shell with `<header>` (title, save indicator),
+   `<nav id="sidebar">` (tabs matching the TUI nav items), `<main id="content">`,
+   `<footer>` (shortcuts hint).
+ - **`app.js`** (~700 lines) — vanilla JS: `fetch()` calls to the REST API,
+   page-rendering functions (one per section: panel, connections, sqlc, auth,
+   navigation, resources, pages, queries, validate, sync, raw), DOM manipulation
+   via `innerHTML`. Tab pages: `panel`, `connections`, `sqlc`, `auth`,
+   `navigation`, `resources`, `pages`, `queries`, `validate`, `sync`, `raw`.
+   Field rendering helpers: `textField()`, `numField()`, `boolField()`,
+   `selectField()`, `stringListField()`. Collection editors (resources, columns,
+   fields, actions, children, widgets, navigation items) use a shared
+   `collectionEditor()` with row add/edit/delete. Validate screen: `GET
+   /api/validate` → red/yellow finding rows. SQL queries: `GET /api/analyze` →
+   click query name → edit `<textarea>` → staged via `PUT /api/queries` → flushed
+   by the global save.
+ - **`style.css`** (~250 lines) — Catppuccin Mocha dark theme (same palette as E3a),
+   flex layout (sidebar 220px + content), form field styling, status colors.
 
-**What v1 does NOT do** (deferred to follow-up):
-- No file watcher — click "Reload" to re-fetch config after external edits.
-- No cd-navigation dialog — sidebar tabs are the only navigation.
-- No ASCII preview — the TUI's `preview.go` is terminal-specific; web preview is
-  a separate topic.
-- No Monaco editor — raw YAML tab uses a plain `<textarea>`; vendoring Monaco's UMD
-  bundle (like Chart.js) is a future add-on.
+ **What v1 does NOT do** (deferred to follow-up):
+ - No file watcher — click "Reload" to re-fetch config after external edits.
+ - No cd-navigation dialog — sidebar tabs are the only navigation.
+ - No ASCII preview — the TUI's `preview.go` is terminal-specific; web preview is
+   a separate topic.
+ - No Monaco editor — raw YAML tab uses a plain `<textarea>`; vendoring Monaco's UMD
+   bundle (like Chart.js) is a future add-on.
 
-**Touch points:**
-1. `cmd/yaga/main.go` — add `case "serve":` + usage line.
-2. `cmd/yaga/serve.go` (~60 lines) — entry point, `--port`/`--config`/`--open` flags,
-   `parser.ParseFile`, `serve.New(cfg, configPath, port).Start()`.
-3. `internal/serve/serve.go` (~80 lines) — `Server` struct, route registration,
-   `Start()`/`Stop()`, static file serving via `embed.FS`.
-4. `internal/serve/handlers.go` (~500 lines) — 6 REST handlers + validation helpers.
-5. `internal/serve/static/index.html` (~80 lines) — SPA shell.
-6. `internal/serve/static/app.js` (~500 lines) — vanilla JS frontend.
-7. `internal/serve/static/style.css` (~250 lines) — Catppuccin Mocha theme.
+ **Touch points:**
+ 1. `cmd/yaga/main.go` — `case "wedit":` + usage line.
+ 2. `cmd/yaga/wedit.go` (~50 lines) — entry point, `--port`/`--open` flags
+    (`--config` comes from the shared global flags; `-p` is not used because
+    `parseGlobalFlags` maps it to `--admin-password`), `parser.ParseFile`,
+    `serve.New(cfg, configPath, serve.Options{...}).Start()`.
+ 3. `internal/serve/serve.go` — `Server` struct, route registration,
+    `Start()` (graceful shutdown via `signal.NotifyContext`), static file
+    serving via `embed.FS`.
+ 4. `internal/serve/handlers.go` — REST handlers + validation helpers.
+ 5. `internal/serve/static/index.html` — SPA shell.
+ 6. `internal/serve/static/app.js` — vanilla JS frontend.
+ 7. `internal/serve/static/style.css` — Catppuccin Mocha theme.
+ 8. `internal/serve/serve_test.go` — endpoint tests (config GET/PUT round-trip,
+    422 on invalid, save writes YAML, raw YAML round-trip, validate/analyze
+    findings over a temp sql tree, generate-queries writes without overwriting,
+    query stage+flush preserving other query blocks, static serving, sqlBase
+    resolution).
 
-New Go code: ~640 lines. Frontend: ~830 lines.
+ **Tests / exit criteria:** `go vet ./...` / `go build ./...` / `go test ./...` —
+ compilation and embed integrity, plus the serve endpoint test suite. No e2e in v1
+ (manual smoke: `yaga wedit --config testdata/kitchen.yaml --open` → browser loads,
+ panel/auth/resources pages render, edit a field → save → YAML file updated).
 
-**Tests / exit criteria:** `go vet ./...` / `go build ./...` — compilation and
-embed integrity. No e2e in v1 (manual smoke: `yaga serve --config testdata/kitchen.yaml
---open` → browser loads, panel/auth/resources pages render, edit a field → save →
-YAML file updated). Existing `go test ./...` stays green (no generated code changes).
+ ---
 
----
-
-### E5 — `yaga mcp`: MCP server for AI agent config editing
+ ### E5 — `yaga mcp`: MCP server for AI agent config editing
 
 **Status: drafted (2026-08-14), not started.** An MCP (Model Context Protocol) server
 that exposes the yaga config and editing operations as structured tools, resources,

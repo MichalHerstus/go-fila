@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WEdit — YAML config editor</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">W</span>
+    <div class="brand-text">
+      <h1>WEdit</h1>
+      <p id="config-path">—</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <span id="dirty-indicator" class="dirty hidden">modified</span>
+    <span id="save-status" class="save-status"></span>
+    <button id="save-btn" class="btn primary" title="Validate + write config + staged SQL to disk">Save</button>
+  </div>
+</header>
+<div class="layout">
+  <nav id="tabs"></nav>
+  <main id="content">
+    <div class="placeholder">Loading config…</div>
+  </main>
+</div>
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span id="modal-title"></span>
+      <button id="modal-close" class="btn small">✕</button>
+    </div>
+    <div id="modal-body"></div>
+    <div class="modal-actions">
+      <button id="modal-cancel" class="btn">Cancel</button>
+      <button id="modal-ok" class="btn primary">OK</button>
+    </div>
+  </div>
+</div>
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

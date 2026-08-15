@@ -1,0 +1,463 @@
+package serve
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/MichalHerstus/yaga/internal/types"
+)
+
+// testConfig returns a minimal config that passes parser.ValidateAll.
+func testConfig() *types.Config {
+	return &types.Config{
+		Version: "1.0",
+		Panel: types.Panel{
+			ID:   "admin",
+			Path: "/admin",
+			Name: "Admin",
+			Brand: types.Brand{
+				Logo:   "logo.png",
+				Colors: types.BrandColors{Primary: "#6366f1", Secondary: "#8b5cf6"},
+			},
+		},
+		Connections: map[string]types.Connection{
+			"primary": {Driver: "sqlite", DSN: "./test.db"},
+		},
+		SQLC: types.SQLCConfig{
+			Config:     "sqlc.yaml",
+			QueriesDir: "./sql/queries",
+			SchemaDir:  "./sql/migrations",
+			OutputPkg:  "data",
+		},
+		Auth: types.AuthConfig{
+			Guard: "password", Provider: "password", Table: "users",
+			Login: types.LoginConfig{Fields: []string{"email", "password"}, Redirect: "/admin"},
+		},
+		Resources: []types.Resource{
+			{
+				Name:  "User",
+				Table: "users",
+				List:  &types.ListConfig{Columns: []types.Column{{Name: "id", Type: "integer"}, {Name: "email", Type: "string"}}, PerPage: 20},
+			},
+		},
+	}
+}
+
+// setupServer creates a Server rooted at a temp dir with the given sql trees.
+func setupServer(t *testing.T, cfg *types.Config) (*Server, string) {
+	t.Helper()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "yaga.yaml")
+	if err := os.WriteFile(configPath, []byte("version: \"1.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"sql/queries", "sql/migrations"} {
+		if err := os.MkdirAll(filepath.Join(dir, rel), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New(cfg, configPath, Options{Port: 0})
+	return s, dir
+}
+
+func get(t *testing.T, h http.Handler, method, url string, body []byte) (*httptest.ResponseRecorder, map[string]interface{}) {
+	t.Helper()
+	var req *http.Request
+	var err error
+	if body != nil {
+		req = httptest.NewRequest(method, url, bytes.NewReader(body))
+	} else {
+		req = httptest.NewRequest(method, url, nil)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if rec.Header().Get("Content-Type") == "application/json" && rec.Body.Len() > 0 {
+		if err := json.Unmarshal(rec.Body.Bytes(), &data); err != nil {
+			t.Fatalf("bad json (%d): %v: %s", rec.Code, err, rec.Body.String())
+		}
+	}
+	return rec, data
+}
+
+func TestConfigGet(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	rec, data := get(t, s.Handler(), "GET", "/api/config", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	cfg := data["config"].(map[string]interface{})
+	if cfg["version"] != "1.0" {
+		t.Errorf("version = %v", cfg["version"])
+	}
+	panel := cfg["panel"].(map[string]interface{})
+	if panel["name"] != "Admin" || panel["path"] != "/admin" {
+		t.Errorf("panel = %v", panel)
+	}
+	resources := cfg["resources"].([]interface{})
+	user := resources[0].(map[string]interface{})
+	list := user["list"].(map[string]interface{})
+	if list["per_page"] != float64(20) {
+		t.Errorf("per_page = %v (want 20)", list["per_page"])
+	}
+	if _, ok := data["path"]; !ok {
+		t.Error("missing path key")
+	}
+}
+
+func TestConfigPutValid(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	// Round-trip the served config through the API: the numbers must survive.
+	_, first := get(t, s.Handler(), "GET", "/api/config", nil)
+	cfg := first["config"]
+	payload, _ := json.Marshal(cfg)
+
+	rec, data := get(t, s.Handler(), "PUT", "/api/config", payload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if data["ok"] != true {
+		t.Errorf("ok = %v", data["ok"])
+	}
+
+	// The in-memory config now has the PUT version: panel.name changed.
+	_, check := get(t, s.Handler(), "GET", "/api/config", nil)
+	c := check["config"].(map[string]interface{})
+	p := c["panel"].(map[string]interface{})
+	if p["name"] != "Admin" {
+		t.Errorf("panel.name = %v after PUT", p["name"])
+	}
+}
+
+func TestConfigPutInvalid(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	bad := []byte(`{"panel":{},"resources":[]}`)
+	rec, data := get(t, s.Handler(), "PUT", "/api/config", bad)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422: %s", rec.Code, rec.Body.String())
+	}
+	errs := data["errors"].([]interface{})
+	if len(errs) == 0 {
+		t.Error("expected validation errors")
+	}
+	// The in-memory config must be untouched.
+	_, check := get(t, s.Handler(), "GET", "/api/config", nil)
+	c := check["config"].(map[string]interface{})
+	p := c["panel"].(map[string]interface{})
+	if p["name"] != "Admin" {
+		t.Errorf("config was mutated by failed PUT: %v", p["name"])
+	}
+}
+
+func TestSaveWritesYAML(t *testing.T) {
+	cfg := testConfig()
+	s, dir := setupServer(t, cfg)
+	configPath := filepath.Join(dir, "yaga.yaml")
+
+	// Change something via PUT then save.
+	_, first := get(t, s.Handler(), "GET", "/api/config", nil)
+	tree := first["config"].(map[string]interface{})
+	panel := tree["panel"].(map[string]interface{})
+	panel["name"] = "Order Management"
+	payload, _ := json.Marshal(tree)
+	if rec, _ := get(t, s.Handler(), "PUT", "/api/config", payload); rec.Code != 200 {
+		t.Fatalf("PUT failed: %s", rec.Body.String())
+	}
+	if rec, _ := get(t, s.Handler(), "POST", "/api/save", nil); rec.Code != 200 {
+		t.Fatalf("save failed: %s", rec.Body.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "name: Order Management") {
+		t.Errorf("saved YAML missing renamed panel:\n%s", data)
+	}
+	if !strings.Contains(string(data), "per_page: 20") {
+		t.Errorf("saved YAML missing per_page:\n%s", data)
+	}
+}
+
+func TestRawRoundTrip(t *testing.T) {
+	s, dir := setupServer(t, testConfig())
+	rec, data := get(t, s.Handler(), "GET", "/api/raw", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	y := data["yaml"].(string)
+	if !strings.Contains(y, "path: /admin") {
+		t.Errorf("raw yaml missing panel:\n%s", y)
+	}
+
+	// Valid raw YAML replaces the config.
+	newYAML := `version: "1.0"
+panel:
+  id: admin
+  path: /admin
+  name: Renamed
+resources:
+  - name: User
+`
+	rec, data = get(t, s.Handler(), "PUT", "/api/raw", []byte(newYAML))
+	if rec.Code != 200 {
+		t.Fatalf("raw PUT status = %d: %s", rec.Code, rec.Body.String())
+	}
+	_, check := get(t, s.Handler(), "GET", "/api/config", nil)
+	c := check["config"].(map[string]interface{})
+	if c["panel"].(map[string]interface{})["name"] != "Renamed" {
+		t.Error("raw PUT did not replace the config")
+	}
+
+	// Invalid raw YAML is rejected and the config stays.
+	bad := `version: "1.0"
+panel: {}
+resources: []
+`
+	rec, data = get(t, s.Handler(), "PUT", "/api/raw", []byte(bad))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad raw PUT status = %d, want 422", rec.Code)
+	}
+	if len(data["errors"].([]interface{})) == 0 {
+		t.Error("expected errors for invalid raw YAML")
+	}
+	_, check = get(t, s.Handler(), "GET", "/api/config", nil)
+	c = check["config"].(map[string]interface{})
+	if c["panel"].(map[string]interface{})["name"] != "Renamed" {
+		t.Error("invalid raw PUT mutated the config")
+	}
+	_ = dir
+}
+
+func TestValidateFindings(t *testing.T) {
+	cfg := testConfig()
+	s, dir := setupServer(t, cfg)
+	// A schema table with a matching column + a query file for the reference.
+	writeFile(t, filepath.Join(dir, "sql/migrations/users.sql"),
+		"-- users\nCREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  email TEXT\n);\n")
+	writeFile(t, filepath.Join(dir, "sql/queries/users.sql"),
+		"-- name: ListUser :many\nSELECT id, email FROM users;\n")
+
+	rec, data := get(t, s.Handler(), "GET", "/api/validate", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	findings := data["findings"].([]interface{})
+	// No structural errors for the minimal config.
+	for _, f := range findings {
+		if f.(map[string]interface{})["kind"] == "error" {
+			t.Errorf("unexpected error finding: %v", f)
+		}
+	}
+
+	// A config with a bogus query reference produces a missing-query finding.
+	cfg2 := testConfig()
+	cfg2.Resources[0].List.Query = "DoesNotExist"
+	s2, _ := setupServer(t, cfg2)
+	rec, data = get(t, s2.Handler(), "GET", "/api/validate", nil)
+	findings = data["findings"].([]interface{})
+	found := false
+	for _, f := range findings {
+		if strings.Contains(f.(map[string]interface{})["label"].(string), "missing query") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a missing-query finding, got %v", findings)
+	}
+}
+
+func TestAnalyze(t *testing.T) {
+	cfg := testConfig()
+	s, dir := setupServer(t, cfg)
+	writeFile(t, filepath.Join(dir, "sql/migrations/users.sql"),
+		"-- users\nCREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  email TEXT,\n  role_id INTEGER,\n  FOREIGN KEY (role_id) REFERENCES roles(id)\n);\n")
+	writeFile(t, filepath.Join(dir, "sql/migrations/roles.sql"),
+		"-- roles\nCREATE TABLE roles (\n  id INTEGER PRIMARY KEY,\n  name TEXT\n);\n")
+	writeFile(t, filepath.Join(dir, "sql/queries/users.sql"),
+		"-- name: ListUser :many\nSELECT id, email FROM users;\n")
+
+	rec, data := get(t, s.Handler(), "GET", "/api/analyze", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	tables := data["tables"].([]interface{})
+	if len(tables) != 2 {
+		t.Errorf("tables = %d, want 2", len(tables))
+	}
+	queries := data["queries"].([]interface{})
+	if len(queries) != 1 || queries[0].(map[string]interface{})["name"] != "ListUser" {
+		t.Errorf("queries = %v", queries)
+	}
+	fkTargets := data["fk_targets"].([]interface{})
+	found := false
+	for _, f := range fkTargets {
+		if strings.Contains(f.(string), "ListRole") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected missing FK ListRole query, got %v", fkTargets)
+	}
+}
+
+func TestGenerateQueries(t *testing.T) {
+	cfg := testConfig()
+	s, dir := setupServer(t, cfg)
+	writeFile(t, filepath.Join(dir, "sql/migrations/users.sql"),
+		"-- users\nCREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  email TEXT\n);\n")
+
+	rec, data := get(t, s.Handler(), "POST", "/api/generate-queries", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	written := data["written"].([]interface{})
+	if len(written) != 1 || written[0] != "users.sql" {
+		t.Errorf("written = %v, want [users.sql]", written)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sql/queries/users.sql")); err != nil {
+		t.Fatalf("generated file missing: %v", err)
+	}
+
+	// Second run: nothing new to write (never overwrites).
+	rec, data = get(t, s.Handler(), "POST", "/api/generate-queries", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(data["written"].([]interface{})) != 0 {
+		t.Errorf("second run wrote: %v", data["written"])
+	}
+}
+
+func TestQueryStageAndFlush(t *testing.T) {
+	cfg := testConfig()
+	s, dir := setupServer(t, cfg)
+	queryPath := filepath.Join(dir, "sql/queries/users.sql")
+	original := "-- name: ListUser :many\nSELECT id, email FROM users;\n"
+	writeFile(t, queryPath, original)
+
+	// GET the raw body.
+	rec, data := get(t, s.Handler(), "GET", "/api/queries/ListUser", nil)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(data["body"].(string), "SELECT id, email") {
+		t.Errorf("body = %q", data["body"])
+	}
+
+	// Stage a rewrite.
+	newBody := "SELECT id, email, role_id FROM users WHERE id > 1"
+	payload, _ := json.Marshal(map[string]string{"name": "ListUser", "body": newBody})
+	if rec, _ := get(t, s.Handler(), "PUT", "/api/queries", payload); rec.Code != 200 {
+		t.Fatalf("PUT query failed: %s", rec.Body.String())
+	}
+	// Disk unchanged until save.
+	onDisk, _ := os.ReadFile(queryPath)
+	if string(onDisk) != original {
+		t.Errorf("disk changed before save:\n%s", onDisk)
+	}
+
+	// POST /api/save flushes the staged rewrite.
+	if rec, _ := get(t, s.Handler(), "POST", "/api/save", nil); rec.Code != 200 {
+		t.Fatalf("save failed: %s", rec.Body.String())
+	}
+	onDisk, _ = os.ReadFile(queryPath)
+	if !strings.Contains(string(onDisk), newBody) {
+		t.Errorf("staged query not flushed:\n%s", onDisk)
+	}
+	if !strings.Contains(string(onDisk), "-- name: ListUser :many") {
+		t.Errorf("annotation lost after rewrite:\n%s", onDisk)
+	}
+
+	// Unknown query -> 404.
+	if rec, _ := get(t, s.Handler(), "GET", "/api/queries/Nope", nil); rec.Code != 404 {
+		t.Errorf("unknown query status = %d, want 404", rec.Code)
+	}
+}
+
+func TestStaticServesIndex(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	rec, _ := get(t, s.Handler(), "GET", "/", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "WEdit") {
+		t.Fatalf("/ did not serve index.html: %d", rec.Code)
+	}
+	rec, _ = get(t, s.Handler(), "GET", "/static/app.js", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "init();") {
+		t.Fatalf("/static/app.js not served: %d", rec.Code)
+	}
+	rec, _ = get(t, s.Handler(), "GET", "/static/style.css", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Catppuccin") {
+		t.Fatalf("/static/style.css not served: %d", rec.Code)
+	}
+	// Unknown path 404s.
+	if rec, _ := get(t, s.Handler(), "GET", "/nope", nil); rec.Code != 404 {
+		t.Errorf("unknown path status = %d, want 404", rec.Code)
+	}
+}
+
+func TestQueryBodyRoundTripPreservesOtherBlocks(t *testing.T) {
+	cfg := testConfig()
+	s, dir := setupServer(t, cfg)
+	queryPath := filepath.Join(dir, "sql/queries/users.sql")
+	original := "-- name: ListUser :many\nSELECT id, email FROM users;\n\n-- name: CountUser :one\nSELECT count(*) FROM users;\n"
+	writeFile(t, queryPath, original)
+
+	payload, _ := json.Marshal(map[string]string{"name": "ListUser", "body": "SELECT email FROM users;"})
+	if rec, _ := get(t, s.Handler(), "PUT", "/api/queries", payload); rec.Code != 200 {
+		t.Fatalf("PUT query failed: %s", rec.Body.String())
+	}
+	if rec, _ := get(t, s.Handler(), "POST", "/api/save", nil); rec.Code != 200 {
+		t.Fatalf("save failed: %s", rec.Body.String())
+	}
+	onDisk, _ := os.ReadFile(queryPath)
+	if !strings.Contains(string(onDisk), "-- name: CountUser :one") {
+		t.Errorf("second query block was clobbered:\n%s", onDisk)
+	}
+}
+
+func TestSQLBaseResolution(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "yaga.yaml")
+	if err := os.WriteFile(configPath, []byte("version: \"1.0\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	s := New(cfg, configPath, Options{Port: 0})
+
+	// No sql tree at all -> falls back to the config dir.
+	if got := s.sqlBase(cfg); got != dir {
+		t.Errorf("sqlBase with no tree = %q, want %q", got, dir)
+	}
+
+	// A tree under admin/ wins.
+	if err := os.MkdirAll(filepath.Join(dir, "admin", "sql", "queries"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.sqlBase(cfg); got != filepath.Join(dir, "admin") {
+		t.Errorf("sqlBase with admin/ tree = %q", got)
+	}
+
+	// Config-dir sql tree wins over admin/.
+	if err := os.MkdirAll(filepath.Join(dir, "sql", "queries"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.sqlBase(cfg); got != dir {
+		t.Errorf("sqlBase with config-dir tree = %q", got)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}

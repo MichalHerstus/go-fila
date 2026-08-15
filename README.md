@@ -28,7 +28,8 @@ yaga init --db "sqlserver://user:pass@localhost:1433?database=mydb"   # MSSQL
 
 # Write your SQL schema and queries in sql/
 # Edit yaga.yaml to configure panel, resources, pages, auth
-# (interactive TUI: yaga edit — or AI-assisted: yaga edit --prompt "…"
+# (interactive TUI: yaga edit — or web-based: yaga wedit, which serves an
+# in-browser editor at :9090; or AI-assisted: yaga edit --prompt "…"
 # which edits the config via OpenRouter, or via a local LM Studio server with
 # --model "lmstudio"; --apikey KEY, --model, --dry-run flags, and file://PATH
 # prompts supported)
@@ -91,6 +92,8 @@ yaga init           Scaffold yaga.yaml + sqlc.yaml + sql/ + working example
                        with --db flag it introspects an existing DB and generates config + SQL
 yaga edit           Interactive YAML config editor (TUI)
                        with --prompt it edits yaga.yaml via OpenRouter instead (AI-assisted)
+yaga wedit          Web-based YAML config editor (browser, local HTTP server)
+                       --port N (default 9090), --open to launch the browser
 yaga generate       Generate admin panel Go application
 yaga validate       Validate YAML + verify SQLC references
 yaga version        Print version

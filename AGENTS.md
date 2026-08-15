@@ -14,6 +14,7 @@ Single binary at `cmd/yaga/main.go` — stdlib flags, no cobra/viper.
 ```sh
 yaga init --db DSN # introspects the DB, writes yaga.yaml with a captured `schema:` block + admin login
 yaga edit          # interactive TUI editor for yaga.yaml
+yaga wedit         # web-based editor for yaga.yaml (local HTTP server + embedded SPA)
 yaga generate      # generates admin/ app offline (no sqlc, no DB connection); tailwind non-fatal
 cd admin
 make               # builds the dashboard binary + assets (css + templ + go build)
@@ -90,6 +91,14 @@ go mod tidy && go build -o admin .
 ```
 
 `templ generate` is never run by the generator — only `.templ` sources are emitted, so the build fails until you run it. The generated `go.mod` declares `tool github.com/a-h/templ/cmd/templ`, so `go tool templ generate` resolves templ through the Go toolchain (Go 1.24+) without a manual templ install.
+
+### Web editor (`wedit`, E4)
+
+`yaga wedit` starts a local HTTP server (default `:9090`, `--port`/`--open`; `--config` comes from the shared global flags — `-p` is NOT available because `parseGlobalFlags` maps it to `--admin-password`) with an embedded vanilla-JS SPA. Package `internal/serve/`: `Server` holds in-memory `*types.Config` + `configPath` + `sync.RWMutex` + `pendingSQL map[string]string`; routes are Go 1.22+ `http.ServeMux` method patterns (no chi). Entry point `cmd/yaga/wedit.go` (`cmdWedit` → `parseWeditFlags(os.Args[2:])` → `parser.ParseFile` → `serve.New(...).Start()`; graceful shutdown via `signal.NotifyContext`). Endpoints: `GET/PUT /api/config`, `GET /api/validate`, `POST /api/save`, `GET /api/analyze`, `POST /api/generate-queries`, `GET /api/queries/{name}` / `PUT /api/queries` (staged rewrites via `schema.RewriteQueryBody`, flushed by save), `GET/PUT /api/raw`, `GET /static/*`, `GET /`.
+
+**Config↔JSON bridge**: the types have only YAML tags, so `configTree` = `yaml.Marshal(cfg)` → generic tree → JSON, and `configFromJSON` reverses it (JSON → tree → YAML → `types.Config` → `parser.ValidateAll`). JSON field names match the YAML names the SPA renders/submits; numbers (`per_page: 20`), `-created_at` strings and nulls round-trip. Invalid JSON/YAML → 422 with `{errors, warnings}` and the in-memory config stays untouched. `analyze()` (handlers.go) mirrors the TUI Sync screen via `schema.ParseSchema` (**explicit paths, NOT globs** — callers must `filepath.Glob(filepath.Join(s.schemaDir(cfg), "*.sql"))` first), `schema.ParseQueries`, `schema.CollectReferences`; `sqlBase`/`queriesDir`/`schemaDir` take the captured `*types.Config` (they resolve relative to it, so no extra locking). All JSON list fields are initialized to `[]` (never nil) so the SPA always sees arrays, not `null`.
+
+Frontend: `internal/serve/static/{index.html,app.js,style.css}` embedded via `//go:embed static/*`. Tabs: panel, connections, sqlc, auth, navigation, resources, pages, queries, validate, sync, raw. Shared `collectionEditor()` for keyed lists (resources/columns/fields/actions/children/widgets/nav items) with row add/edit/delete; advanced maps/objects edit via a JSON modal. Save flow: `PUT /api/config` (or `PUT /api/raw` for the raw tab) → `POST /api/save` → reload `GET /api/config`. Tests: `internal/serve/serve_test.go` (httptest endpoint suite + sqlBase resolution).
 
 ### Pre-built stylesheet (D12)
 
@@ -520,10 +529,12 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 
 | Path | Purpose |
 |---|---|
-| `cmd/yaga/main.go` | CLI entry (init/generate/validate/version), hand-rolled flags |
+| `cmd/yaga/main.go` | CLI entry (init/edit/wedit/generate/validate/version), hand-rolled flags |
 | `cmd/yaga/introspect.go` | `init --db` — DB introspection, auth table creation, YAML with `schema:` block generation |
 | `cmd/yaga/edit.go` | `edit` — entry point for interactive YAML config editor |
+| `cmd/yaga/wedit.go` | `wedit` — entry point for the web-based config editor (E4) |
 | `cmd/yaga/editor/` | tview TUI editor: 3-pane shell, section editors, sync + validate + preview screens (18 files, see `edit` above) |
+| `internal/serve/` | Web editor (E4): REST API + YAML↔JSON bridge + `static/` embedded SPA (see `wedit` above) |
 | `internal/types/` | YAML-tagged Go structs for config schema (7 files: config.go, panel.go, resource.go, field.go, hook.go, procedure.go, schema.go) |
 | `internal/parser/` | yaml.v3 unmarshal + validation (schema.go, validator.go) |
 | `internal/generator/` | Code generation pipeline (see above; `assets/` holds the embedded Chart.js 4.4.1 bundle + pre-built `styles.css`) |
