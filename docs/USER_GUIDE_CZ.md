@@ -8,7 +8,7 @@ import/export, autentizace, RBAC, auditní protokolování, vlastní akce, háč
 (Go, SQL nebo Lua) a další.
 
 Důležité: **databáze je základem**. YAGA se připojí k vaší databázi,
-přečte schéma, včetně PK/FK a views a uloží tyto informace do **specifikačního YAML souboru**, který je možné dále editovat a měnit tak vzhled a chování výsledné aplikace. Proto je nutné návrhu databáze a odladění věnovat náležitý čas a pozornost! YAGA ovšem není obecným nástrojem na tvorbu jakých koli web aplikací jako jsou lowcode mendix, Bubble.io, AppSmith apod. Lze v něm realizovat jen a pouze aplikaci typu "admin dashboard", viz. obrazovky v adresáři /screens/
+přečte schéma, včetně PK/FK a views a uloží tyto informace do **specifikačního YAML souboru**, který je možné dále editovat a měnit tak vzhled a chování výsledné aplikace. Proto je nutné návrhu databáze a odladění věnovat náležitý čas a pozornost! YAGA ovšem není obecným nástrojem na tvorbu libovolných web aplikací jako jsou lowcode mendix, Bubble.io, AppSmith apod. Lze v něm realizovat jen a pouze aplikaci typu "admin dashboard", viz. obrazovky v adresáři /screens/
 
 ---
 
