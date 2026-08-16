@@ -223,6 +223,10 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("generating main.go: %w", err)
 	}
 
+	if err := g.generateEnvFile(); err != nil {
+		return fmt.Errorf("generating .ENV: %w", err)
+	}
+
 	if err := g.generateRouter(); err != nil {
 		return fmt.Errorf("generating router: %w", err)
 	}

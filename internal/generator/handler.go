@@ -696,7 +696,10 @@ func (g *Generator) generateListHandler(dir string, r types.Resource) error {
 		urlImport = "    \"net/url\"\n"
 	}
 	fmtImport := ""
-	if !g.isSQLite() && (len(searchCols) > 0 || (hasFilter && compiled != nil && len(compiled.Bindings) > 0)) {
+	if !g.isSQLite() {
+		// On postgres/mssql the emitted search block (and filter block when
+		// $N bindings exist) always reference fmt.Sprintf, so fmt is needed
+		// even when the resource declares no searchable columns.
 		fmtImport = "    \"fmt\"\n"
 	}
 
@@ -1047,7 +1050,9 @@ func (g *Generator) generateCardHandler(dir string, r types.Resource) error {
 		urlImport = "    \"net/url\"\n"
 	}
 	fmtImport := ""
-	if !g.isSQLite() && (len(searchCols) > 0 || (hasFilter && compiled != nil && len(compiled.Bindings) > 0)) {
+	if !g.isSQLite() {
+		// Same as the list handler: the emitted search/filter blocks on
+		// postgres/mssql always reference fmt.Sprintf.
 		fmtImport = "    \"fmt\"\n"
 	}
 

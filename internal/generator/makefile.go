@@ -66,13 +66,15 @@ run: build
 	./$(BINARY) --port $(PORT) --log $(LOG)
 
 # Package the binary and every file the dashboard needs at runtime (static
-# assets incl. uploads, sql/ migrations and the sqlite data/ dir when present)
-# into a tar.gz archive for deployment. Extract it on the target machine and
-# run the binary from the extracted directory (the sqlite DSN is relative).
+# assets incl. uploads, the .ENV database config, sql/ migrations and the
+# sqlite data/ dir when present) into a tar.gz archive for deployment. Extract
+# it on the target machine and run the binary from the extracted directory (the
+# sqlite DSN is relative); edit .ENV to point at the deployment database.
 package: build
 	rm -rf $(PACKAGE_NAME)
 	mkdir -p $(PACKAGE_NAME)
 	cp -r $(BINARY) static $(PACKAGE_NAME)/
+	if [ -f .ENV ]; then cp .ENV $(PACKAGE_NAME)/; fi
 	for d in sql data; do if [ -d $$d ]; then cp -r $$d $(PACKAGE_NAME)/; fi; done
 	tar czf $(PACKAGE_NAME).tar.gz $(PACKAGE_NAME)
 	rm -rf $(PACKAGE_NAME)

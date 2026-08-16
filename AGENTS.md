@@ -162,7 +162,7 @@ Every table/column identifier emitted into raw SQL is **always quoted** via `quo
 - a `%s` slot that splices SQL into an emitted Go `"..."` string literal must wrap it in `embedSQL(g.quoteIdent(x))` (escapes `"` → `\"`); a `%s` slot that splices SQL into an emitted backtick/raw region uses plain `g.quoteIdent(x)`.
 Every identifier in `listSelectFrom` (`labelJoins`, LEFT JOIN table/column/label, `fk` columns), the search/ORDER columns, `delete.go`/`update.go` WHERE, `buildOptionsLoader`, `optionSQL`, `childLinesParts`, `data.go` getQuerySQL, the auth login query, `main.go` sanity query, `audit.go` DDL + INSERT, `hooks.go` `RETURNING <id>` and `import.go` tName all route through `quoteIdent`. Dynamic user input must never be spliced here — only config-driven names, so quoting is a correctness feature, not a security boundary.
 
-**`fmt` import is conditional in generated list.go/card.go** — the sqlite search block uses string concatenation (`col+" LIKE ?"`), so `fmt` is only imported when `!isSQLite() && (searchable cols exist || filter has $N bindings)` (`fmtImport`). A bare `"fmt"` line breaks sqlite builds with "imported and not used" (the old `fmt.Sprintf(" ORDER BY %s %s", …)` always used fmt; it's now concatenation). Keep the gate in sync when editing the search/filter cores.
+**`fmt` import in generated list.go/card.go** — `fmt` is imported whenever the driver is postgres/mssql (`!isSQLite()`), because the emitted search block always references `fmt.Sprintf("%s ILIKE $%d", …)` textually — even when the resource has zero searchable columns, so the import can never be gated on `len(searchCols) > 0` (that produced "undefined: fmt" builds). On sqlite the search block uses string concatenation (`col+" LIKE ?"`) and the filter block uses `strings.Replace(frag, "__GFP__", "?", 1)`, so `fmt` must NOT be imported or sqlite builds break with "imported and not used". Keep the gate (`if !g.isSQLite()`) in sync when editing the search/filter cores.
 
 ### MSSQL-specific gotchas
 
@@ -589,6 +589,7 @@ Chart.js is **vendored at generation time** (D8) — no npm, no CDN, runtime is 
 | `internal/generator/` | Code generation pipeline (see above; `assets/` holds the embedded Chart.js 4.4.1 bundle + pre-built `styles.css`; `luascript.go` emits the request-time gopher-lua runtime) |
 | `examples/` | Empty placeholder dirs (`full`, `minimal`), unused |
 | `SPEC.md` | Authoritative YAML schema and spec — check before adding features |
+| `docs/` | End-to-end user guide (`USER_GUIDE.md`: installation, commands, workflow, YAML reference, editors, actions/hooks; `Lua-for-Yaga-guide.md`: the request-time Lua runtime for `script:` actions/hooks) |
 | `testdata/` | `kitchen.yaml` — the kitchen-sink fixture that regenerates the pre-built stylesheet (`make styles`) and drives `TestGenerateStylesEmbedded`; no longer empty |
 | `pkg/auth/` | Empty placeholder (.gitkeep only), unused |
 

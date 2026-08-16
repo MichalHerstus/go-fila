@@ -928,6 +928,58 @@ func TestGenerateListFKLabelJoin(t *testing.T) {
 	}
 }
 
+// TestGenerateFmtImportSearchBlock ensures list.go imports fmt on
+// postgres/mssql even when the resource declares no searchable columns and no
+// filter — the emitted search block always references fmt.Sprintf, so a gated
+// import (as before) produced "undefined: fmt" builds. On sqlite the search
+// block uses string concatenation and must not import fmt.
+func TestGenerateFmtImportSearchBlock(t *testing.T) {
+	cfgFor := func(driver string) *types.Config {
+		return &types.Config{
+			Version: "1",
+			Panel:   types.Panel{ID: "admin", Path: "/admin", Name: "Admin"},
+			Connections: map[string]types.Connection{
+				"default": {Driver: driver, DSN: "x"},
+			},
+			Resources: []types.Resource{
+				{
+					Name:  "Note",
+					Label: "Note",
+					List:  &types.ListConfig{Columns: []types.Column{{Name: "title", Label: "Title"}}},
+				},
+			},
+		}
+	}
+
+	for _, driver := range []string{"postgres", "mssql"} {
+		dir := t.TempDir()
+		g := New(cfgFor(driver), dir)
+		if err := g.Generate(); err != nil {
+			t.Fatalf("generate (%s): %v", driver, err)
+		}
+		list, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/note/list.go"))
+		if err != nil {
+			t.Fatalf("read list.go: %v", err)
+		}
+		if !strings.Contains(string(list), "    \"fmt\"\n") {
+			t.Errorf("%s list.go must import fmt (search block uses fmt.Sprintf) even without searchable columns:\n%s", driver, list)
+		}
+	}
+
+	dir := t.TempDir()
+	g := New(cfgFor("sqlite"), dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate (sqlite): %v", err)
+	}
+	list, err := os.ReadFile(filepath.Join(dir, "internal/panel/resources/note/list.go"))
+	if err != nil {
+		t.Fatalf("read list.go: %v", err)
+	}
+	if strings.Contains(string(list), `"fmt"`) {
+		t.Errorf("sqlite list.go must not import fmt (search block uses concatenation):\n%s", list)
+	}
+}
+
 // TestGeneratePostgresDriver ensures a postgres project opens the DB with the
 // pgx driver name and registers it (and pins it in go.mod) so the generated
 // app actually boots against a live postgres server.
@@ -951,6 +1003,7 @@ func TestGeneratePostgresDriver(t *testing.T) {
 	for _, want := range []string{
 		`_ "github.com/jackc/pgx/v5/stdlib"`,
 		`sql.Open("pgx", dsn)`,
+		`dsn = envFrom(".ENV", "DATABASE_URL")`,
 	} {
 		if !strings.Contains(mainStr, want) {
 			t.Errorf("main.go missing %q", want)
@@ -959,6 +1012,12 @@ func TestGeneratePostgresDriver(t *testing.T) {
 	if strings.Contains(mainStr, `sql.Open("postgres"`) {
 		t.Error("main.go must not use the unregistered \"postgres\" driver name")
 	}
+	if strings.Contains(mainStr, "postgres://user:pass@host:5432/db") {
+		t.Error("main.go must not embed the configured DSN (credentials belong in .ENV)")
+	}
+	if strings.Contains(mainStr, `dsn = "postgres://localhost:5432`) {
+		t.Error("main.go must not fall back to the localhost default when a connection is configured")
+	}
 
 	gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 	if err != nil {
@@ -966,6 +1025,60 @@ func TestGeneratePostgresDriver(t *testing.T) {
 	}
 	if !strings.Contains(string(gomod), "github.com/jackc/pgx/v5 v5.10.0") {
 		t.Error("go.mod must pin github.com/jackc/pgx/v5 for the postgres driver")
+	}
+}
+
+// TestGenerateEnvFile ensures the configured database DSN is emitted into a
+// private .ENV file next to main.go (not compiled into the binary), so
+// deployments can switch databases by editing the file. A config with no
+// connection produces no .ENV and main.go boots from the localhost default.
+func TestGenerateEnvFile(t *testing.T) {
+	cfg := hookConfig()
+	cfg.Connections = map[string]types.Connection{
+		"default": {Driver: "postgres", DSN: "postgres://user:pass@host:5432/db"},
+	}
+	dir := t.TempDir()
+	g := New(cfg, dir)
+	if err := g.Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, ".ENV"))
+	if err != nil {
+		t.Fatalf("read .ENV: %v", err)
+	}
+	if !strings.Contains(string(data), "DATABASE_URL=postgres://user:pass@host:5432/db") {
+		t.Errorf(".ENV must carry DATABASE_URL:\n%s", data)
+	}
+	info, err := os.Stat(filepath.Join(dir, ".ENV"))
+	if err != nil {
+		t.Fatalf("stat .ENV: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf(".ENV mode = %o, want 0600", info.Mode().Perm())
+	}
+
+	// No connection configured => no .ENV, and main.go keeps the non-secret
+	// localhost fallback so the generated app still boots.
+	cfg2 := hookConfig()
+	cfg2.Connections = nil
+	dir2 := t.TempDir()
+	g2 := New(cfg2, dir2)
+	if err := g2.Generate(); err != nil {
+		t.Fatalf("generate (no connections): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir2, ".ENV")); !os.IsNotExist(err) {
+		t.Error("config without a connection must not emit .ENV")
+	}
+	main2, err := os.ReadFile(filepath.Join(dir2, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	if !strings.Contains(string(main2), `dsn = "postgres://localhost:5432/db?sslmode=disable"`) {
+		t.Error("main.go without a configured connection must keep the localhost default fallback")
+	}
+	if strings.Contains(string(main2), `log.Fatalf("no DATABASE_URL:`) {
+		t.Error("main.go without a configured connection must not error on a missing DSN")
 	}
 }
 

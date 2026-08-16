@@ -2,6 +2,9 @@
 
 **yaga** is a YAML-driven admin dashboard generator for Go. Point it at an existing database (`yaga init --db DSN`) and it introspects the schema, writes a declarative `yaga.yaml`, and generates a fully functional admin panel with CRUD resources, card/kanban views, custom pages, widgets, authentication, RBAC, audit logging, CSV import/export, filters and hooks — no boilerplate. Generation runs fully offline: the schema comes from a captured `schema:` block in the config, so there is **no sqlc, no Tailwind binary and no DB connection at build time**.
 
+> 📖 **User guide** — for a practical, end-to-end walkthrough (installation, commands,
+> workflow, YAML reference, editors, actions/hooks) see [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
+
 ## Prerequisites
 
 | Tool | Required for | Notes |
@@ -80,7 +83,7 @@ tar xzf admin-20260804.tar.gz && cd admin-20260804
                                         # short forms: -p 8080 -l err
 ```
 
-Run the binary from the extracted directory — the sqlite DSN (`file:./data/admin.db`) is relative to the working directory. For postgres/MSSQL deployments, configure the database on the server and pass the DSN via the `DATABASE_URL` env var (or keep the one baked in at generation time). The generated server runs a DB sanity query **before** binding the port, so a missing/uninitialized DB is a fatal startup error instead of occupying the port, and it shuts down gracefully on SIGINT/SIGTERM.
+Run the binary from the extracted directory — the sqlite DSN (`file:./data/admin.db`) is relative to the working directory. The dashboard resolves its database at startup as `DATABASE_URL` env var → the `.ENV` file next to the binary (generated from the config's `connections.*.dsn`, readable only by the owner) → for a config with no connection, a non-secret localhost default. Edit `.ENV` to point at another database (test→prod) without rebuilding. The generated server runs a DB sanity query **before** binding the port, so a missing/uninitialized DB is a fatal startup error instead of occupying the port, and it shuts down gracefully on SIGINT/SIGTERM.
 
 The `init` command fails if files already exist unless `--force` is passed.
 
@@ -172,6 +175,9 @@ yaga/
 │   │                           #   SSE live sync, preview, embedded SPA (static/)
 │   └── mcp/                    # MCP server (JSON-RPC 2.0) + yaml.Node path helpers
 ├── examples/plugins/audit/     # complete example plugin (AuditLog resource + hooks)
+├── docs/
+│   ├── USER_GUIDE.md            # End-to-end user guide (README depth, workflows)
+│   └── Lua-for-Yaga-guide.md    # Lua scripting reference (actions/hooks)
 ├── SPEC.md                     # Authoritative spec
 ├── testdata/kitchen.yaml       # kitchen-sink fixture for styles + generator tests
 └── AGENTS.md                   # Agent instructions
@@ -294,7 +300,7 @@ connections:
 ```
 
 - `driver` determines the `sql.Open` driver, the LIKE operator (`ILIKE` on postgres, `LIKE` on sqlite/mssql), bind placeholders (`$N` vs positional `?`), identifier quoting (`"name"` vs `[name]`), and the id type throughout generation (`int32` postgres/mssql, `int64` sqlite unless overridden by `id_type`). If every entry omits `driver`, it defaults to `postgres`.
-- `dsn` is embedded in the generated `main.go`. At runtime, the `DATABASE_URL` environment variable overrides it. A SQLite example: `file:./data/admin.db`.
+- `dsn` is written to a `.ENV` file in the generated project (`DATABASE_URL=<dsn>`, mode 0600) — it is **not** compiled into the binary. At runtime the `DATABASE_URL` environment variable wins over the `.ENV` value; if neither is set and a connection was configured, the server refuses to start. A SQLite example: `file:./data/admin.db`.
 - SQLite requires `github.com/mattn/go-sqlite3`; MSSQL requires `github.com/microsoft/go-mssqldb`. The matching driver import is added to the generated `go.mod` automatically.
 - The generated server applies pool settings, then runs a DB sanity query against the auth table **before** binding the port (mssql `SELECT TOP 1 1`, others `SELECT 1 … LIMIT 1`).
 

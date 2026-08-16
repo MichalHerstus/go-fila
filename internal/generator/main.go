@@ -1,9 +1,10 @@
 // main.go
 //
 // Generates the top-level main.go of the generated admin panel application.
-// The generated program opens a database/sql connection (from the DATABASE_URL
-// env var or the configured DSN), builds the chi router and starts the HTTP
-// server.
+// The generated program resolves the database DSN at runtime (DATABASE_URL
+// env var, then the .ENV file, then an embedded localhost fallback only when
+// the config declared no connection), opens the database/sql connection,
+// builds the chi router and starts the HTTP server.
 package generator
 
 import (
@@ -16,11 +17,13 @@ import (
 
 // generateMain writes main.go for the generated app: it imports the driver
 // package (pgx stdlib for postgres, mattn/go-sqlite3 for sqlite, go-mssqldb
-// for mssql), opens the database connection using getDSN, verifies the
-// database is usable (Ping plus a sanity query against the auth table) BEFORE
-// binding the listen port, then serves on a port chosen by the --port flag (or
-// the ADDR env var, default ":8080") with graceful shutdown on SIGINT/SIGTERM.
-// Returns an error if the file cannot be written.
+// for mssql), opens the database connection resolved at runtime (see the DSN
+// resolution block), verifies the database is usable (Ping plus a sanity query
+// against the auth table) BEFORE binding the listen port, then serves on a
+// port chosen by the --port flag (or the ADDR env var, default ":8080") with
+// graceful shutdown on SIGINT/SIGTERM. The configured DSN is never baked into
+// the binary — it is emitted into the sibling .ENV file (see generateEnvFile)
+// which deployments can edit. Returns an error if the file cannot be written.
 func (g *Generator) generateMain() error {
 	driverName := "postgres"
 	driverImport := fmt.Sprintf("_ %q", g.moduleImport(g.Config.SQLC.OutputPkg))
@@ -54,6 +57,29 @@ func (g *Generator) generateMain() error {
 		break
 	}
 
+	// DSN resolution: DATABASE_URL env var wins, then the .ENV file next to the
+	// binary, then — only when the config declared NO connection at all (nothing
+	// secret was ever configured) — a localhost postgres default. When a real
+	// connection was configured the DSN is NOT embedded here; it lives in .ENV
+	// (see generateEnvFile) so credentials never end up compiled into the binary.
+	dsnBlock := `
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = envFrom(".ENV", "DATABASE_URL")
+	}
+`
+	if configDSN(g.Config) == "" {
+		dsnBlock += `	if dsn == "" {
+		dsn = "postgres://localhost:5432/db?sslmode=disable"
+	}
+`
+	} else {
+		dsnBlock += `	if dsn == "" {
+		log.Fatalf("no DATABASE_URL: set the environment variable or add it to .ENV")
+	}
+`
+	}
+
 	sanityQuery := fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", g.quoteIdent(authTable))
 	if g.isMSSQL() {
 		sanityQuery = fmt.Sprintf("SELECT TOP 1 1 FROM %s", g.quoteIdent(authTable))
@@ -71,6 +97,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -96,12 +123,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	auth.Init()
-
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		dsn = %q
-	}
+	auth.Init()%s
 
 	db, err := sql.Open(%q, dsn)
 	if err != nil {
@@ -153,18 +175,68 @@ func main() {
 		log.Fatal(err)
 	}
 }
-`, driverImport, g.moduleImport("internal/panel"), g.moduleImport("internal/panel/auth"), getDSN(g.Config), driverName, poolCode, sanityQuery)
+
+// envFrom reads a dotenv-style KEY=value file and returns the value of key
+// ("" when the file or key is absent). Blank lines and # comments are skipped,
+// surrounding single/double quotes are stripped. Keeps the dashboard free of
+// external dotenv dependencies.
+func envFrom(path, key string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq < 0 {
+			continue
+		}
+		if strings.TrimSpace(line[:eq]) != key {
+			continue
+		}
+		val := strings.TrimSpace(line[eq+1:])
+		if len(val) >= 2 && (val[0] == '\'' || val[0] == '"') && val[len(val)-1] == val[0] {
+			val = val[1 : len(val)-1]
+		}
+		return val
+	}
+	return ""
+}
+`, driverImport, g.moduleImport("internal/panel"), g.moduleImport("internal/panel/auth"), dsnBlock, driverName, poolCode, sanityQuery)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "main.go"), []byte(code), 0644)
 }
 
-// getDSN returns the DSN of the first configured connection, or a localhost
-// postgres fallback if no connections are configured.
+// configDSN returns the DSN of the first configured connection, or "" when no
+// connection is configured. Only real configured DSNs are returned — the
+// localhost fallback is handled by generateMain, never emitted into .ENV.
 // Params: cfg (parsed config whose Connections map is inspected).
-// Returns: the DSN string to embed into the generated main.go.
-func getDSN(cfg *types.Config) string {
+// Returns: the first configured connection DSN ("" when none).
+func configDSN(cfg *types.Config) string {
 	for _, conn := range cfg.Connections {
 		return conn.DSN
 	}
-	return "postgres://localhost:5432/db?sslmode=disable"
+	return ""
+}
+
+// generateEnvFile writes the .ENV file into the output directory holding the
+// configured database DSN (DATABASE_URL), mode 0600 so credentials are not
+// world-readable. Deployments can edit this file to point at a different
+// database without rebuilding; the DATABASE_URL environment variable
+// overrides it at runtime. Emitted only when the config declares a connection
+// (a config with zero connections boots from the non-secret localhost default
+// baked into main.go). Returns an error on write failure.
+func (g *Generator) generateEnvFile() error {
+	dsn := configDSN(g.Config)
+	if dsn == "" {
+		return nil
+	}
+	content := "# Generated by YAGA — database connection string read at startup.\n" +
+		"# Edit to switch databases per deployment (test/prod, …) without rebuilding.\n" +
+		"# The DATABASE_URL environment variable overrides this value at runtime.\n" +
+		"DATABASE_URL=" + dsn + "\n"
+	return os.WriteFile(filepath.Join(g.OutDir, ".ENV"), []byte(content), 0600)
 }

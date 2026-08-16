@@ -2,6 +2,9 @@
 
 **yaga** is a YAML-driven admin dashboard generator for Go, inspired by FilamentPHP. It reads a declarative YAML specification and generates a fully functional admin panel with CRUD resources, pages, widgets, authentication, navigation, and theming — all without writing boilerplate Go code.
 
+> 📖 **User guide** — for a practical walkthrough (installation, commands, workflow,
+> YAML reference, editors, actions/hooks) see [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
+
 ---
 
 ## Core Architecture
