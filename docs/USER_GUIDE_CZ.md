@@ -1,6 +1,6 @@
 # YAGA — uživatelská příručka
 
-**yaga** (YAML Advanced Generator for Admin panels) je generátor CRUD webových aplikací (admin panelů) založený na YAML
+**YAGA** (YAML Advanced Generator for Admin panels) je generátor CRUD webových aplikací (admin panelů) založený na YAML
 definičním souboru. YAGA vygeneruje kompletní kód aplikace, který už stačí jen zkompilovat. Stačí YAGA "nasměrovat" na existující databázi, popsat požadovaný detaily aplikace
 v souboru `yaga.yaml` a nástroj vytvoří kompletní, samostatný administrátorský panel v jazyce Go: CRUD
 zdroje, zobrazení typu karet/kanban, vlastní stránky s widgety, vyhledávání/třídění/filtrování, import/export do formátu CSV
