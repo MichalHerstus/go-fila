@@ -149,9 +149,13 @@ func Run(ctx context.Context, db Execer, scope Scope, code string) error {
     lctx, cancel := context.WithTimeout(ctx, scriptTimeout)
     defer cancel()
 
-    L := lua.NewState()
+    L := lua.NewState(lua.Options{SkipOpenLibs: true})
     defer L.Close()
     L.SetContext(lctx)
+    openLib(L, lua.OpenBase, lua.BaseLibName)
+    openLib(L, lua.OpenTable, lua.TabLibName)
+    openLib(L, lua.OpenString, lua.StringLibName)
+    openLib(L, lua.OpenMath, lua.MathLibName)
 
     L.SetGlobal("ctx", newCtxTable(L, scope))
     dbTbl := L.NewTable()
@@ -279,6 +283,12 @@ func Run(ctx context.Context, db Execer, scope Scope, code string) error {
         }
     }
     return nil
+}
+
+func openLib(L *lua.LState, fn lua.LGFunction, name string) {
+    L.Push(L.NewFunction(fn))
+    L.Push(lua.LString(name))
+    L.Call(1, 0)
 }
 
 func newCtxTable(L *lua.LState, scope Scope) *lua.LTable {
