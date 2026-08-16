@@ -56,7 +56,7 @@ The generated `Makefile` runs every step needed to build the dashboard binary (t
 
 - **TUI editor (`yaga edit`)** — a keyboard-driven terminal UI (3-pane: navigation list + content + status bar) covering every config section. Ctrl+S saves, Ctrl+V validates, Ctrl+P opens a cd-style path navigator, Ctrl+O goes home, Ctrl+Q quits.
 - **Web editor (`yaga wedit`)** — a local HTTP server (`--port`, default `:9090`, `--open` to launch the browser) with an embedded vanilla-JS single-page app: tabbed editors for panel/connections/auth/navigation/resources/pages, a Validate screen, a live dashboard **Preview** tab (page + resource mocks), and a raw-YAML tab. Changes are edited in memory; Save writes them to disk. Multiple browser tabs live-sync via Server-Sent Events and a revision counter; a stale tab is warned and asked before overwriting newer server/MCP changes. The MCP `save` tool backs up the previous file to `<config>.bak` before writing.
-- **AI-assisted edit (`yaga edit --prompt "…"`)** — non-interactive; sends the full config to a model and merges back only the changed sections (validated; invalid merges are retried once, then the file is left untouched). See "CLI" for `--prompt`/`--apikey`/`--model`/`--dry-run`.
+- **AI-assisted edit (`yaga edit --prompt "…"`)** — non-interactive; sends the full config to a model and merges back only the changed sections (validated; invalid merges are retried once, then the file is left untouched). See "CLI" for `--prompt`/`--apikey`/`--model`/`--dry-run`. IT IS ALMOST EXPERIMENTAL FEATURE ONLY! I recommend to use MCP/AI agent way instead.
 
 ### MCP (AI agents over `wedit`)
 
