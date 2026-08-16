@@ -1,4 +1,4 @@
-# yaga — uživatelská příručka
+# YAGA — uživatelská příručka
 
 **yaga** (YAML Advanced Generator for Admin panels) je generátor administrátorských panelů založený na YAML
 pro jazyk Go. Stačí jej nasměrovat na existující databázi, popsat požadovaný panel
