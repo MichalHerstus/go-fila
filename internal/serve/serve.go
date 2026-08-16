@@ -1,6 +1,6 @@
 // Package serve implements the `yaga wedit` web-based YAML config editor
 // (E4). It starts a local HTTP server exposing a small JSON REST API over the
-// same Go logic the TUI editor uses (parser.ValidateAll, schema.ParseQueries,
+// same Go logic the TUI editor uses (parser.ValidateAll,
 // schema.CollectReferences) plus an embedded
 // vanilla-JS single-page app. The command name is `wedit` (not the E4-drafted
 // `serve`) so the web version of the editor is clearly distinguishable from a
@@ -18,7 +18,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
@@ -34,16 +33,14 @@ var staticFS embed.FS
 // DefaultPort is the port wedit binds when --port is not given.
 const DefaultPort = 9090
 
-// Server owns the in-memory config being edited, the disk paths it maps to,
+// Server owns the in-memory config being edited, the disk path it maps to,
 // and the HTTP routes of the editor API. It follows the same pattern as the
-// TUI editor's `Editor`: an in-memory *types.Config plus a pendingSQL map for
-// staged SQL query-file rewrites that are flushed together with the YAML on
+// TUI editor's `Editor`: an in-memory *types.Config written back to disk on
 // save.
 type Server struct {
 	mu         sync.RWMutex
 	cfg        *types.Config
 	configPath string
-	pendingSQL map[string]string // staged query-file rewrites (abs path -> new content)
 
 	port int
 	open bool // open the browser automatically after binding
@@ -90,9 +87,6 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /api/fix", s.handleFix)
 	mux.HandleFunc("POST /mcp", s.handleMCPPost)
 	mux.HandleFunc("GET /mcp", s.handleMCPGet)
-	mux.HandleFunc("GET /api/analyze", s.handleAnalyze)
-	mux.HandleFunc("GET /api/queries/{name}", s.handleQueryGet)
-	mux.HandleFunc("PUT /api/queries", s.handleQueryPut)
 	mux.HandleFunc("GET /api/raw", s.handleRawGet)
 	mux.HandleFunc("PUT /api/raw", s.handleRawPut)
 
@@ -176,57 +170,4 @@ func openBrowser(url string) {
 		return
 	}
 	_ = cmd.Start()
-}
-
-// sqlBase returns the directory that the sqlc paths (sqlc.queries_dir /
-// sqlc.schema_dir) are relative to. Same resolution the TUI editor uses: the
-// config dir wins when it has any sql tree, otherwise the config dir's admin/
-// subdir, otherwise the config dir itself.
-func (s *Server) sqlBase(cfg *types.Config) string {
-	base := filepath.Dir(s.configPath)
-	for _, cand := range []string{base, filepath.Join(base, "admin")} {
-		if sqlTreeExists(cfg.SQLC.QueriesDir, cfg.SQLC.SchemaDir, cand) {
-			return cand
-		}
-	}
-	return base
-}
-
-// queriesDir returns the absolute directory of the SQLC query files.
-func (s *Server) queriesDir(cfg *types.Config) string {
-	dir := cfg.SQLC.QueriesDir
-	if dir == "" {
-		dir = "./sql/queries"
-	}
-	return filepath.Join(s.sqlBase(cfg), dir)
-}
-
-// schemaDir returns the absolute directory of the schema migration files.
-func (s *Server) schemaDir(cfg *types.Config) string {
-	dir := cfg.SQLC.SchemaDir
-	if dir == "" {
-		dir = "./sql/migrations"
-	}
-	return filepath.Join(s.sqlBase(cfg), dir)
-}
-
-// sqlTreeExists reports whether either sqlc dir exists under base. Absolute
-// paths resolve against nothing in the project and never match.
-func sqlTreeExists(queriesDir, schemaDir, base string) bool {
-	return sqlRelDir(queriesDir, "./sql/queries", base) ||
-		sqlRelDir(schemaDir, "./sql/migrations", base)
-}
-
-// sqlRelDir reports whether the (possibly empty, possibly relative) sqlc
-// directory rel exists under base.
-func sqlRelDir(rel, def, base string) bool {
-	if rel == "" {
-		rel = def
-	}
-	return !filepath.IsAbs(rel) && isDir(filepath.Join(base, rel))
-}
-
-func isDir(p string) bool {
-	info, err := os.Stat(p)
-	return err == nil && info.IsDir()
 }

@@ -11,7 +11,6 @@ const state = {
   resource: null, // drill-in: resource being edited
   pageName: null, // drill-in: page being edited
   dirty: false,
-  analyze: null, // cached GET /api/analyze result
 };
 
 const FIELD_TYPES = [
@@ -451,7 +450,6 @@ const TABS = [
   ["navigation", "Navigation"],
   ["resources", "Resources"],
   ["pages", "Pages"],
-  ["queries", "Queries"],
   ["validate", "Validate"],
   ["preview", "Preview"],
   ["raw", "Raw YAML"],
@@ -491,7 +489,6 @@ function renderPage() {
     navigation: pageNavigation,
     resources: pageResources,
     pages: pagePages,
-    queries: pageQueries,
     validate: pageValidate,
     preview: pagePreview,
     raw: pageRaw,
@@ -1185,73 +1182,6 @@ function renderPageEditor(name) {
   wCols.appendChild(addW);
   cardW.appendChild(wCols);
   collectionEditor(cardW, p.widgets, WIDGET_SCHEMA, { jsonTitle: "Edit widget (JSON)" });
-}
-
-/* ---------- page: Queries ---------- */
-
-async function pageQueries() {
-  const root = content();
-  h2(root, "SQL Queries");
-  const hint = document.createElement("p");
-  hint.className = "mono";
-  hint.textContent = "Click a query to edit its SQL body. Changes are staged and flushed on Save.";
-  root.appendChild(hint);
-  let rep;
-  try {
-    rep = await api("GET", "/api/analyze");
-  } catch (e) {
-    const p = document.createElement("p");
-    p.textContent = "analyze failed: " + e.message;
-    root.appendChild(p);
-    return;
-  }
-  state.analyze = rep;
-  const ul = document.createElement("ul");
-  ul.className = "code-list";
-  for (const q of rep.queries) {
-    const li = document.createElement("li");
-    const nameEl = document.createElement("a");
-    nameEl.href = "#";
-    nameEl.textContent = q.name;
-    nameEl.style.color = "var(--accent)";
-    nameEl.addEventListener("click", (ev) => { ev.preventDefault(); queryEditor(q.name); });
-    const fileEl = document.createElement("span");
-    fileEl.className = "origin";
-    fileEl.textContent = q.file;
-    li.append(nameEl, fileEl);
-    ul.appendChild(li);
-  }
-  root.appendChild(ul);
-}
-
-async function queryEditor(name) {
-  let data;
-  try {
-    data = await api("GET", "/api/queries/" + encodeURIComponent(name));
-  } catch (e) {
-    toast("Cannot load query: " + e.message, "error");
-    return;
-  }
-  openModal("SQL: " + data.name + "  (" + data.file + ")", (body, ok, cancel, close) => {
-    const ta = document.createElement("textarea");
-    ta.value = data.body;
-    body.appendChild(ta);
-    const status = document.createElement("div");
-    status.className = "save-status";
-    body.appendChild(status);
-    ok.textContent = "Stage";
-    ok.addEventListener("click", async () => {
-      status.textContent = "…";
-      try {
-        await api("PUT", "/api/queries", { name: data.name, body: ta.value });
-        status.textContent = "staged (flushed on Save)";
-        ok.classList.add("hidden");
-      } catch (e) {
-        status.textContent = "failed: " + e.message;
-      }
-    });
-    cancel.textContent = "Close";
-  });
 }
 
 /* ---------- page: Validate ---------- */

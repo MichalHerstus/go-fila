@@ -54,7 +54,6 @@ func (s *Server) toolDefs() []toolDef {
 		{Name: "open", Description: "Replace the in-memory config by reading another yaga.yaml file from disk.", InputSchema: schemaOf(map[string]interface{}{
 			"path": strProp("absolute or relative path to a yaga.yaml file"),
 		}, "path")},
-		{Name: "analyze", Description: "Return the schema/query sync analysis (tables, queries, missing references).", InputSchema: schemaOf(nil)},
 
 		// Read
 		{Name: "get_config", Description: "Return the whole config as JSON whose keys match the YAML (usable with get_value/set_value paths).", InputSchema: schemaOf(nil)},
@@ -119,12 +118,6 @@ func (s *Server) callTool(name string, args map[string]interface{}) (text string
 		return fmt.Sprintf("Written to %s (backup: %s.bak)", s.state.ConfigPath(), s.state.ConfigPath()), false
 	case "open":
 		return s.open(args)
-	case "analyze":
-		data, err := json.Marshal(s.state.Analyze(s.state.Config()))
-		if err != nil {
-			return "analyze failed: " + err.Error(), true
-		}
-		return string(data), false
 	case "get_config":
 		data, err := configJSON(s.state.Config())
 		if err != nil {

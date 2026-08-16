@@ -352,7 +352,6 @@ func (e *Editor) resFormPath(i int) string         { return e.resPath(i) + "/For
 func (e *Editor) resActionsPath(i int) string      { return e.resPath(i) + "/Actions" }
 func (e *Editor) resPoliciesPath(i int) string     { return e.resPath(i) + "/Policies" }
 func (e *Editor) resChildrenPath(i int) string     { return e.resPath(i) + "/Children" }
-func (e *Editor) resSQLPath(i int) string          { return e.resPath(i) + "/SQL" }
 
 func (e *Editor) resColumnPath(i, ci int) string {
 	return e.resColumnsPath(i) + "/" + segName(e.cfg.Resources[i].List.Columns[ci].Name, ci)
@@ -364,10 +363,6 @@ func (e *Editor) resFormWhichPath(i int, which string) string {
 
 func (e *Editor) resActionPath(i, ai int) string {
 	return e.resActionsPath(i) + "/" + segName(e.cfg.Resources[i].Actions[ai].Name, ai)
-}
-
-func (e *Editor) resSQLQueryPath(i int, q string) string {
-	return e.resSQLPath(i) + "/" + q
 }
 
 func (e *Editor) resourceIdxBySeg(seg string) int {
@@ -427,8 +422,6 @@ func (e *Editor) resolveResources(rest []string) (navTarget, error) {
 		}
 	case "children":
 		return e.resolveResChildren(ridx, base, rest[1:])
-	case "sql":
-		return e.resolveResSQL(ridx, base, rest[1:])
 	}
 	return navTarget{}, navErr(strings.Join(rest, "/"))
 }
@@ -673,18 +666,6 @@ func (e *Editor) resolveResActions(ridx int, base string, rest []string) (navTar
 	return navTarget{}, navErr(strings.Join(rest, "/"))
 }
 
-func (e *Editor) resolveResSQL(ridx int, base string, rest []string) (navTarget, error) {
-	if len(rest) == 0 {
-		return navTarget{base + "/SQL", func() tview.Primitive { return e.sqlQueriesPage(ridx) }}, nil
-	}
-	if len(rest) == 1 {
-		qname := rest[0]
-		return navTarget{base + "/SQL/" + qname, func() tview.Primitive { return e.sqlEditPage(qname) }}, nil
-	}
-	return navTarget{}, navErr(strings.Join(rest, "/"))
-}
-
-// resolveResFields resolves .../Fields[/<field>[/Validation|Options|Visible]].
 func (e *Editor) resolveResFields(ridx int, fp, title string, get func() *[]types.Field, rest []string) (navTarget, error) {
 	if len(rest) == 0 {
 		return navTarget{fp, func() tview.Primitive { return e.fieldsListPage(fp, title, get) }}, nil
@@ -996,7 +977,7 @@ func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 		r := &e.cfg.Resources[ridx]
 		rest = rest[1:]
 		if len(rest) == 0 {
-			return []string{"List", "Card", "Detail", "Form", "Actions", "Policies", "SQL"}, true
+			return []string{"List", "Card", "Detail", "Form", "Actions", "Policies", "Children"}, true
 		}
 		switch foldSeg(rest[0]) {
 		case "list":
@@ -1108,10 +1089,6 @@ func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 					}
 				}
 			}
-		case "sql":
-			if len(rest) == 1 {
-				return sqlQueriesForResource(r), true
-			}
 		case "policies":
 			return nil, true
 		}
@@ -1156,7 +1133,7 @@ func (e *Editor) childrenOf(segs []string) ([]string, bool) {
 				}
 			}
 		}
-	case "validate", "sync":
+	case "validate":
 		return nil, true
 	case "preview":
 		if len(rest) == 0 {

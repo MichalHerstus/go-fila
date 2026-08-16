@@ -6,7 +6,7 @@ import (
 )
 
 // Ctrl+key quick access for buttons. Every button takes the first free letter
-// of its label as a shortcut (e.g. Ctrl+G for "Generate missing queries"),
+// of its label as a shortcut (e.g. Ctrl+R for "Refresh"),
 // shown as a hint in the button label. Ctrl+S (save) and Ctrl+Q (quit) are
 // reserved for the editor's global keys. Shortcuts are scoped to the currently
 // displayed screen (the "modal" context while one is open, otherwise the front

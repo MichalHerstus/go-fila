@@ -43,8 +43,6 @@ type State interface {
 	// Report runs the full health check (structural validation + schema-block
 	// reference pass) over a config, returning error and warning messages.
 	Report(cfg *types.Config) (errs, warns []string)
-	// Analyze returns a JSON-serializable schema/query sync report.
-	Analyze(cfg *types.Config) interface{}
 }
 
 // Server dispatches MCP JSON-RPC messages against a State.

@@ -241,11 +241,9 @@ resources: []
 func TestValidateFindings(t *testing.T) {
 	cfg := testConfig()
 	s, dir := setupServer(t, cfg)
-	// A schema table with a matching column + a query file for the reference.
+	// A schema table with a matching column.
 	writeFile(t, filepath.Join(dir, "sql/migrations/users.sql"),
 		"-- users\nCREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  email TEXT\n);\n")
-	writeFile(t, filepath.Join(dir, "sql/queries/users.sql"),
-		"-- name: ListUser :many\nSELECT id, email FROM users;\n")
 
 	rec, data := get(t, s.Handler(), "GET", "/api/validate", nil)
 	if rec.Code != 200 {
@@ -308,86 +306,6 @@ func TestValidateFindings(t *testing.T) {
 	}
 }
 
-func TestAnalyze(t *testing.T) {
-	cfg := testConfig()
-	s, dir := setupServer(t, cfg)
-	writeFile(t, filepath.Join(dir, "sql/migrations/users.sql"),
-		"-- users\nCREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  email TEXT,\n  role_id INTEGER,\n  FOREIGN KEY (role_id) REFERENCES roles(id)\n);\n")
-	writeFile(t, filepath.Join(dir, "sql/migrations/roles.sql"),
-		"-- roles\nCREATE TABLE roles (\n  id INTEGER PRIMARY KEY,\n  name TEXT\n);\n")
-	writeFile(t, filepath.Join(dir, "sql/queries/users.sql"),
-		"-- name: ListUser :many\nSELECT id, email FROM users;\n")
-
-	rec, data := get(t, s.Handler(), "GET", "/api/analyze", nil)
-	if rec.Code != 200 {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	tables := data["tables"].([]interface{})
-	if len(tables) != 2 {
-		t.Errorf("tables = %d, want 2", len(tables))
-	}
-	queries := data["queries"].([]interface{})
-	if len(queries) != 1 || queries[0].(map[string]interface{})["name"] != "ListUser" {
-		t.Errorf("queries = %v", queries)
-	}
-	fkTargets := data["fk_targets"].([]interface{})
-	found := false
-	for _, f := range fkTargets {
-		if strings.Contains(f.(string), "ListRole") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected missing FK ListRole query, got %v", fkTargets)
-	}
-}
-
-func TestQueryStageAndFlush(t *testing.T) {
-	cfg := testConfig()
-	s, dir := setupServer(t, cfg)
-	queryPath := filepath.Join(dir, "sql/queries/users.sql")
-	original := "-- name: ListUser :many\nSELECT id, email FROM users;\n"
-	writeFile(t, queryPath, original)
-
-	// GET the raw body.
-	rec, data := get(t, s.Handler(), "GET", "/api/queries/ListUser", nil)
-	if rec.Code != 200 {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(data["body"].(string), "SELECT id, email") {
-		t.Errorf("body = %q", data["body"])
-	}
-
-	// Stage a rewrite.
-	newBody := "SELECT id, email, role_id FROM users WHERE id > 1"
-	payload, _ := json.Marshal(map[string]string{"name": "ListUser", "body": newBody})
-	if rec, _ := get(t, s.Handler(), "PUT", "/api/queries", payload); rec.Code != 200 {
-		t.Fatalf("PUT query failed: %s", rec.Body.String())
-	}
-	// Disk unchanged until save.
-	onDisk, _ := os.ReadFile(queryPath)
-	if string(onDisk) != original {
-		t.Errorf("disk changed before save:\n%s", onDisk)
-	}
-
-	// POST /api/save flushes the staged rewrite.
-	if rec, _ := get(t, s.Handler(), "POST", "/api/save", nil); rec.Code != 200 {
-		t.Fatalf("save failed: %s", rec.Body.String())
-	}
-	onDisk, _ = os.ReadFile(queryPath)
-	if !strings.Contains(string(onDisk), newBody) {
-		t.Errorf("staged query not flushed:\n%s", onDisk)
-	}
-	if !strings.Contains(string(onDisk), "-- name: ListUser :many") {
-		t.Errorf("annotation lost after rewrite:\n%s", onDisk)
-	}
-
-	// Unknown query -> 404.
-	if rec, _ := get(t, s.Handler(), "GET", "/api/queries/Nope", nil); rec.Code != 404 {
-		t.Errorf("unknown query status = %d, want 404", rec.Code)
-	}
-}
-
 func TestStaticServesIndex(t *testing.T) {
 	s, _ := setupServer(t, testConfig())
 	rec, _ := get(t, s.Handler(), "GET", "/", nil)
@@ -405,57 +323,6 @@ func TestStaticServesIndex(t *testing.T) {
 	// Unknown path 404s.
 	if rec, _ := get(t, s.Handler(), "GET", "/nope", nil); rec.Code != 404 {
 		t.Errorf("unknown path status = %d, want 404", rec.Code)
-	}
-}
-
-func TestQueryBodyRoundTripPreservesOtherBlocks(t *testing.T) {
-	cfg := testConfig()
-	s, dir := setupServer(t, cfg)
-	queryPath := filepath.Join(dir, "sql/queries/users.sql")
-	original := "-- name: ListUser :many\nSELECT id, email FROM users;\n\n-- name: CountUser :one\nSELECT count(*) FROM users;\n"
-	writeFile(t, queryPath, original)
-
-	payload, _ := json.Marshal(map[string]string{"name": "ListUser", "body": "SELECT email FROM users;"})
-	if rec, _ := get(t, s.Handler(), "PUT", "/api/queries", payload); rec.Code != 200 {
-		t.Fatalf("PUT query failed: %s", rec.Body.String())
-	}
-	if rec, _ := get(t, s.Handler(), "POST", "/api/save", nil); rec.Code != 200 {
-		t.Fatalf("save failed: %s", rec.Body.String())
-	}
-	onDisk, _ := os.ReadFile(queryPath)
-	if !strings.Contains(string(onDisk), "-- name: CountUser :one") {
-		t.Errorf("second query block was clobbered:\n%s", onDisk)
-	}
-}
-
-func TestSQLBaseResolution(t *testing.T) {
-	dir := t.TempDir()
-	configPath := filepath.Join(dir, "yaga.yaml")
-	if err := os.WriteFile(configPath, []byte("version: \"1.0\"\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := testConfig()
-	s := New(cfg, configPath, Options{Port: 0})
-
-	// No sql tree at all -> falls back to the config dir.
-	if got := s.sqlBase(cfg); got != dir {
-		t.Errorf("sqlBase with no tree = %q, want %q", got, dir)
-	}
-
-	// A tree under admin/ wins.
-	if err := os.MkdirAll(filepath.Join(dir, "admin", "sql", "queries"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.sqlBase(cfg); got != filepath.Join(dir, "admin") {
-		t.Errorf("sqlBase with admin/ tree = %q", got)
-	}
-
-	// Config-dir sql tree wins over admin/.
-	if err := os.MkdirAll(filepath.Join(dir, "sql", "queries"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if got := s.sqlBase(cfg); got != dir {
-		t.Errorf("sqlBase with config-dir tree = %q", got)
 	}
 }
 

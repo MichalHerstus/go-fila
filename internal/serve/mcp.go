@@ -1,6 +1,6 @@
 // mcp.go — mounts the internal/mcp server (E5) as the /mcp endpoints of the
 // wedit HTTP server (MCP Streamable HTTP). The MCP tools read and mutate the
-// same in-memory config and pendingSQL as the SPA; only an explicit `save`
+// same in-memory config as the SPA; only an explicit `save`
 // tool writes to disk (with a .bak of the previous file).
 package serve
 
@@ -61,9 +61,6 @@ func (st serverMCPState) Report(cfg *types.Config) (errs, warns []string) {
 		warns = []string{}
 	}
 	return errs, warns
-}
-func (st serverMCPState) Analyze(cfg *types.Config) interface{} {
-	return st.s.analyze(cfg)
 }
 
 // handleMCPPost answers a Streamable HTTP MCP request (JSON-RPC 2.0). Tools are

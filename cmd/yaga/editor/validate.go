@@ -73,12 +73,11 @@ func (e *Editor) runValidation() []finding {
 			if schemaBlockHasColumn(st, ref.Column) {
 				continue
 			}
-			m := colMissing{resource: res, ref: ref}
 			out = append(out, finding{
 				kind:   "warning",
-				label:  fmt.Sprintf("%s.%s.%s: not a column of the resource's table", m.resource, m.ref.Section, m.ref.Column),
+				label:  fmt.Sprintf("%s.%s.%s: not a column of the resource's table", res, ref.Section, ref.Column),
 				detail: "Rename to an existing column, or add it to the schema block (re-run `yaga init --db`)",
-				goTo:   e.columnGoTo(m.resource, m.ref),
+				goTo:   e.columnGoTo(res, ref),
 			})
 		}
 	}
@@ -226,8 +225,7 @@ func (e *Editor) sectionJump(resource string, ref schema.ColumnRef) (string, tvi
 }
 
 // validatePage renders the validation results: one list row per problem,
-// Enter jumps to the fix location. Mirrors the Sync screen layout (list + a
-// row of buttons).
+// Enter jumps to the fix location (list + a row of buttons).
 func (e *Editor) validatePage() tview.Primitive {
 	fs := e.runValidation()
 

@@ -36,9 +36,8 @@ type Editor struct {
 	navInput *tview.InputField
 	navHint  *tview.TextView
 
-	pending    map[tcell.Key]func()            // Ctrl+key handlers collected while building the current page/modal
-	shortcuts  map[string]map[tcell.Key]func() // screen context ("modal" or page name) -> Ctrl+key -> handler
-	pendingSQL map[string]string               // staged query-file rewrites (abs path -> new content)
+	pending   map[tcell.Key]func()            // Ctrl+key handlers collected while building the current page/modal
+	shortcuts map[string]map[tcell.Key]func() // screen context ("modal" or page name) -> Ctrl+key -> handler
 
 	screen tcell.Screen // optional; overrides the real terminal (tests)
 }
@@ -258,18 +257,11 @@ func (e *Editor) renderStatus() {
 	e.status.SetText(" [::d]↑↓/j/k navigate   Enter edit   a add   d delete   Esc back   Ctrl+S save   Ctrl+V validate   Ctrl+P go to   Ctrl+O home   Ctrl+Q quit[::-]")
 }
 
-// save marshals the config and writes it back to configPath, flushing any
-// staged SQL query-file edits first.
+// save marshals the config and writes it back to configPath.
 func (e *Editor) save() {
 	if err := e.validateCopy(); err != nil {
 		e.errorModal("Validation", err.Error())
 		return
-	}
-	for path, content := range e.pendingSQL {
-		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
-			e.errorModal("Save failed", err.Error())
-			return
-		}
 	}
 	data, err := yaml.Marshal(e.cfg)
 	if err != nil {
@@ -280,7 +272,6 @@ func (e *Editor) save() {
 		e.errorModal("Save failed", err.Error())
 		return
 	}
-	e.pendingSQL = nil
 	e.modified = false
 	e.saved = true
 	e.refreshTitle()

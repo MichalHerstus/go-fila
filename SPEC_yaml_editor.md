@@ -7,10 +7,10 @@ Replace the `charmbracelet/huh` + Bubble Tea editor with a `rivo/tview` TUI that
 1. **Comfortable persistent UI** — left navigation menu + right content pane + status bar (no full-screen form swaps).
 2. **Full YAML spec coverage** — every key in the `internal/types` schema (see §5).
 3. **TUI dashboard preview** — sidebar + pages/widgets, plus per-resource list/form/detail preview.
-4. **SQL ↔ YAML sync tool** — file-level consistency checks between `yaga.yaml`, `sql/queries/*.sql`, and `sql/migrations/schema.sql`, with apply actions.
+4. **Schema-block reference check (Validate)** — cross-checks every YAML table/column reference against the captured `schema:` block, with jump-to-fix.
 
 Decisions:
-- **Sync tool**: file-level only — no DB connection, no introspection refactor.
+- **Validate**: the captured `schema:` block (D11) is the sole schema source — no DB connection, no sqlc, no `sql/` query-file reads.
 - **Preview**: dashboard pages + per-resource list/form/detail.
 - **Editor switch**: full replacement of the huh editor; charmbracelet deps removed.
 - **Docs**: this file (`SPEC_yaml_editor.md`) is the single source for the editor.
@@ -29,15 +29,13 @@ Decisions:
 ┌ Title bar: yaga editor — yaga.yaml ───────── [modified] ─┐
 ├─────────────┬──────────────────────────────────────────────────┤
 │  Panel      │  <right pane = tview.Pages stack>               │
-│  Connections│   section forms / lists / sync table / preview   │
-│  SQLC       │                                                  │
+│  Connections│   section forms / lists / validate / preview     │
 │  Auth       │                                                  │
 │  Navigation │                                                  │
 │  Resources  │                                                  │
 │  Pages      │                                                  │
 │ ─────────── │                                                  │
 │  Validate   │                                                  │
-│  Sync       │                                                  │
 │  Preview    │                                                  │
 │  Save       │                                                  │
 │  Quit       │                                                  │
@@ -63,15 +61,13 @@ style.go    (colors, boxed(), statusColor)
 widgets.go  (str/num/yesno/password/long/pick, showPage/back, toast, errorModal)
 options.go  (enumerated option sets for drop-downs)
 lists.go    (recordList + listSpec, confirm modal, tagsPage, stringListPage, promptInput)
-menu.go     (Panel/Brand/Layout/Theme, Connections, SQLC, Auth, Navigation, Pages+widgets)
+menu.go     (Panel/Brand/Layout/Theme, Connections, Auth, Navigation, Pages+widgets)
 resource.go (Resources, List/Card/Detail/Form, Policies)
 columns.go  (list columns editor)
 fields.go   (form/card/detail field editor, validation, visible)
 actions.go  (custom actions editor)
 hooks.go    (before/after hooks: name + fn|sql)
 maps.go     (map[string]string editor)
-sqledit.go  (per-resource SQLC query SQL editor: staged, flushed on save)
-sync.go     (SQL<->YAML analysis: simple list of schema tables, queries, missing refs)
 validate.go (validation screen: structural + schema findings, jump-to-fix)
 preview.go  (dashboard + per-resource ASCII-frame previews)
 nav.go      (cd navigation: canonical paths, resolvePath/completePath, go-to dialog)
@@ -80,14 +76,13 @@ nav.go      (cd navigation: canonical paths, resolvePath/completePath, go-to dia
 
 No separate `model.go`/`panel.go`/`auth.go`/`pages.go` — those sections live in `menu.go`/`resource.go`. `Editor` embeds the app; the only test seam is `SetScreen(tcell.Screen)` (simulation screen for integration tests).
 
-## 4. New package: `internal/schema/` (file-level sync engine)
+## 4. New package: `internal/schema/` (file-level schema analysis)
 
-Small, testable, UI-independent. Used by the Sync screen:
+Small, testable, UI-independent. Used by the Validate screen:
 
-- `schema.go` — `Table{Name, Columns[]Column{Name,Type,Nullable,Default,IsPrimaryKey,FKs}}`; `ParseSchema(files...)` parses `CREATE TABLE` from `sql/migrations/*.sql` (regex-based, sqlite + postgres dialect). Takes explicit file paths (glob with `filepath.Glob` first).
-- `queries.go` — `Query{Name,Variant,Body,RawBody,File,SelectCols[]string}`; `ParseQueries(dir)` scans `-- name: X :variant` and best-effort extracts the SELECT projection; `ParseQueriesForFile(text, file)` parses one file's text (used by the editor to overlay staged edits); `RewriteQueryBody(text, name, newBody)` replaces one query block, leaving every other block byte-identical.
-- `references.go` — `CollectReferences(cfg)` walks every YAML query reference (list/detail/form/delete/action/options_query/page widgets incl. nested) returning `{name, origin}`; plus table/column references per resource.
-- `generate.go` — ports the `generateQueries`/`writeResourceYAML` SQL/YAML emitters from `introspect.go` (string-builders only; no DB) so the sync tool can generate stubs.
+- `schema.go` — `Table{Name, Columns[]Column{Name,Type,Nullable,Default,IsPrimaryKey,FKs}}`; `ParseSchema(files...)` parses `CREATE TABLE` from `sql/migrations/*.sql` (regex-based, sqlite + postgres dialect). Takes explicit file paths (glob with `filepath.Glob` first). Remains only as the schema-source fallback; the captured `schema:` block is the primary source.
+- `references.go` — `CollectReferences(cfg)` walks every YAML query reference (list/detail/form/delete/action/options_query/page widgets incl. nested) returning `{name, origin}`; plus table/column references per resource and per-section column locations (`ColumnRef`) for jump-to-fix.
+- `generate.go` — ports the `writeResourceYAML` YAML emitter from `introspect.go` (string-builders only; no DB).
 
 ## 5. Full YAML coverage
 
@@ -99,7 +94,6 @@ Everything the old editor covered stays editable; new coverage:
 | Connections | multi-connection list + add/delete/rename (old editor handled first conn only) |
 | Navigation | group **name/icon/sort** (old `buildGroupForm` was unwired) |
 | Resource basic | `table`, `id_type` (dropdown), `id_column` |
-| Resource SQL | per-resource **SQL queries** list (list/count/detail/form/populate/options_query, deduped) + full-text SQL editor; edits stage into sql/queries files and flush with the global save |
 | Resource list | `query`, `count_query`, `default_sort` (old editor left these uneditable), column `options` map |
 | Resource detail | `params` map, fields editor |
 | Resource card | fields editor (old editor left it unwired), `searchable` tag editor |
@@ -127,24 +121,13 @@ Reusable widgets in `widgets.go`: textField, passwordField, intField (numeric ac
 
 Implementation note: the preview is a single `tview.TextView` rendering an ASCII frame (topbar strip + two-column sidebar/content split built from `cfg.Navigation` / resource names). The grid chrome (`│ ├ ┬ ┤ ┌ ┐ └ ┘ ─`) is light blue while the cell text stays white; every row is padded (`padVisual`, tag-aware via `tview.TaggedStringWidth`) to the identical total width (`previewWidth`, chrome rows share the same sidebar/content layout), with full color resets in content rewritten to attribute-only resets. The generated dashboard is **not** run; widget types are drawn as labelled boxes. This keeps preview free of a DB or the generated app.
 
-## 7. Sync tool
+## 7. Validate screen (the single health check)
 
-Reads the project's `sql/` via `internal/schema`. Renders a **simple scrolling `tview.TextView`** (`sync.go`) listing:
-
-1. **Schema** — every table from `sql/migrations/*.sql` with its column count.
-2. **Queries** — every SQLC query definition found in `sql/queries`, sorted.
-3. **YAML references** — a colored summary of missing queries (with their YAML origin), missing tables, missing columns and missing FK-target `List{Table}` queries, each with detail lines.
-
-**SQL path resolution** (`sqlBase()` in `sqledit.go`): `sqlc.queries_dir` / `sqlc.schema_dir` are relative to the generated output dir where sqlc runs — `init`/`init --demo` write `sql/{migrations,queries}` into `./admin/sql`. The editor resolves them against the **config dir** when it has any sql tree (the generator copies `configDir/sql` into the output dir), otherwise against `{configDir}/admin`, falling back to the config dir. So both the classic root-level `sql/` layout and the default `admin/sql` layout resolve the same files sqlc will consume.
-
-The per-resource editor pages already show the live SQL bodies of a single resource's queries (List/Detail/Form/Card/Field `options_query`, with a `Reload SQL query` button); Sync complements that as the whole-project health check.
+The old SQL-file **Sync** screen was removed (D11 — sql/migrations and sql/queries are obsolete as the source of truth; the captured `schema:` block is). The Validate screen runs the structural validator (`parser.ValidateAll` against a YAML copy so defaults are not injected) **plus** a schema-block reference pass: each resource's table must exist in `cfg.Schema.Tables` (error → jump to the resource), and every referenced column must be a column of that table (warning → jump to the exact `columnsPage`/`cardFieldsPage`/`detailFieldsPage`/`formFieldsPage` row). No schema block → a single "no schema block captured" warning. Renders one `tview.List` row per problem (red errors / yellow warnings, "No problems found" empty state) with Refresh (Ctrl+R) + Back (Ctrl+B) buttons.
 
 **Buttons** (each with a Ctrl+letter shortcut from its first free label letter; Ctrl+B is reserved so every Back button is pinned to Ctrl+B and other buttons skip it):
-1. Generate missing queries (Ctrl+G) — writes SQLC query stubs into `sql/queries/{table}.sql` (one file per schema table; existing files are never overwritten).
-2. Refresh (Ctrl+R) — re-run the analysis.
-3. Back (Ctrl+B) — return to the previous screen.
-
-`importResourcesFromSchema` (add missing resources from parsed schema tables) is kept as a method for tests but not exposed in the UI.
+1. Refresh (Ctrl+R) — re-run the analysis.
+2. Back (Ctrl+B) — return to the previous screen.
 
 ## 8. Implementation order
 
@@ -152,9 +135,9 @@ The per-resource editor pages already show the live SQL bodies of a single resou
 2. `internal/schema/` package + unit tests.
 3. Editor shell: `editor.go`, `model.go`, `style.go`, `menu.go`; rewire `edit.go`; save/quit + modified tracking; delete old huh/bubbletea files.
 4. `options.go` (tview format) + `widgets.go` helpers + `maps.go` + `tagEditor`.
-5. Simple sections: panel, sqlc, auth, connections.
+5. Simple sections: panel, auth, connections.
 6. List sections: navigation, pages+widgets, resources + all sub-editors (columns, fields, actions, hooks, policies, forms).
-7. Sync screen.
+7. Validate screen.
 8. Preview screen.
 9. `go mod tidy` (drop charmbracelet).
 10. Update AGENTS.md + SPEC.md CLI section.
@@ -168,4 +151,3 @@ The per-resource editor pages already show the live SQL bodies of a single resou
 - tview Form dynamic re-render → sub-pages are rebuilt via `refreshPage`/`showPage` rather than `Clear(true)` in place.
 - Esc semantics → centralized app-level `SetInputCapture` with history stack.
 - Int/bool fields mutate live → validate + revert-if-parse-fails.
-- File-level sync is heuristic (regex SQL projection) → results marked as hints, never silently destructive.

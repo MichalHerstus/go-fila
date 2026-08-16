@@ -50,7 +50,6 @@ func (s *stubState) Report(cfg *types.Config) ([]string, []string) {
 	_, errs, warns := s.Parse(data)
 	return errs, warns
 }
-func (s *stubState) Analyze(cfg *types.Config) interface{} { return map[string]interface{}{"ok": true} }
 
 // stubConfig is a minimal valid config.
 func stubConfig() *types.Config {
@@ -143,7 +142,7 @@ func TestToolsList(t *testing.T) {
 	for _, t := range tools {
 		names[t.(map[string]interface{})["name"].(string)] = true
 	}
-	want := []string{"validate", "save", "open", "analyze", "get_config", "get_value",
+	want := []string{"validate", "save", "open", "get_config", "get_value",
 		"list_resources", "list_navigation", "set_value", "merge_yaml_fragment",
 		"add_resource", "remove_resource", "add_column", "add_field",
 		"add_nav_item", "remove_nav_item"}

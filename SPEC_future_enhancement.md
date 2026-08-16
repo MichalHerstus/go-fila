@@ -558,6 +558,8 @@ missing-query findings are errors.
 3. **`cmd/yaga/editor/sync.go`** — `syncReport.missingCols` becomes
    `[]colMissing{resource string; ref schema.ColumnRef}`; the Sync screen renders
    `resource.section.column` (more precise than today's `resource.column`).
+   *(Moot since 2026-08-16: the Sync screen was removed with the D11 Phase 2
+   query-file purge; the schema-column pass now lives in `validate.go`.)*
 4. **`cmd/yaga/editor/validate.go` (new)** — `finding{kind, label, detail;
    goTo}` + `runValidation()`:
    - structural: validate a YAML copy via `parser.ValidateAll` (same copy
@@ -746,11 +748,17 @@ schema:                      # captured by init --db; the sole schema source of 
 6. `internal/generator/handler.go` (`buildOptionsLoader`) — source option SQL from
    `options_sql` or the generated FK SQL (drop `findSQLCQuery` file reads).
 
-**Phase 2 — Editor / Sync cleanup (follow-up, not in scope of this execution):** remove the
-`SQLC` editor screen, Sync "Generate missing queries", `sqledit.go`, `internal/schema`
-ParseSchema/ParseQueries/CollectReferences, the inert `SQLCConfig` type, and the now
-vestigial query-name YAML fields (`list.query`, `count_query`, `detail.query`,
-`form.*.query`, `populate_query`) plus their tests.
+**Phase 2 — Editor / Sync cleanup (implemented 2026-08-16):** removed the TUI editor's
+`SQLC` query editor (`sqledit.go`/`sqlview.go`), the SQL-file `Sync` screen (`sync.go`)
+and their staged `pendingSQL` machinery; removed wedit's `queries` tab, `/api/analyze`
+and `/api/queries/{name}` + `PUT /api/queries` endpoints; removed the MCP `analyze` tool;
+deleted `internal/schema/queries.go` (`ParseQueries`/`ParseQueriesForFile`/
+`RewriteQueryBody`/`SelectColumns`/`Query.RawBody`) and `GenerateQueries` from
+`generate.go`. The captured `schema:` block is the sole schema source; Validate is the
+single health check. **The query-name YAML fields are kept** — `list.query`,
+`count_query`, `detail.query`, `form.*.query`, `populate_query`, `options_query` remain
+plain config fields (options_sql/schema-FK resolution is untouched); only the SQLC
+query-file body viewers/editors were removed.
 
 **Tests / exit criteria (Phase 1):** `types`/`introspect_test.go` — `[]TableInfo → Schema`
 conversion, `schema:` embedded, no `schema.sql`/`queries/*.sql` emitted by
@@ -1234,7 +1242,7 @@ transaction like raw-SQL actions today; script hooks run against `db`.
 5. `internal/panel/httperr` (`httperr.go`) — add `BadRequest(w, msg string)` (safe:
    only trusted config-author text reaches it).
 6. `cmd/yaga/editor/` — script-body `TextArea` editor on action pages + hook items
-   (sqledit.go-style, in-memory); `cmd/yaga/ai_spec.md` cheat-sheet line; demo config
+   (in-memory, in the action/hook page form); `cmd/yaga/ai_spec.md` cheat-sheet line; demo config
    gains one scripted action to exercise the feature.
 7. Docs — `SPEC.md` (schema + host API), `README.md`, `TESTs.md`, `AGENTS.md`.
 
@@ -1298,9 +1306,10 @@ Each milestone carries a **regression guard**: feature-off output stays byte-ide
 **Status: planned (2026-08-14), not started.** Three targeted improvements to the
 terminal-based editor (`cmd/yaga/editor/`) that require no architectural changes: a
 modern dark-theme color palette (Catppuccin Mocha), syntax-highlighted SQL in the
-query viewer, and enhanced form input widgets (Tab-completion on string fields. 
+query viewer, and enhanced form input widgets (Tab-completion on string fields.
 Each is independent; order: style → sqlview
-→ widgets.
+→ widgets. (2026-08-16: **E3b is moot** — the SQL query viewer `sqlview.go` was
+deleted with the D11 Phase 2 query-file purge; the remaining items are E3a + E3c.)
 
 **E3a — Color palette (`style.go`)**
 
@@ -1365,8 +1374,11 @@ editor tests.
  starts a local HTTP server with a REST API and an embedded single-page-application
  frontend (vanilla HTML/CSS/JS, no bundler or npm) for editing `yaga.yaml` in a
  browser. The server reuses all existing Go logic (`parser.ValidateAll`,
- `schema.ParseQueries`, `schema.CollectReferences`, `schema.GenerateQueries`, etc.)
+ `schema.CollectReferences`, etc.)
  — the same functions the TUI editor calls — wrapped in JSON endpoints.
+ (2026-08-16 cleanup: the draft's `GET /api/analyze` + `GET/PUT /api/queries`
+ SQL-query endpoints and the SPA `queries` tab were removed with the D11
+ Phase 2 query-file purge; the SPA's health check is the Validate tab.)
 
  **Command shape:**
  ```
@@ -1466,7 +1478,7 @@ editor tests.
 
 ### E5 — MCP over wedit: AI agent config editing endpoint
 
-**Status: drafted (2026-08-16); supersedes the earlier stdio `yaga mcp` command
+**Status: implemented (2026-08-16); supersedes the earlier stdio `yaga mcp` command
 and is planned, not started.** An MCP (Model Context Protocol) server that
 exposes the yaga config and editing operations as structured tools, resources,
 and prompts over JSON-RPC 2.0. Instead of a separate `yaga mcp` subprocess, the
@@ -1474,7 +1486,11 @@ MCP protocol rides the **existing `yaga wedit` HTTP server as an endpoint**
 (`POST /mcp`, Streamable HTTP transport) — wedit already runs a server and owns
 the in-memory config, so MCP becomes "just another endpoint" sharing that state.
 AI agents (e.g. Opencode) connect with a remote-URL MCP config — no new CLI
-command, no full-config serialization to an LLM.
+command, no full-config serialization to an LLM. (2026-08-16 cleanup: the draft
+`analyze` tool was dropped with the D11 Phase 2 query-file purge; the toolset is
+`validate`/`save`/`open`/`get_config`/`get_value`/`list_resources`/
+`list_navigation`/`set_value`/`merge_yaml_fragment`/`add_resource`/
+`remove_resource`/`add_column`/`add_field`/`add_nav_item`/`remove_nav_item`.)
 
 **Command shape (unchanged — wedit simply gains a route):**
 ```

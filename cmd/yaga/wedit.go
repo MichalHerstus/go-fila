@@ -2,7 +2,7 @@
 //
 // `yaga wedit` — the web-based YAML config editor (E4). Starts a local HTTP
 // server exposing a JSON REST API over the same Go logic the TUI editor uses
-// (parser.ValidateAll, schema.ParseQueries, schema.CollectReferences) plus an
+// (parser.ValidateAll, schema.CollectReferences) plus an
 // embedded vanilla-JS single-page app. The
 // command is named `wedit` (not the E4-drafted `serve`) so it is clearly the
 // web version of the YAML editor rather than a running generated dashboard.

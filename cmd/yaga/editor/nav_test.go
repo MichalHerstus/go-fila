@@ -38,7 +38,6 @@ func TestNormalizePath(t *testing.T) {
 	eq(e.normalizePath("../Panel"), []string{"Panel"})
 	eq(e.normalizePath("../../Panel"), []string{"Panel"})
 	eq(e.normalizePath("a/./b/"), []string{"a", "b"})
-	eq(e.normalizePath("Sync"), []string{"Sync"})
 
 	atPanel()
 	eq(e.normalizePath(""), []string{"Panel"})
@@ -89,7 +88,6 @@ func TestResolvePath(t *testing.T) {
 	check("Resources/User/Form/Delete/Hooks/After", "Resources/User/Form/Delete/Hooks/After")
 	check("Resources/User/Actions/archive", "Resources/User/Actions/archive")
 	check("Resources/User/Policies", "Resources/User/Policies")
-	check("Resources/User/SQL", "Resources/User/SQL")
 	check("Pages", "Pages")
 	check("Pages/Dashboard", "Pages/Dashboard")
 	check("Pages/Dashboard/Widgets", "Pages/Dashboard/Widgets")
@@ -100,7 +98,7 @@ func TestResolvePath(t *testing.T) {
 	check("Preview/Page/Dashboard", "Preview/Page/Dashboard")
 	check("Preview/Resource/User", "Preview/Resource/User")
 
-	for _, bad := range []string{"Bogus", "Sync", "Resources/Nope", "Resources/User/Nope", "Panel/Sub", "Pages/Dashboard/Nope", "Preview/Page/Nope"} {
+	for _, bad := range []string{"Bogus", "Resources/Nope", "Resources/User/Nope", "Panel/Sub", "Pages/Dashboard/Nope", "Preview/Page/Nope"} {
 		if _, err := e.resolvePath(bad); err == nil {
 			t.Fatalf("resolvePath(%q) should fail", bad)
 		}
