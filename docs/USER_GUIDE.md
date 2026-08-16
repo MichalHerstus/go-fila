@@ -7,7 +7,7 @@ resources, card/kanban views, custom pages with widgets, search/sort/filter, CSV
 import/export, authentication, RBAC, audit logging, custom actions, before/after hooks
 (Go, SQL or Lua) and more.
 
-The important mental model: **the database is the base**. yaga introspects your database,
+The important mental model: **the database is the base**! yaga introspects your database,
 captures its schema, and adds behaviour **on top** of it — it does not replace a good
 database design.
 
