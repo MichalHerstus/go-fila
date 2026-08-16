@@ -12,9 +12,9 @@ přečte schéma, včetně PK/FK a views a uloží tyto informace do **specifika
 
 ---
 
-## 1. Installation
+## 1. Instalace
 
-### 1.1 Prerequisites — a working Go toolchain
+### 1.1 Předpoklady
 
 | Tool | Required for | Notes |
 |---|---|---|
