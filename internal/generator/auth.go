@@ -570,6 +570,17 @@ func UserID(r *http.Request) string {
 }
 `
 	}
+	roleHelper := ""
+	if g.hasAnyScript() {
+		roleHelper = `
+func RoleName(r *http.Request) string {
+    if role, ok := r.Context().Value(UserRoleKey).(string); ok {
+        return role
+    }
+    return ""
+}
+`
+	}
 
 	middlewareCode := fmt.Sprintf(`package auth
 
@@ -623,7 +634,7 @@ func UserName(r *http.Request) string {
     }
     return ""
 }
-%s%s`, auditImport, panelPath, panelPath, auditHelper, rbacMiddleware+actionRBACMiddleware)
+%s%s%s`, auditImport, panelPath, panelPath, auditHelper, roleHelper, rbacMiddleware+actionRBACMiddleware)
 
 	if err := os.WriteFile(filepath.Join(dir, "middleware.go"), []byte(middlewareCode), 0644); err != nil {
 		return err

@@ -8,13 +8,15 @@
 package types
 
 // Hook is a single lifecycle hook: a user-implemented Go function (Fn), a raw
-// SQL statement (SQL), or a stored procedure (Proc) executed before or after
-// the enclosing action. Exactly one of Fn/SQL/Proc is set.
+// SQL statement (SQL), a stored procedure (Proc), or a Lua script (Script)
+// executed before or after the enclosing action. Exactly one of Fn/SQL/Proc/
+// Script is set.
 type Hook struct {
-	Name string `yaml:"name"` // identifier (used for generated stub names)
-	Fn   string `yaml:"fn"`   // Go func in internal/hooks (user-implemented)
-	SQL  string `yaml:"sql"`  // raw SQL executed inline (alternative to fn)
-	Proc string `yaml:"proc"` // stored procedure name (CALL/EXEC; ignored on sqlite)
+	Name   string `yaml:"name"`   // identifier (used for generated stub names)
+	Fn     string `yaml:"fn"`     // Go func in internal/hooks (user-implemented)
+	SQL    string `yaml:"sql"`    // raw SQL executed inline (alternative to fn)
+	Proc   string `yaml:"proc"`   // stored procedure name (CALL/EXEC; ignored on sqlite)
+	Script string `yaml:"script"` // Lua body of a single run(ctx) function (E2)
 }
 
 // Hooks groups the before and after hooks of an action.

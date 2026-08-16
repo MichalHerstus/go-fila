@@ -23,11 +23,11 @@ for the user to fill in:
   for every `fn:` hook declared in the YAML. Implementing those bodies is your
   job (see below). Signature: `Scope{ID int64, Table, Action string, Values map[string]interface{}}`.
 - `admin/internal/panel/resources/<res>/actions.go` — the **custom action**
-  handler switch. Only reach in when an action's inline `query:`/`proc:` in the
-  YAML cannot express the logic (multi-step, loops, extra args, external calls).
-  Prefer the declarative path first (see "Custom actions"). Any hand-edit here
-  is **lost on regeneration** — re-apply it after every `generate` or document
-  it in this file.
+  handler switch. Only reach in when an action's inline `query:`/`proc:`/`script:`
+  in the YAML cannot express the logic (multi-step, loops, extra args, external
+  calls). Prefer the declarative path first (see "Custom actions"). Any
+  hand-edit here is **lost on regeneration** — re-apply it after every
+  `generate` or document it in this file.
 
 All other generated files are **off-limits**, including:
 `admin/main.go`, `admin/internal/panel/**` (handlers/router/auth),
@@ -42,16 +42,16 @@ All other generated files are **off-limits**, including:
 # from the repo root
 ./yaga generate --config yaga.yaml --out admin --force   # regenerate
 cd admin
-make                                                           # tailwind + templ + go build
+make                                                           # templ + go build (no tailwind, no npm)
 ./admin --port 8080                                            # run
 ```
 
 - `generate` is fully offline: it reads the captured `schema:` block (never the
-  live DB, never sqlc). Tailwind runs non-fatal — `make css` redoes it.
-  Tailwind needs the standalone binary: `make get-tailwind` downloads it to
-  `.tools/`, and `make css` picks it up automatically.
-- `make` targets: `build` (default), `css`, `templ`, `tidy`,
-  `get-tailwind`, `run`, `package`, `clean`.
+  live DB, never sqlc). There is **no Tailwind, no npm and no sqlc** — the
+  stylesheet and Chart.js are pre-built and vendored by the generator, so a
+  bare build has zero network. `make` targets: `build` (default: `go mod tidy`
+  → `go tool templ generate` → `go build`), `templ`, `tidy`, `run`,
+  `package`, `clean`.
 - Sanity-check a config without building: `./yaga validate --verbose`
   (parses YAML + the schema block; does NOT verify SQL against a live DB).
 
@@ -151,6 +151,11 @@ actions:
 - `query:` is inline SQL bound to `$1` = the record id. This is the **preferred** way
   to add an action — no Go code touched. Keep the SQL in the **current driver's dialect**
   (`$N` for postgres/mssql, `?` for sqlite).
+- `script:` embeds a Lua body instead of SQL (`query:`/`proc:`/`script:` are mutually
+  exclusive). It runs at request time via gopher-lua under a 5 s timeout with a `ctx`
+  table (`id`, `table`, `action`, `user`, `role`, `values`) and host globals
+  `db.exec/query/query_one` (positional `?` placeholders), `abort(msg)` (redirects to the
+  list with `?flash=<msg>`) and `log(msg)`.
 - `bulk: true` runs the same SQL once per selected id from `bulk.go` (no hooks run).
 - `proc:` is postgres/mssql only — on this sqlite project use `query:`.
   Postgres emits `CALL name($1)`, mssql emits `EXEC name $1`.

@@ -247,8 +247,8 @@ func clampWidgetColumns(p *types.Page, pageIdx int, add func(error)) {
 
 // validateResourceHooks checks that every hook declared on a resource's form
 // actions and custom actions is well-formed: each hook needs a name and
-// exactly one of fn/sql/proc set, and each custom action must not mix query
-// with proc.
+// exactly one of fn/sql/proc/script set, and each custom action must not mix
+// query/proc/script.
 // Params: r (the resource definition).
 // Returns: an error describing the first invalid hook, or nil.
 func validateResourceHooks(r types.Resource) error {
@@ -273,14 +273,24 @@ func validateResourceHooks(r types.Resource) error {
 	return nil
 }
 
-// validateAction checks that a custom action does not mix the query and proc
-// execution modes (they are mutually exclusive). Both empty is allowed so an
-// action can run hooks only.
+// validateAction checks that a custom action does not mix the query, proc and
+// script execution modes (they are mutually exclusive). All empty is allowed so
+// an action can run hooks only.
 // Params: a (the action definition).
-// Returns: an error when query and proc are both set, or nil.
+// Returns: an error when two or more of query/proc/script are set, or nil.
 func validateAction(a types.Action) error {
-	if a.Query != "" && a.Proc != "" {
-		return fmt.Errorf("%q: query and proc are mutually exclusive", a.Name)
+	kinds := 0
+	if a.Query != "" {
+		kinds++
+	}
+	if a.Proc != "" {
+		kinds++
+	}
+	if a.Script != "" {
+		kinds++
+	}
+	if kinds > 1 {
+		return fmt.Errorf("%q: query, proc and script are mutually exclusive", a.Name)
 	}
 	return nil
 }
@@ -438,8 +448,11 @@ func validateHooks(h *types.Hooks) error {
 			if hook.Proc != "" {
 				kindCount++
 			}
+			if hook.Script != "" {
+				kindCount++
+			}
 			if kindCount != 1 {
-				return fmt.Errorf("%s[%d]: exactly one of fn, sql or proc is required", list.name, j)
+				return fmt.Errorf("%s[%d]: exactly one of fn, sql, proc or script is required", list.name, j)
 			}
 		}
 	}

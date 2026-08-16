@@ -564,6 +564,9 @@ The card view is view-only (no CRUD wiring of its own). It is served at `GET /{p
         # or, instead of query:
         proc: sp_archive        # stored procedure name (CALL/EXEC; on sqlite a
                                 #   procedure declared under `procedures:`)
+        # or, instead of query/proc:
+        script: |               # embedded Lua body (request-time, gopher-lua)
+          db.exec("UPDATE users SET status = 'active' WHERE id = ?", ctx.id)
         policy: "admin"         # optional roles allowed to run this action ("|" separates)
         hooks:                  # optional before/after hooks (see Hooks)
           after:
@@ -575,7 +578,7 @@ Each action produces a POST route `/<panel>/<resource>/{id}/action/<name>`. On s
 
 #### hooks
 
-`before`/`after` lifecycle hooks can be attached to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is one of a user-implemented Go function, an inline SQL statement, or a stored-procedure call:
+`before`/`after` lifecycle hooks can be attached to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is one of a user-implemented Go function, an inline SQL statement, a stored-procedure call, or a Lua script:
 
 ```yaml
     form:
@@ -584,12 +587,19 @@ Each action produces a POST route `/<panel>/<resource>/{id}/action/<name>`. On s
           before:
             - name: validate_domain
               fn: ValidateUserDomain      # stub generated in internal/hooks/hooks.go
+            - name: default_status
+              script: |                  # Lua: set a default for an unset field
+                if ctx.values["status"] == nil then
+                  ctx.values["status"] = "draft"
+                end
           after:
             - name: notify
               sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"
 ```
 
 The generator emits `internal/hooks/hooks.go` with a `Scope` struct (`ID`, `Table`, `Action`, `Values`) and one compile-ready stub per `fn` hook — you fill the bodies in. `sql` hooks run inline via `db.ExecContext(..., <sql>, scope.ID)`, `proc` hooks call a stored procedure (`CALL`/`EXEC`; on sqlite a procedure declared under `procedures:`). On create, the insert switches to a driver-aware `RETURNING <id>` (postgres/sqlite) / `OUTPUT INSERTED.<id>` (mssql) so after-create hooks receive the new row id. Hook failures abort the request with HTTP 500.
+
+**`script:` hooks and script actions** embed Lua (`gopher-lua` v1.1.1) bodies that the generated `internal/panel/luascript` runtime executes at request time under a fixed 5 s timeout (the yaga binary gains no Lua dependency — only the generated dashboard's `go.mod` does, and only when a script exists). The `ctx` table exposes `id`, `table`, `action`, `user`, `role` and `values` (in/out — a before-create/update script's mutations are written back into the row). Host globals: `db.exec(sql, ...)`, `db.query(sql, ...)`, `db.query_one(sql, ...)` (positional `?` bound on sqlite, renumbered to `$N` on postgres/mssql), plus `abort(msg)` and `log(msg)`. An action-script `abort()` redirects to the list with `?flash=<msg>`; a hook-script `abort()` returns a 400. Audited script actions run inside the audit transaction.
 
 #### procedures
 

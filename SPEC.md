@@ -315,6 +315,9 @@ resources:
         label: "Archive"
         proc: sp_archive_user   # stored procedure (CALL/EXEC); ignored on sqlite
         bulk: true
+      - name: mark
+        script: |              # Lua body instead of query/proc (mutually exclusive)
+          db.exec("UPDATE users SET status = 'ok' WHERE id = ?", ctx.id)
 
     # ── POLICIES ────────────────────────────────────
     policies:
@@ -350,7 +353,7 @@ resources:
 
 ### Hooks (v0.5+)
 
-`before`/`after` lifecycle hooks attach to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is either a user-implemented Go function (`fn`), an inline SQL statement (`sql`) or a stored procedure call (`proc`; postgres/mssql only — ignored on sqlite):
+`before`/`after` lifecycle hooks attach to any form action (`form.create`, `form.update`, `form.delete`) and to custom `actions`. Each hook is either a user-implemented Go function (`fn`), an inline SQL statement (`sql`) or a stored procedure call (`proc`; postgres/mssql only — ignored on sqlite) or an embedded **Lua script** (`script`; exactly one of the four is set):
 
 ```yaml
     form:
@@ -370,7 +373,14 @@ resources:
         hooks:
           before: []
           after: []
+      - name: mark_last_seen
+        script: |
+          db.exec("UPDATE customers SET status = 'active' WHERE id = ?", ctx.id)
 ```
+
+`internal/hooks/hooks.go` defines `Scope{ID int64, Table, Action string, Values map[string]interface{}}` and one compile-ready stub per declared `fn` hook; the user implements the stubs. `sql` hooks are inlined as `db.ExecContext(..., <sql>, scope.ID)`. Create handlers capture the new row id via a driver-aware `QueryRowContext(...).Scan(&newID)` using `RETURNING <id>` (postgres/sqlite) or `OUTPUT INSERTED.<id>` (mssql) so after-create hooks see it. A hook error aborts the request with HTTP 500.
+
+**Lua scripts (`script`):** a `script:` body can appear on a hook or replace an action's `query:`/`proc:` (mutually exclusive, enforced by the parser). The body is wrapped by the generated `internal/panel/luascript` runtime as a single `run(ctx)` function executed with gopher-lua v1.1.1 at request time under a fixed 5 s `context.WithTimeout`; the yaga binary itself gains **no** Lua dependency (only the generated dashboard's `go.mod` is extended when a script exists). The `ctx` table carries `id` (number), `table`, `action` (`create|update|delete|<actionName>`), `user`, `role` and `values` (a map, **in/out** — a before-create/update script can set defaults and the handler writes the mutated values back into the INSERT/UPDATE `vals` by column name). The host globals are `db.exec(sql, ...)` (→ affected rows / last_insert_id), `db.query(sql, ...)` (array of row tables), `db.query_one(sql, ...)` (row table or `nil`), `abort(msg)` and `log(msg)`; DB errors raise a Lua error. Positional `?` placeholders bind positionally on sqlite and are renumbered to `$N` on postgres/mssql by the runtime (strings and quoted identifiers untouched). A hook-script `abort()` returns a 400 with the message; an action-script `abort()` 302s to the list with `?flash=<msg>`. Script hooks run against `db`; an **audited** script action runs against the audit transaction so the op + audit INSERT stay in a single transaction (bulk script actions loop per selected id with no outer tx).
 
 `internal/hooks/hooks.go` defines `Scope{ID int64, Table, Action string, Values map[string]interface{}}` and one compile-ready stub per declared `fn` hook; the user implements the stubs. `sql` hooks are inlined as `db.ExecContext(..., <sql>, scope.ID)`. Create handlers capture the new row id via a driver-aware `QueryRowContext(...).Scan(&newID)` using `RETURNING <id>` (postgres/sqlite) or `OUTPUT INSERTED.<id>` (mssql) so after-create hooks see it. A hook error aborts the request with HTTP 500.
 

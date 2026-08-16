@@ -7,17 +7,28 @@
 package generator
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
 // generateHTTPErr writes internal/panel/httperr/httperr.go. Internal logs the
 // error and returns "Internal Server Error" (500); NotFound logs and returns
-// "Not Found" (404). Both are used by every generated handler instead of
-// http.Error(w, err.Error(), ...).
+// "Not Found" (404). When the config declares any script: body, the file also
+// gains BadRequest, which returns the config-author-written abort() message as
+// a 400 (the message only ever originates from trusted config text). Feature-off
+// output stays byte-identical (BadRequest is omitted when no script exists).
 // Returns an error on write failure.
 func (g *Generator) generateHTTPErr() error {
-	code := `package httperr
+	badRequest := ""
+	if g.hasAnyScript() {
+		badRequest = `
+func BadRequest(w http.ResponseWriter, msg string) {
+    http.Error(w, msg, http.StatusBadRequest)
+}
+`
+	}
+	code := fmt.Sprintf(`package httperr
 
 import (
     "log"
@@ -25,15 +36,15 @@ import (
 )
 
 func Internal(w http.ResponseWriter, err error) {
-    log.Printf("internal error: %v", err)
+    log.Printf("internal error: %%v", err)
     http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 }
 
 func NotFound(w http.ResponseWriter, err error) {
-    log.Printf("not found: %v", err)
+    log.Printf("not found: %%v", err)
     http.Error(w, "Not Found", http.StatusNotFound)
 }
-`
+%s`, badRequest)
 	dir := filepath.Join(g.OutDir, "internal/panel/httperr")
 	return os.WriteFile(filepath.Join(dir, "httperr.go"), []byte(code), 0644)
 }

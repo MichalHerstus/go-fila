@@ -90,6 +90,7 @@ func TestE2E_Driver(t *testing.T) {
 | **Bulk** | Select rows, bulk action toolbar |
 | **CSV Export** | `/export/csv` returns CSV |
 | **Hooks** | Before/after create/update/delete/action fire |
+| **Lua scripts** | `script:` action/hook bodies: before-create default sets `ctx.values`, `db.query_one`+`db.exec`, action `abort()` flashes on the list, hook `abort()` 400s, audited script action writes one `audit_log` row in the same tx |
 | **Card view** | Grid + kanban mode |
 | **Pages** | Dashboard widgets (stat, chart, table, list, html) |
 | **RBAC** | Role-based access (if auth table has roles) |

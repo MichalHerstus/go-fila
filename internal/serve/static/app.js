@@ -322,6 +322,93 @@ function stringListField(grid, label, arrObj, key) {
 
 /* ---------- generic collection editor ---------- */
 
+/* ---- Embedded Lua tokenizer + highlighted textarea for script: bodies ---- */
+const LUA_KW = new Set("and break do else elseif end false for function goto if in local nil not or repeat return then true until while".split(" "));
+function escHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function luaHighlight(src) {
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  const span = (cls, s) => `<span class="${cls}">${s}</span>`;
+  while (i < n) {
+    const c = src[i];
+    if (c === "-" && src[i + 1] === "-" && src[i + 2] === "[") {
+      const end = src.indexOf("]]", i + 3);
+      const j = end < 0 ? n : end + 2;
+      out += span("tk-c", escHtml(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    if (c === "-" && src[i + 1] === "-") {
+      let j = src.indexOf("\n", i);
+      if (j < 0) j = n;
+      out += span("tk-c", escHtml(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    if (c === "[" && src[i + 1] === "[") {
+      const end = src.indexOf("]]", i + 2);
+      const j = end < 0 ? n : end + 2;
+      out += span("tk-s", escHtml(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < n && src[j] !== c) {
+        if (src[j] === "\\") j++;
+        j++;
+      }
+      j = Math.min(n, j + 1);
+      out += span("tk-s", escHtml(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === "." && /[0-9]/.test(src[i + 1] || ""))) {
+      let j = i;
+      while (j < n && /[0-9a-fA-FxX._]/.test(src[j])) j++;
+      out += span("tk-n", escHtml(src.slice(i, j)));
+      i = j;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < n && /[A-Za-z0-9_]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      out += LUA_KW.has(word) ? span("tk-k", escHtml(word)) : escHtml(word);
+      i = j;
+      continue;
+    }
+    out += escHtml(c);
+    i++;
+  }
+  return out;
+}
+
+function luaTextArea(value, onChange) {
+  const wrap = document.createElement("div");
+  wrap.className = "lua-field";
+  const view = document.createElement("pre");
+  view.className = "lua-view";
+  view.innerHTML = luaHighlight(value);
+  const ta = document.createElement("textarea");
+  ta.spellcheck = false;
+  ta.value = value;
+  ta.className = "lua-edit";
+  ta.addEventListener("input", () => {
+    view.innerHTML = luaHighlight(ta.value);
+    onChange(ta.value);
+  });
+  ta.addEventListener("scroll", () => {
+    view.scrollTop = ta.scrollTop;
+    view.scrollLeft = ta.scrollLeft;
+  });
+  wrap.append(view, ta);
+  return wrap;
+}
+
 function collectionEditor(container, items, schema, opts = {}) {
   const wrap = document.createElement("div");
   wrap.className = "table-wrap";
@@ -329,6 +416,14 @@ function collectionEditor(container, items, schema, opts = {}) {
 
   function cellInput(s, item, onChange) {
     const set = (v) => { item[s.key] = v; onChange(); };
+    if (s.type === "lua") {
+      const el = luaTextArea(item[s.key] != null ? item[s.key] : "", (v) => {
+        if (v.trim() === "") delete item[s.key];
+        else item[s.key] = v;
+        onChange();
+      });
+      return el;
+    }
     if (s.type === "bool") {
       const cb = document.createElement("input");
       cb.type = "checkbox";
@@ -856,6 +951,7 @@ const ACTION_SCHEMA = [
   { key: "name", label: "Name" },
   { key: "label", label: "Label" },
   { key: "query", label: "Query" },
+  { key: "script", label: "Script (Lua)", type: "lua" },
   { key: "bulk", label: "Bulk", type: "bool" },
   { key: "requires_confirmation", label: "Confirm", type: "bool" },
 ];

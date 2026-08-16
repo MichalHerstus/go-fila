@@ -1499,8 +1499,12 @@ func (g *Generator) generateDeleteHandler(dir string, r types.Resource) error {
 		procsImport = g.procImport()
 	}
 	authImport := ""
-	if g.auditFor(r) != nil {
+	if g.auditFor(r) != nil || g.hooksUseScript(r.Form.Delete.Hooks) {
 		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
+	}
+	luaImport := ""
+	if g.hooksUseScript(r.Form.Delete.Hooks) {
+		luaImport = g.luaImport()
 	}
 	// Return navigation (D14): a child deleted from a parent's lines section
 	// carries ?return=/panel/... and redirects back instead of to the list.
@@ -1554,7 +1558,7 @@ import (
     "database/sql"
     "net/http"
     "strconv"
-    %s%s%s
+    %s%s%s%s
     httperr %q
 %s)
 
@@ -1571,7 +1575,7 @@ func Delete(db *sql.DB) http.HandlerFunc {
 %s        http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, stringsImport, authImport, hooksImport, g.moduleImport("internal/panel/httperr"), procsImport, middle, returnRet, listPath)
+`, pkgName, stringsImport, authImport, hooksImport, luaImport, g.moduleImport("internal/panel/httperr"), procsImport, middle, returnRet, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "delete.go"), []byte(code), 0644)
 }
@@ -1701,6 +1705,55 @@ func (g *Generator) actionExecSQL(a types.Action) string {
 	return ""
 }
 
+// actionScriptBlock renders the Go source that runs a script: action body via
+// luascript.Run against the given executor (db, or tx when the action is
+// audited). An abort() call redirects to the resource list with the message as
+// a ?flash= query param; any real runtime error aborts with a 500.
+// Params: executor ("db" or "tx"), listPath (the resource list path literal),
+// a (the action definition), tName (the table name), indent (leading whitespace).
+// Returns: the Go source lines.
+func actionScriptBlock(executor, listPath string, a types.Action, tName, indent string) string {
+	return fmt.Sprintf(`%sif err := luascript.Run(r.Context(), %s, luascript.Scope{
+%s    ID:     int64(id),
+%s    Table:  %q,
+%s    Action: %q,
+%s    User:   auth.UserName(r),
+%s    Role:   auth.RoleName(r),
+%s}, %q); err != nil {
+%s    if luascript.IsAbort(err) {
+%s        http.Redirect(w, r, %q+"?flash="+url.QueryEscape(err.Error()), http.StatusFound)
+%s        return
+%s    }
+%s    httperr.Internal(w, err)
+%s    return
+%s}`, indent, executor, indent, indent, tName, indent, a.Name, indent, indent, indent, a.Script, indent, indent, listPath, indent, indent, indent, indent, indent)
+}
+
+// bulkScriptBlock renders the Go source that runs a bulk script: action body
+// via luascript.Run against db for one selected id (no outer transaction,
+// mirroring proc bulk actions). An abort() call redirects to the resource list
+// with the message as a ?flash= query param; any real runtime error aborts
+// with a 500.
+// Params: listPath (the resource list path literal), a (the action definition),
+// tName (the table name), indent (leading whitespace).
+// Returns: the Go source lines.
+func bulkScriptBlock(listPath string, a types.Action, tName, indent string) string {
+	return fmt.Sprintf(`%sif err := luascript.Run(r.Context(), db, luascript.Scope{
+%s    ID:     id,
+%s    Table:  %q,
+%s    Action: %q,
+%s    User:   auth.UserName(r),
+%s    Role:   auth.RoleName(r),
+%s}, %q); err != nil {
+%s    if luascript.IsAbort(err) {
+%s        http.Redirect(w, r, %q+"?flash="+url.QueryEscape(err.Error()), http.StatusFound)
+%s        return
+%s    }
+%s    httperr.Internal(w, err)
+%s    return
+%s}`, indent, indent, indent, tName, indent, a.Name, indent, indent, indent, a.Script, indent, indent, listPath, indent, indent, indent, indent, indent)
+}
+
 // generateActionHandler writes actions.go: an Action(db) handler that parses
 // the :id and :action path parameters and switches over the configured action
 // names, executing each action's SQL via ExecContext, then redirecting to the
@@ -1714,6 +1767,8 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 
 	hasHooks := false
 	hasProcs := false
+	hasLua := false
+	hasScriptAction := false
 	auditCfg := g.auditFor(r)
 	auditAny := false
 	var dispatch []string
@@ -1725,12 +1780,20 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 		if g.hookUsesProc(a.Hooks) {
 			hasProcs = true
 		}
+		if g.hooksUseScript(a.Hooks) {
+			hasLua = true
+		}
 		exec := g.actionExecSQL(a)
 		procExec := g.actionProcExec(a, "int64(id)")
 		if procExec != "" {
 			hasProcs = true
 		}
-		auditAction := auditCfg != nil && exec != "" && procExec == ""
+		useScript := a.Script != ""
+		if useScript {
+			hasLua = true
+			hasScriptAction = true
+		}
+		auditAction := auditCfg != nil && (exec != "" || useScript) && procExec == ""
 		if auditAction {
 			auditAny = true
 		}
@@ -1747,11 +1810,15 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 		}
 		if auditAction {
 			body = append(body, auditTxBeginStr("            "))
-			body = append(body, fmt.Sprintf(`            _, err = tx.ExecContext(r.Context(), %q, int64(id))
+			if useScript {
+				body = append(body, actionScriptBlock("tx", listPath, a, tName, "            "))
+			} else {
+				body = append(body, fmt.Sprintf(`            _, err = tx.ExecContext(r.Context(), %q, int64(id))
             if err != nil {
                 httperr.Internal(w, err)
                 return
             }`, exec))
+			}
 			body = append(body, g.auditInsertStr(r, a.Name, "strconv.FormatInt(int64(id), 10)", `""`, "            "))
 			body = append(body, auditTxCommitStr("            "))
 		} else if procExec != "" {
@@ -1762,6 +1829,8 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
                 httperr.Internal(w, err)
                 return
             }`, exec))
+		} else if useScript {
+			body = append(body, actionScriptBlock("db", listPath, a, tName, "            "))
 		}
 		if useHooks {
 			if after := g.hookCallsStr(a.Hooks.After, "scope", "            "); after != "" {
@@ -1784,8 +1853,16 @@ func (g *Generator) generateActionHandler(dir string, r types.Resource) error {
 		procsImport = g.procImport()
 	}
 	authImport := ""
-	if auditAny {
+	if auditAny || hasLua {
 		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
+	}
+	luaImport := ""
+	if hasLua {
+		luaImport = g.luaImport()
+	}
+	urlImport := ""
+	if hasScriptAction {
+		urlImport = "    \"net/url\"\n"
 	}
 
 	code := fmt.Sprintf(`package %s
@@ -1795,7 +1872,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-%s%s%s)
+%s%s%s%s%s)
 
 func Action(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1816,7 +1893,7 @@ func Action(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, procsImport, strings.Join(dispatch, "\n"), listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), authImport, hooksImport, luaImport, urlImport, procsImport, strings.Join(dispatch, "\n"), listPath)
 
 	return os.WriteFile(filepath.Join(dir, "actions.go"), []byte(code), 0644)
 }
@@ -1833,6 +1910,8 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 
 	hasExec := false
 	hasProcs := false
+	hasLua := false
+	hasScriptAction := false
 	for _, a := range r.Actions {
 		if !a.Bulk {
 			continue
@@ -1843,9 +1922,14 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 		if g.actionProcExec(a, "id") != "" {
 			hasProcs = true
 		}
+		if a.Script != "" {
+			hasLua = true
+			hasScriptAction = true
+		}
 	}
 
 	var dispatch []string
+	tName := tableName(r)
 	for _, a := range r.Actions {
 		if !a.Bulk {
 			continue
@@ -1870,6 +1954,12 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
             }
         }
 `, a.Name, executor, exec))
+		} else if a.Script != "" {
+			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
+        for _, id := range ids {
+%s
+        }
+`, a.Name, bulkScriptBlock(listPath, a, tName, "            ")))
 		} else {
 			dispatch = append(dispatch, fmt.Sprintf(`    case %q:
         for _, id := range ids {
@@ -1903,6 +1993,18 @@ func (g *Generator) generateBulkHandler(dir string, r types.Resource) error {
 	if hasProcs {
 		procsImport = g.procImport()
 	}
+	authImport := ""
+	if hasScriptAction {
+		authImport = fmt.Sprintf("    auth %q\n", g.moduleImport("internal/panel/auth"))
+	}
+	luaImport := ""
+	if hasLua {
+		luaImport = g.luaImport()
+	}
+	urlImport := ""
+	if hasScriptAction {
+		urlImport = "    \"net/url\"\n"
+	}
 
 	code := fmt.Sprintf(`package %s
 
@@ -1911,7 +2013,7 @@ import (
     "net/http"
     "strconv"
     httperr %q
-%s)
+%s%s%s%s)
 
 func Bulk(db *sql.DB) http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
@@ -1939,7 +2041,7 @@ func Bulk(db *sql.DB) http.HandlerFunc {
         http.Redirect(w, r, %q, http.StatusFound)
     }
 }
-`, pkgName, g.moduleImport("internal/panel/httperr"), procsImport, txCode, strings.Join(dispatch, "\n"), commitCode, listPath)
+`, pkgName, g.moduleImport("internal/panel/httperr"), procsImport, luaImport, urlImport, authImport, txCode, strings.Join(dispatch, "\n"), commitCode, listPath)
 
 	return os.WriteFile(filepath.Join(dir, "bulk.go"), []byte(code), 0644)
 }
@@ -2052,6 +2154,10 @@ func (g *Generator) generateCreateHandler(dir string, r types.Resource) error {
 	if g.hookUsesProc(create.Hooks) {
 		procsImport = g.procImport()
 	}
+	luaImport := ""
+	if g.hooksUseScript(create.Hooks) {
+		luaImport = g.luaImport()
+	}
 
 	fileImport := ""
 	uploadHelper := ""
@@ -2142,6 +2248,9 @@ func safeUploadExt(ext string) bool {
         }
 `, tName, scopeValuesStr(colNames))
 			postCode += g.hookCallsStr(create.Hooks.Before, "scope", "        ") + "\n"
+			if g.hooksUseScript(create.Hooks) {
+				postCode += valuesWriteBack(colNames, "        ") + "\n"
+			}
 		}
 		if audit != nil {
 			postCode += auditTxBeginStr("        ")
@@ -2237,7 +2346,7 @@ import (
     "fmt"
     "net/http"
     "strings"
-    %s%s%s%s%s
+    %s%s%s%s%s%s
     %q
     %q
     auth %q
@@ -2282,6 +2391,7 @@ func Create(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		hooksImport,
 		procsImport,
+		luaImport,
 		g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		optLoadCode,
@@ -2772,6 +2882,10 @@ func (g *Generator) generateUpdateHandler(dir string, r types.Resource) error {
 	if g.hookUsesProc(update.Hooks) {
 		procsImport = g.procImport()
 	}
+	luaImport := ""
+	if g.hooksUseScript(update.Hooks) {
+		luaImport = g.luaImport()
+	}
 
 	fileImport := ""
 	uploadHelper := ""
@@ -2858,6 +2972,9 @@ func safeUploadExt(ext string) bool {
         }
 `, tName, scopeValuesStr(colNames))
 		postCode += g.hookCallsStr(update.Hooks.Before, "scope", "        ") + "\n"
+		if g.hooksUseScript(update.Hooks) {
+			postCode += valuesWriteBack(colNames, "        ") + "\n"
+		}
 	}
 	if audit != nil {
 		postCode += auditTxBeginStr("        ")
@@ -2933,7 +3050,7 @@ import (
     "net/http"
     "strconv"
     "strings"
-%s%s%s%s
+%s%s%s%s%s
     %q
     %q
     %q
@@ -2990,6 +3107,7 @@ func Update(db *sql.DB) http.HandlerFunc {
 		fileImport,
 		hooksImport,
 		procsImport,
+		luaImport,
 		g.moduleImport("internal/data"), g.moduleImport("internal/viewmodels"), g.moduleImport("internal/views/resources/"+pkgName),
 		g.moduleImport("internal/panel/auth"), g.moduleImport("internal/panel/httperr"), g.moduleImport("internal/views/layout"),
 		populateQuery,

@@ -21,7 +21,13 @@ func (e *Editor) actionsPage(idx int) tview.Primitive {
 		},
 		sub: func(i int) string {
 			a := r.Actions[i]
-			return fmt.Sprintf("%s  bulk=%v", a.Label, a.Bulk)
+			kind := "query"
+			if a.Script != "" {
+				kind = "script"
+			} else if a.Proc != "" {
+				kind = "proc"
+			}
+			return fmt.Sprintf("%s  %s  bulk=%v", a.Label, kind, a.Bulk)
 		},
 		add: func() {
 			r.Actions = append(r.Actions, types.Action{Name: "new_action", Label: "New action"})
@@ -49,6 +55,7 @@ func (e *Editor) actionPage(idx, aidx int) tview.Primitive {
 		e.yesno(f, "Requires confirmation", a.RequiresConfirmation, func(v bool) { a.RequiresConfirmation = v })
 		e.yesno(f, "Bulk action", a.Bulk, func(v bool) { a.Bulk = v })
 		e.long(f, "Query", a.Query, func(v string) { a.Query = v })
+		e.long(f, "Script", a.Script, func(v string) { a.Script = v })
 		e.str(f, "Proc", a.Proc, func(v string) { a.Proc = v })
 		e.addButton(f, "Hooks", func() {
 			if a.Hooks == nil {

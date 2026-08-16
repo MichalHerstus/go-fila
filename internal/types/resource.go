@@ -165,8 +165,10 @@ type Validation struct {
 }
 
 // Action is a custom row action: name/label/icon/color, optional confirmation
-// and bulk support, and either the SQL to execute or a stored procedure to
-// call (proc; ignored on sqlite). Query and Proc are mutually exclusive.
+// and bulk support, and either the SQL to execute, a stored procedure to
+// call (proc; ignored on sqlite), or a Lua script (script; executed by the
+// generated internal/panel/luascript runtime). Query, Proc and Script are
+// mutually exclusive.
 // Policy, when set, restricts the action (and its bulk variant) to the listed
 // roles (a "|" separates roles), enforced by the generated
 // auth.ActionRBACMiddleware on the action/bulk routes.
@@ -179,6 +181,7 @@ type Action struct {
 	Bulk                 bool   `yaml:"bulk"`
 	Query                string `yaml:"query"`
 	Proc                 string `yaml:"proc"`
+	Script               string `yaml:"script"`
 	Policy               string `yaml:"policy"`
 	Hooks                *Hooks `yaml:"hooks"`
 }

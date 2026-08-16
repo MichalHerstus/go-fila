@@ -143,8 +143,7 @@ Each resource (PascalCase `name`; becomes lowercased URL segment):
       color: warning
       requires_confirmation: true
       bulk: true
-      query: "UPDATE users SET status = 'archived' WHERE id = $1"   # or proc:
-      proc: ArchiveUser    # stored proc (mutually exclusive with query)
+      query: "UPDATE users SET status = 'archived' WHERE id = $1"
       policy: admin|manager    # role restriction, "|" separated
       hooks: null
   policies:
@@ -208,8 +207,10 @@ plugins:
 - `panel.path` and every page `path` must start with `/`.
 - Resource names are PascalCase; the name becomes the lowercased URL segment.
 - `options` maps are `key: label` (key is the stored value).
-- Hooks: each hook has a `name` and exactly one of `fn` (Go func),
-  `sql` (raw SQL), or `proc` (stored proc; sqlite ignores procs).
+- Hooks: each hook has a `name` and exactly one of `fn`/`sql`/`proc`/`script`.
+  `script:` = Lua. Switch via `script` + unset old `fn`/`sql`/`proc`/`query`.
+  API: ctx (id, values in/out, table, action, user, role); db.exec/query/query_one
+  (?/$N); abort(msg); log(msg).
 - Do not invent keys outside this cheat-sheet; preserve unrelated sections of
   the current config verbatim.
 

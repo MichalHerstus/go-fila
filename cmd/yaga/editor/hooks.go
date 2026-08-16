@@ -45,6 +45,8 @@ func (e *Editor) hookListPage(base string, hooks **types.Hooks, before bool) tvi
 				return "fn: " + hs[i].Fn
 			case hs[i].Proc != "":
 				return "proc: " + hs[i].Proc
+			case hs[i].Script != "":
+				return "script"
 			}
 			return "sql: " + hs[i].SQL
 		},
@@ -67,14 +69,15 @@ func (e *Editor) hookListPage(base string, hooks **types.Hooks, before bool) tvi
 	return e.recordList(listPath, spec)
 }
 
-// hookKindOptions drives the three-way hook type picker (fn/sql/proc).
+// hookKindOptions drives the four-way hook type picker (fn/sql/proc/script).
 var hookKindOptions = []Option{
 	{Label: "Go function", Value: "function"},
 	{Label: "SQL", Value: "sql"},
 	{Label: "Stored procedure", Value: "proc"},
+	{Label: "Script (Lua)", Value: "script"},
 }
 
-// hookPage edits a single hook (name + exactly one of fn/sql/proc).
+// hookPage edits a single hook (name + exactly one of fn/sql/proc/script).
 func (e *Editor) hookPage(get func() *[]types.Hook, idx int) tview.Primitive {
 	hs := *get()
 	h := &hs[idx]
@@ -84,23 +87,27 @@ func (e *Editor) hookPage(get func() *[]types.Hook, idx int) tview.Primitive {
 		kind = "function"
 	case h.Proc != "":
 		kind = "proc"
+	case h.Script != "":
+		kind = "script"
 	}
 	return e.formShell("Hook: "+h.Name, func(f *tview.Form) {
 		e.str(f, "Name", h.Name, func(v string) { h.Name = v })
 		e.pick(f, "Kind", hookKindOptions, kind, func(v string) {
 			switch v {
 			case "function":
-				h.SQL, h.Proc = "", ""
+				h.SQL, h.Proc, h.Script = "", "", ""
 				if h.Fn == "" {
 					h.Fn = "MyHook"
 				}
 			case "sql":
-				h.Fn, h.Proc = "", ""
+				h.Fn, h.Proc, h.Script = "", "", ""
 			case "proc":
-				h.Fn, h.SQL = "", ""
+				h.Fn, h.SQL, h.Script = "", "", ""
 				if h.Proc == "" {
 					h.Proc = "my_proc"
 				}
+			case "script":
+				h.Fn, h.SQL, h.Proc = "", "", ""
 			}
 			e.markModified()
 		})
@@ -109,6 +116,8 @@ func (e *Editor) hookPage(get func() *[]types.Hook, idx int) tview.Primitive {
 			e.str(f, "Function", h.Fn, func(v string) { h.Fn = v })
 		case h.Proc != "":
 			e.str(f, "Proc", h.Proc, func(v string) { h.Proc = v })
+		case h.Script != "":
+			e.long(f, "Script", h.Script, func(v string) { h.Script = v })
 		default:
 			e.long(f, "SQL", h.SQL, func(v string) { h.SQL = v })
 		}

@@ -16,14 +16,14 @@ import (
 )
 
 // generateHooks writes internal/hooks/hooks.go into the output directory when
-// any hook is declared anywhere in the config (fn or sql) or when a plugin
-// contributed a hook source file (which references Scope from the same
+// any hook is declared anywhere in the config (fn, sql or script) or when a
+// plugin contributed a hook source file (which references Scope from the same
 // package, so the struct must exist). The file defines the Scope struct shared
 // by all hook calls (handlers reference hooks.Scope for every hook block,
-// sql-only included) plus one stub per unique fn hook name that is not backed
-// by a plugin hook source; sql-only hooks produce the Scope struct with no
-// stubs. Nothing is written when no hooks are declared and no plugin hook
-// sources exist.
+// script/sql-only included) plus one stub per unique fn hook name that is not
+// backed by a plugin hook source; script/sql-only hooks produce the Scope
+// struct with no stubs. Nothing is written when no hooks are declared and no
+// plugin hook sources exist.
 // Returns: an error on write failure.
 func (g *Generator) generateHooks() error {
 	if !g.hasAnyHooks() && len(g.pluginHookFiles) == 0 {
@@ -135,12 +135,14 @@ func (g *Generator) collectFnHooks() []string {
 
 // hookCallsStr renders the Go source that runs a before/after hook list against
 // a Scope variable. fn hooks call the generated stub in the hooks package; sql
-// hooks are inlined as db.ExecContext binding the current scope id ($1); proc
-// hooks call the stored procedure driver-appropriately — CALL on postgres, EXEC
-// on mssql, and procs.Exec(db, name, scope.ID) on sqlite when the procedure is
-// declared under procedures: (undeclared sqlite proc hooks are skipped, so a
-// config without a procedures: block stays byte-identical). A hook error aborts
-// the request with a 500 response.
+// hooks are inlined as db.ExecContext binding the current scope id ($1); script
+// hooks run the Lua body via luascript.Run against db with the scope's
+// id/table/action plus the authenticated user and role; proc hooks call the
+// stored procedure driver-appropriately — CALL on postgres, EXEC on mssql, and
+// procs.Exec(db, name, scope.ID) on sqlite when the procedure is declared under
+// procedures: (undeclared sqlite proc hooks are skipped, so a config without a
+// procedures: block stays byte-identical). A hook error aborts the request with
+// a 500 response; a script abort() returns a 400 with its message.
 // Params: hooks (the before or after list), scopeVar (name of the Scope var),
 // indent (the leading whitespace for each emitted line).
 // Returns: the Go source lines (empty when the list is empty or all hooks are
@@ -159,6 +161,23 @@ func (g *Generator) hookCallsStr(hooks []types.Hook, scopeVar, indent string) st
 %s    httperr.Internal(w, err)
 %s    return
 %s}`, indent, h.SQL, scopeVar, indent, indent, indent))
+		case h.Script != "":
+			call := fmt.Sprintf(`if err := luascript.Run(r.Context(), db, luascript.Scope{
+    ID:     %s.ID,
+    Table:  %s.Table,
+    Action: %s.Action,
+    User:   auth.UserName(r),
+    Role:   auth.RoleName(r),
+    Values: %s.Values,
+}, %q); err != nil {
+    if luascript.IsAbort(err) {
+        httperr.BadRequest(w, err.Error())
+        return
+    }
+    httperr.Internal(w, err)
+    return
+}`, scopeVar, scopeVar, scopeVar, scopeVar, h.Script)
+			lines = append(lines, indentBlock(call, indent))
 		case h.Proc != "" && g.isSQLite() && g.procedureByName(h.Proc) != nil:
 			lines = append(lines, fmt.Sprintf(`%sif err := procs.Exec(db, %q, %s.ID); err != nil {
 %s    httperr.Internal(w, err)
@@ -172,6 +191,21 @@ func (g *Generator) hookCallsStr(hooks []types.Hook, scopeVar, indent string) st
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// indentBlock prefixes every non-empty line of a Go source block with indent.
+// Params: block (multi-line Go source), indent (the leading whitespace).
+// Returns: the re-indented block.
+func indentBlock(block, indent string) string {
+	var out []string
+	for _, line := range strings.Split(block, "\n") {
+		if line == "" {
+			out = append(out, "")
+		} else {
+			out = append(out, indent+line)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // hookBlockEmits reports whether a Hooks block emits any code for the
@@ -190,7 +224,7 @@ func (g *Generator) hookBlockEmits(h *types.Hooks) bool {
 	}
 	for _, list := range [][]types.Hook{h.Before, h.After} {
 		for _, hook := range list {
-			if hook.Fn != "" || hook.SQL != "" {
+			if hook.Fn != "" || hook.SQL != "" || hook.Script != "" {
 				return true
 			}
 			if hook.Proc != "" && (!g.isSQLite() || g.procedureByName(hook.Proc) != nil) {
@@ -228,6 +262,27 @@ func scopeValuesStr(cols []string) string {
 		entries = append(entries, fmt.Sprintf("            %q: vals[%d],", c, i))
 	}
 	return strings.Join(entries, "\n")
+}
+
+// valuesWriteBack renders the loop that copies a before-script's ctx.values
+// mutations back into the handler's vals slice by column name, so a script can
+// set defaults or transform form values before the INSERT/UPDATE executes. The
+// scope.Values map is shared with the Lua runtime (in-place), so reading it
+// after the Run call yields the script's output. It is only emitted when the
+// create/update hook block declares a script: hook (feature-off output stays
+// byte-identical).
+// Params: cols (form column names in vals order), indent (the leading whitespace).
+// Returns: the loop source (empty for an empty cols list).
+func valuesWriteBack(cols []string, indent string) string {
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = fmt.Sprintf("%q", c)
+	}
+	return fmt.Sprintf(`%sfor i, c := range []string{%s} {
+%s    if v, ok := scope.Values[c]; ok {
+%s        vals[i] = v
+%s    }
+%s}`, indent, strings.Join(quoted, ", "), indent, indent, indent, indent)
 }
 
 // returningClause returns the SQL fragment appended to the create query to

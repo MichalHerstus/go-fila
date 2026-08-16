@@ -239,6 +239,10 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("generating sqlutil: %w", err)
 	}
 
+	if err := g.generateLuascript(); err != nil {
+		return fmt.Errorf("generating luascript: %w", err)
+	}
+
 	for _, r := range g.Config.Resources {
 		if err := g.generateResource(r); err != nil {
 			return fmt.Errorf("generating resource %s: %w", r.Name, err)

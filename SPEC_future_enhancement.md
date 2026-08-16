@@ -1196,7 +1196,7 @@ JSON validity + `node --check` on emitted JS when node is present. Gates: `go bu
 
 ### E2 — Lua scripting for actions & hooks (gopher-lua)
 
-**Status: planned (2026-08-14), not started.** Actions and hooks gain a YAML-embedded
+**Status: implemented (2026-08-16).** Actions and hooks gain a YAML-embedded
 scripting language so admin logic (conditional DB ops, default values, validation
 guards) lives in `yaga.yaml` instead of Go stubs, raw `sql:` strings, or DB-dialect
 stored procedures. Decisions taken (2026-08-14): **runtime = gopher-lua v1.1.1** —
@@ -1210,6 +1210,10 @@ function per action/hook"; **runtime-only syntax check** — scripts compile laz
 the action/hook runs, so typos surface as request-time errors (no generate-time check
 in v1; flagged as an easy add-on). `script:` is mutually exclusive with the existing
 hook/action fields (parser enforces it), keeping the feature-off output byte-identical.
+**Editor parity** — script bodies are editable in the TUI editor, the wedit SPA, and via
+agent/MCP. Highlighting is wedit-only: a small embedded JS Lua tokenizer
+(keywords/strings/comments/numbers, no new npm/runtime deps); the TUI edits script bodies
+in a plain `TextArea`, matching how procedures `sql:` bodies are edited today.
 
 **YAML schema** (`internal/types/hook.go`: `Hook.Script string yaml:"script"`;
 `internal/types/resource.go`: `Action.Script string yaml:"script"`):
@@ -1272,16 +1276,27 @@ transaction like raw-SQL actions today; script hooks run against `db`.
    `validateAction` becomes query/proc/script mutual exclusion.
 5. `internal/panel/httperr` (`httperr.go`) — add `BadRequest(w, msg string)` (safe:
    only trusted config-author text reaches it).
-6. `cmd/yaga/editor/` — script-body `TextArea` editor on action pages + hook items
-   (in-memory, in the action/hook page form); `cmd/yaga/ai_spec.md` cheat-sheet line; demo config
-   gains one scripted action to exercise the feature.
+6. Editors — script-body editing everywhere the config is edited: `cmd/yaga/editor/` —
+   plain `TextArea` on action pages (`actionPage` in `actions.go`) + hook items
+   (`hooksPage`), via the existing `long` helper (in-memory, in the action/hook page
+   form); `internal/serve/static/app.js` — `script` added to `ACTION_SCHEMA` + hook-script
+   editing with a Lua-highlighted textarea (small embedded JS tokenizer, no npm deps);
+   `cmd/yaga/ai_spec.md` cheat-sheet line documenting `script:` and the switch-to-script
+   workflow (null the old `fn`/`sql`/`proc` field first — `merge_yaml_fragment` null
+   leaves targets untouched); `testdata/kitchen.yaml` gains one scripted action to
+   exercise the feature.
 7. Docs — `SPEC.md` (schema + host API), `README.md`, `TESTs.md`, `AGENTS.md`.
 
 **Tests / exit criteria:** parser mut-ex (`fn/sql/proc/script`, query/proc/script);
 generator snippets — conditional go.mod dep, `luascript.go` emitted only when a script
 exists, hook/action/bulk/audit emission, `ctx.values` write-back, abort paths, all via
 `assertGeneratedGoParses`; byte-identical feature-off regression (existing hook/action
-tests stay green). Gates: `go build ./...`, `go vet ./...`, `go test ./...`,
+tests stay green); MCP — `get_value`/`set_value`/`merge_yaml_fragment` on
+`resources/<res>/actions/<name>/script` and a hook `script` path resolve and round-trip,
+a both-present mut-ex edit stays `isError` (commitOrError rejects), then nulling the old
+field and setting the script succeeds; wedit SPA smoke — the script textarea round-trips
+through `PUT /api/config`.
+Gates: `go build ./...`, `go vet ./...`, `go test ./...`,
 `gofmt -l .`; E2E — generated project: before-hook sets a default (visible in the
 created row), `abort()` flashes on the list (action) / 400s with the message (hook), a
 scripted action using `db.query_one` + `db.exec` works, and an audited script action

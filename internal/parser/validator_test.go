@@ -67,7 +67,7 @@ func TestParseHookRequiresFnOrSQL(t *testing.T) {
 	bad := strings.Replace(hooksYAML, "fn: ValidateUserDomain", "fn: ''", 1)
 	if _, err := Parse([]byte(bad)); err == nil {
 		t.Fatal("expected error when a hook has neither fn nor sql")
-	} else if !strings.Contains(err.Error(), "exactly one of fn, sql or proc") {
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql, proc or script") {
 		t.Fatalf("expected fn/sql/proc error, got: %v", err)
 	}
 }
@@ -79,7 +79,7 @@ func TestParseHookRejectsBothFnAndSQL(t *testing.T) {
               fn: Notify`, 1)
 	if _, err := Parse([]byte(bad)); err == nil {
 		t.Fatal("expected error when a hook has both fn and sql")
-	} else if !strings.Contains(err.Error(), "exactly one of fn, sql or proc") {
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql, proc or script") {
 		t.Fatalf("expected fn/sql/proc error, got: %v", err)
 	}
 }
@@ -105,8 +105,90 @@ func TestParseHookRejectsFnAndProc(t *testing.T) {
               fn: Notify`, 1)
 	if _, err := Parse([]byte(bad)); err == nil {
 		t.Fatal("expected error when a hook has both fn and proc")
-	} else if !strings.Contains(err.Error(), "exactly one of fn, sql or proc") {
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql, proc or script") {
 		t.Fatalf("expected fn/sql/proc error, got: %v", err)
+	}
+}
+
+func TestParseScriptHookValid(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"`,
+		`script: |
+                ctx.values["status"] = "draft"`, 1)
+	cfg, err := Parse([]byte(bad))
+	if err != nil {
+		t.Fatalf("expected script hook to parse, got: %v", err)
+	}
+	after := cfg.Resources[0].Form.Create.Hooks.After
+	if len(after) != 1 || !strings.Contains(after[0].Script, "ctx.values") || after[0].SQL != "" {
+		t.Fatalf("unexpected script hook: %+v", after)
+	}
+}
+
+func TestParseHookRejectsFnAndScript(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"`,
+		`script: |
+                ctx.values["status"] = "draft"
+              fn: Notify`, 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when a hook has both fn and script")
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql, proc or script") {
+		t.Fatalf("expected fn/sql/proc/script error, got: %v", err)
+	}
+}
+
+func TestParseHookRejectsSQLAndScript(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`sql: "INSERT INTO notifications (target, msg) VALUES ($1, 'user created')"`,
+		`script: |
+                ctx.values["status"] = "draft"
+              sql: "SELECT 1"`, 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when a hook has both sql and script")
+	} else if !strings.Contains(err.Error(), "exactly one of fn, sql, proc or script") {
+		t.Fatalf("expected fn/sql/proc/script error, got: %v", err)
+	}
+}
+
+func TestParseActionScriptValid(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"`,
+		`script: |
+          db.exec("UPDATE users SET status = 'inactive' WHERE id = ?", ctx.id)`, 1)
+	cfg, err := Parse([]byte(bad))
+	if err != nil {
+		t.Fatalf("expected script action to parse, got: %v", err)
+	}
+	a := cfg.Resources[0].Actions[0]
+	if !strings.Contains(a.Script, "db.exec") || a.Query != "" {
+		t.Fatalf("unexpected script action: %+v", a)
+	}
+}
+
+func TestParseActionRejectsQueryAndScript(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"`,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"
+        script: |
+          db.exec("UPDATE users SET status = 'inactive' WHERE id = ?", ctx.id)`, 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when an action has both query and script")
+	} else if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual-exclusion error, got: %v", err)
+	}
+}
+
+func TestParseActionRejectsProcAndScript(t *testing.T) {
+	bad := strings.Replace(hooksYAML,
+		`query: "UPDATE users SET status = 'inactive' WHERE id = $1"`,
+		`proc: sp_deactivate
+        script: |
+          db.exec("SELECT 1")`, 1)
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("expected error when an action has both proc and script")
+	} else if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual-exclusion error, got: %v", err)
 	}
 }
 

@@ -26,6 +26,10 @@ func (g *Generator) generateGoMod() error {
 	} else {
 		driverDep = "\tgithub.com/jackc/pgx/v5 v5.10.0\n"
 	}
+	luaDep := ""
+	if g.hasAnyScript() {
+		luaDep = "\tgithub.com/yuin/gopher-lua v1.1.1\n"
+	}
 	code := fmt.Sprintf(`module %s
 
 go 1.26
@@ -36,9 +40,9 @@ require (
 	github.com/a-h/templ v0.3.819
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/gorilla/sessions v1.4.0
-%s	golang.org/x/crypto v0.31.0
+%s%s	golang.org/x/crypto v0.31.0
 )
-`, modName, driverDep)
+`, modName, driverDep, luaDep)
 
 	return os.WriteFile(filepath.Join(g.OutDir, "go.mod"), []byte(code), 0644)
 }
