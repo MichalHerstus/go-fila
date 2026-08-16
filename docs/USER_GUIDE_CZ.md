@@ -1,17 +1,14 @@
 # YAGA — uživatelská příručka
 
-**yaga** (YAML Advanced Generator for Admin panels) je generátor administrátorských panelů založený na YAML
-pro jazyk Go. Stačí jej nasměrovat na existující databázi, popsat požadovaný panel
-v souboru `yaga.yaml` a nástroj vygeneruje kompletní, samostatný administrátorský panel v jazyce Go: CRUD
+**yaga** (YAML Advanced Generator for Admin panels) je generátor CRUD webových aplikací (admin panelů) založený na YAML
+definičním souboru. YAGA vygeneruje kompletní kód aplikace, který už stačí jen zkompilovat. Stačí YAGA "nasměrovat" na existující databázi, popsat požadovaný detaily aplikace
+v souboru `yaga.yaml` a nástroj vytvoří kompletní, samostatný administrátorský panel v jazyce Go: CRUD
 zdroje, zobrazení typu karet/kanban, vlastní stránky s widgety, vyhledávání/třídění/filtrování, import/export do formátu CSV
 import/export, autentizace, RBAC, auditní protokolování, vlastní akce, háčky před/po
 (Go, SQL nebo Lua) a další.
 
-Důležité: **databáze je základem**. yaga prozkoumá vaši databázi,
-zachytí její schéma a **navrch** přidá pomocí editace YAML jchování — nenahrazuje dobrý
-návrh databáze.
-
-Translated with DeepL.com (free version)
+Důležité: **databáze je základem**. YAGA se připojí k vaší databázi,
+přečte schéma, včetně PK/FK a views a uloží tyto informace do **specifikačního YAML souboru**, který je možné dále editovat a měnit tak vzhled a chování výsledné aplikace. Proto je nutné návrhu databáze a odladění věnovat náležitý čas a pozornost! YAGA ovšem není obecným nástrojem na tvorbu jakých koli web aplikací jako jsou lowcode mendix, Bubble.io, AppSmith apod. Lze v něm realizovat jen a pouze aplikaci typu "admin dashboard", viz. obrazovky v adresáři /screens/
 
 ---
 
