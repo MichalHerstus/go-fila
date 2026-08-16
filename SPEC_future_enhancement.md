@@ -240,7 +240,7 @@ editor UI). Assumptions flagged ⚠️ below are open to veto before implementat
 | Drop sqlc & make the DB the sole schema source (`schema:` block, mandatory `--db`) | Planned (D11) |
 | Embed pre-built CSS into the yaga binary (drop the Tailwind build step) | Planned (D12) |
 | List/Card filter section (`list.filter` / `card.filter`, collapsible, `$N` params) | Planned (D13) |
-| Mobile device support (server-side UA detection, `visible_on_mobile` nav filter, mobile list/card/detail/form views, load-more, kanban column pages) | Moved to Phase E (E1) |
+| Mobile device support (always-on REST/JSON CRUD API on the dashboard + generated React Native/Expo app driven by a spec-derived manifest; `visible_on_mobile` nav filter consumed by the app) | Moved to Phase E (E1) |
 | Lua scripting for actions & hooks (gopher-lua, `script:` body, `ctx` scope, `db.*`/`abort`/`log` host API) | Moved to Phase E (E2) |
 
 ---
@@ -1062,28 +1062,35 @@ Out of scope: inline multi-row grid editing, delete-cascade of lines on header d
 
 Status: planned (2026-08-14). Mobile device support (**E1**) and Lua scripting
 (**E2**) were moved out of Phase D into their own phase (implementation order
-E1 → E2; each is independent — no sqlc, DB or layout coupling).
+E1 → E2; each is independent — no sqlc, DB or layout coupling). **E1's approach
+was rewritten (2026-08-16)**: the original server-side UA detection + separate
+mobile templ views plan is superseded by an always-on REST/JSON CRUD API on the
+generated dashboard plus a generated React Native/Expo app driven by a
+spec-derived manifest (`visible_on_mobile` is retained but consumed by the app,
+not a UA-sniffing middleware).
 
 | Item | Status |
 |---|---|
-| Mobile device support (server-side UA detection, `visible_on_mobile` nav filter, mobile list/card/detail/form views, load-more, kanban column pages) | Planned (E1) |
+| Mobile device support (always-on REST/JSON CRUD API at `{panel}/api` with Bearer-token auth + generated React Native/Expo app, manifest-driven screens, `visible_on_mobile` nav filter) | Planned (E1), spec rewritten 2026-08-16 |
 | Lua scripting for actions & hooks (gopher-lua, `script:` body, `ctx` scope, `db.*`/`abort`/`log` host API) | Planned (E2) |
 
 ---
 
 ### E1 — Mobile device support
 
-**Status: planned (2026-08-14), not started.** Mobile browsers are auto-detected
-server-side and get distinct mobile views instead of the desktop variants: navigation
-shown as a separate view (no sidebar), an iOS/Android-style multiline-cell list, kanban
-columns as separate pages with a topbar switcher, continuous "load more" scrolling, and
-search tucked behind an icon. Decisions taken (2026-08-14): **`visible_on_mobile` lives on
-navigation items only** (groups with zero visible items are hidden on mobile); **default =
-true (opt-out)** — existing configs show everything on mobile after upgrade, deviating from
-the literal "only True shown" reading (⚠️ open to veto during review); **server-side UA
-detection + separate mobile templ views** (matches "mobile pages returned instead of desktop
-variant"; enables kanban-as-pages/multiline cells/nav-as-view); **load-more via HTML fragment
-fetch** (keeps per-request page size, avoids rendering huge tables).
+**Status: planned (2026-08-16), not started.** The original approach — server-side UA
+detection + separate mobile templ views, `visible_on_mobile` nav filter, mobile
+list/card/detail/form templs, load-more fragments, kanban column pages (spec 2026-08-14) —
+is **superseded (2026-08-16)** by a two-part design: the generated dashboard ships an
+**always-on REST/JSON API** for CRUD on resources, and a **React Native/Expo app** generated
+from the spec YAML dashboard definition consumes it. The app replaces the "mobile browser"
+experience; there is **no `MobileMiddleware`, no `mobile bool` in `layoutviews.Base(...)`**.
+Decisions taken (2026-08-16): the API is **always-on** (no config toggle — `api_tokens` DDL
+and routes are unconditional); the RN app is **manifest-driven** (one generic set of screens
+driven by a generated `manifest.json`, not per-resource codegen); `visible_on_mobile` lives on
+`NavigationItem` and is consumed by the app's generated navigation (default **true / opt-out** —
+existing configs show everything in the app, deviating from the literal "only True shown"
+reading, ⚠️ open to veto during review).
 
 **YAML schema** (`internal/types/config.go`: `VisibleOnMobile *bool` on `NavigationItem`,
 `yaml:"visible_on_mobile"`):
@@ -1098,42 +1105,66 @@ navigation:
 ```
 
 Generator semantics: `nil`/absent → visible; `false` → hidden. Parser accepts `true`/`false`
-only. A group whose items are all hidden renders no mobile entry. Desktop nav and all other
-behavior unchanged.
+only. The generated mobile manifest omits flagged items and drops groups whose items are all
+hidden. Desktop nav and all other behavior unchanged.
 
-**Detection** (new generated `internal/panel/auth/mobile.go`): `MobileMiddleware` sniffs
-`r.UserAgent()` against a conservative Android/iOS/tablet regex and stashes `isMobile` in the
-request context; `auth.IsMobile(r) bool` reads it (mirrors the `UserName`/`UserID` pattern;
-handlers already import auth). `?mobile=1` / `?desktop=1` query params override detection
-(testing/preview). Registered in `NewRouter`'s panel route group after `SessionMiddleware`,
-inside the existing single `r.Route` block (no second `r.Route` — panics on duplicate path).
+#### Part 1 — REST API (always-on)
 
-**Mobile layout + nav:** `layoutviews.Base(...)` gains a `mobile bool` param; every render
-call site (list/cards/detail/create/update in handler.go, page views in router.go) passes
-`auth.IsMobile(r)`. The mobile branch renders the mobile shell — topbar with a hamburger
-linking to a new `{panel}/nav` route (renders a new `layoutviews.MobileNav` view listing nav
-groups/items filtered by `visible_on_mobile`), plus the existing title/theme-toggle/logout —
-and **no sidebar**; the desktop branch stays byte-identical (regression-guarded). Login page
-is untouched (already `max-w-md` and mobile-friendly).
+**Auth (token-based):** a driver-aware `api_tokens` table (DDL emitted into
+`sql/migrations/api_tokens.sql`, mirroring the audit DDL): `token_hash` PK, `user_id`,
+`created_at`, `expires_at`, `last_used_at`. `POST {panel}/api/login` (`{email, password}`)
+verifies via bcrypt (reusing the login query), issues a random 32-byte token (SHA-256 hash
+stored) and returns `{token, role, name}`. `POST {panel}/api/logout` revokes. The generated
+`TokenAuthMiddleware` reads `Authorization: Bearer <token>`, resolves the user and populates
+the **same context keys as `AuthMiddleware`** (`UserKey`/`UserRoleKey`/`UserNameKey`),
+returning a JSON **401** (not the login 302 redirect), so the existing `RBACMiddleware` and
+`audit.UserID`/`UserName` work unchanged. API routes are CSRF-exempt (Bearer tokens are
+CSRF-safe).
 
-**Mobile resource views** (new `.templ` files per resource, server-rendered, reuse
-`viewmodels.Stringify`/renderers):
-- **List** — `XListMobile`: iOS/Android-style rows — first column as the row title, the
-  remaining columns as `label: value` lines; search input hidden behind a magnifier icon
-  (JS toggle); bulk checkboxes + toolbar kept.
-- **Load-more** — `GET {res}?fragment=rows&page=N&search=&sort=&order=` renders a
-  `XListRowsMobile` fragment that JS appends via IntersectionObserver, preserving
-  search/sort/order; per-request `per_page` unchanged.
-- **Cards** — the grid already collapses to 1 column via `lg:grid-cols-N`; kanban becomes
-  `XCardsMobile`: horizontal column switcher in the topbar + `?col=KEY` renders a single
-  column page (no new route).
-- **Detail** — `XDetailMobile`: stacked label/value instead of the `<table>`.
-- **Form** — `XFormMobile`: full-width inputs/buttons, larger touch targets (file/picker/
-  CSV-import paths unaffected).
+**Routes** (mounted at `{panel}/api`, registered inside the existing single `r.Route` panel
+block **before** `r.Use(auth.CSRFMiddleware)` — chi applies middleware only to routes
+registered after `Use`, so the API subtree skips CSRF while the desktop HTML handlers stay
+byte-identical; no second `r.Route` — panics on duplicate path):
 
-**Pages & widgets:** widget tables gain `overflow-x-auto`; stat/chart/list/html widgets and
-`grid-cols-1 md:grid-cols-2 lg:grid-cols-N` grids are already responsive; pages render in the
-mobile shell.
+| Method | Path | Notes |
+|---|---|---|
+| POST | `{panel}/api/login` | public |
+| POST | `{panel}/api/logout` | revoke |
+| GET | `{panel}/api/{res}` | list — reuses the list SQL core (FK label joins, search, D13 filter, windowed `COUNT(*) OVER() AS _total`); params `page/search/sort/order/filter&fp_*`; returns `{data, total, page, per_page, total_pages}` |
+| GET | `{panel}/api/{res}/{id}` | detail (via the generated `data.Get*`) |
+| POST | `{panel}/api/{res}` | create — reuses `buildCreateParams` (bcrypt, bool coercion) |
+| PUT | `{panel}/api/{res}/{id}` | update |
+| DELETE | `{panel}/api/{res}/{id}` | delete |
+| POST | `{panel}/api/{res}/{id}/action/{action}` | custom actions (raw-SQL / stored-proc dispatch) |
+| POST | `{panel}/api/{res}/bulk/{action}` | transactional bulk |
+| GET | `{panel}/api/{res}/options/{field}` | runtime option / relation-picker lists (reuses the option-SQL loader) |
+
+Every resource route is wrapped with `auth.RBACMiddleware(<res>, <action>)` when the resource
+has policies (JSON 403 via the existing middleware). JSON serialization goes through a new
+`viewmodels.JSONValue(v)` emitted into the generated app: `time.Time`/`sql.NullTime` →
+RFC3339, other `sql.Null*` → value or `null`, `[]byte` → base64, scalars passthrough.
+`httperr` gains JSON variants so API errors return JSON without leaking internals.
+
+#### Part 2 — Generated Expo app (`admin/mobile/`)
+
+The generated project gains a `mobile/` subdirectory (Expo managed workflow) — the repo's
+first node dependency, opt-in (`cd admin/mobile && npm install && npx expo start`); the
+dashboard `make` workflow stays node-free. Emitted files: `package.json` (expo, react-native,
+react-navigation, expo-secure-store, expo-document/image-picker), `app.json` (Expo config
+from the panel name), `App.js` (login stack + authenticated navigator), `src/api.js` (Bearer
+client, base URL via `EXPO_PUBLIC_API_URL`), `src/theme.js` (brand colors + RGB channels,
+dark mode, fonts), one **generic manifest-driven** set of screens
+(`src/screens/{Login,ResourceList,ResourceDetail,ResourceForm,Cards}Screen.js`), and
+**`src/manifest.json`** — the only spec-derived artifact: panel name + API path, theme,
+navigation filtered by `visible_on_mobile`, and per-resource screen config (list columns +
+searchable/sortable, detail fields, form fields with types + inline options, cards/kanban,
+actions, children, D13 filters). Relation/select pickers fetch their options from the options
+endpoint at form-open time; list screens use `page`-based load-more pagination against the
+list endpoint.
+
+#### Deferred within E1
+CSV import/export, bulk-action multi-select, file/image upload (expo-document/image-picker),
+token refresh / expiry UX (secure storage).
 
 **Editor / AI / validation:** navigation-item editor (`cmd/yaga/editor/menu.go` `navItemPage`)
 gains a "Visible on mobile" yes/no field; `cmd/yaga/ai_spec.md` cheat-sheet gains the flag;
@@ -1141,25 +1172,25 @@ parser/validator test for parse + default.
 
 **Touch points:**
 1. `internal/types/config.go` — `VisibleOnMobile *bool` on `NavigationItem`.
-2. `internal/generator/auth.go` (or new `mobile.go`) — `MobileMiddleware` + `auth.IsMobile(r)`.
-3. `internal/generator/router.go` — register `MobileMiddleware`; `{panel}/nav` route +
-   handler; `{res}/rows` fragment route per resource.
-4. `internal/generator/templ.go` — `Base` `mobile bool` param + mobile shell; `MobileNav`
-   view; `XListMobile`/`XListRowsMobile`/`XCardsMobile`/`XDetailMobile`/`XFormMobile`;
-   widget table `overflow-x-auto`.
-5. `internal/generator/handler.go` — mobile render branch + fragment branch in the list
-   handler; pass `auth.IsMobile(r)` at all 5 Base call sites.
-6. `cmd/yaga/editor/menu.go` — "Visible on mobile" field; `cmd/yaga/ai_spec.md` line.
-7. `internal/parser/validator.go` — flag validation.
-8. Docs — `SPEC.md` (schema), `README.md`, `TESTs.md`, `AGENTS.md`.
+2. `internal/parser/validator.go` — flag validation (`true`/`false` only).
+3. New `internal/generator/api.go` — `internal/panel/api` package (login/logout,
+   `TokenAuthMiddleware`, JSON helpers, `api_tokens` DDL) + per-resource API handlers
+   reusing the SQL cores.
+4. `internal/generator/viewmodels.go` — emit `JSONValue`; JSON `httperr` variants.
+5. `internal/generator/router.go` — register the `/api` subtree before
+   `r.Use(auth.CSRFMiddleware)`.
+6. New `internal/generator/mobile.go` — `mobile/` scaffold + `manifest.json`.
+7. `internal/generator/generator.go` — wire api + mobile generation into the pipeline.
+8. `cmd/yaga/editor/menu.go` — "Visible on mobile" field; `cmd/yaga/ai_spec.md` line.
+9. Docs — `SPEC.md` (schema), `README.md`, `TESTs.md`, `AGENTS.md`.
 
-**Tests / exit criteria:** parser (flag parse + default-true); generator via
-`assertGeneratedGoParses` — all Base call sites contain `auth.IsMobile(r)`, mobile templs +
-fragment route emitted, nav filtered by `visible_on_mobile`; desktop (feature-off) output
-byte-identical (existing snippet tests stay green). Gates: `go build ./...`,
-`go vet ./...`, `go test ./...`, `gofmt -l .`; E2E — generated project served, mobile
-User-Agent gets the mobile shell + nav page + load-more fragment, `?desktop=1` shows the
-desktop variant.
+**Tests / exit criteria:** parser (flag parse + default-true); `JSONValue` unit suite;
+`assertGeneratedGoParses` on the API package + desktop output byte-identical (existing
+snippet tests stay green); snippet tests — API routes precede the CSRF line, RBAC wrap,
+`api_tokens` DDL emitted; runtime e2e on the generated sqlite project (login → Bearer
+list/detail/create/update/delete/action/options round-trip, role-denied → 403); manifest
+JSON validity + `node --check` on emitted JS when node is present. Gates: `go build ./...`,
+`go vet ./...`, `go test ./...`, `gofmt -l .`.
 
 ---
 
@@ -1279,10 +1310,12 @@ removes the last external toolchain step from the generated Makefile (`build: cs
 `build: templ`) and touches the same asset/build/`makefile.go` surfaces; it also fits the D8
 asset-tooling precedent. **D13 (list/card filters) is independent of D2–D12; it should land
 after D10 since its docs/code references and example YAML (demo/ai_spec) touch the renamed
-paths.** **E1 (mobile device support) is independent of D2–D13 and builds on D11**: its
-detection middleware, mobile templ views and nav filtering touch the same generated-handler/
-layout surfaces as D11's v2 model but share no sqlc dependency; the `mobile bool` threading
-into `layoutviews.Base(...)` should land after D11's layout rework to avoid churn.
+paths.** **E1 (mobile device support) is independent of D2–D13 and builds on D11**: the
+always-on REST API reuses the schema-derived SQL cores (list SELECT/FK joins, `data.Get*`,
+`buildCreateParams`, option loaders) that D11 introduced, and the generated `mobile/` Expo
+project is a node/JS sibling of the Go module with no sqlc, DB or layout coupling; the
+`{panel}/api` subtree is added inside the single `r.Route` block before the CSRF middleware,
+so the desktop HTML output stays byte-identical.
 **E2 (Lua scripting) is independent of D2–D13 and E1**: it adds a generated runtime package
 (`internal/panel/luascript`), a conditional go.mod dependency and new `script:` fields on
 hooks/actions — no sqlc, DB, or layout coupling — so it can slot in alongside any other
