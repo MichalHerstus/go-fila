@@ -1,13 +1,13 @@
-# yaga — User Guide
+# YAGA — User Guide
 
-**yaga** (YAML Advanced Generator for Admin panels) is a YAML-driven admin dashboard
+**YAGA** (YAML Advanced Generator for Admin panels) is a YAML-driven admin dashboard
 generator for Go. You point it at an existing database, describe the dashboard you want
 in a `yaga.yaml`, and it generates a complete, self-contained Go admin panel: CRUD
 resources, card/kanban views, custom pages with widgets, search/sort/filter, CSV
 import/export, authentication, RBAC, audit logging, custom actions, before/after hooks
 (Go, SQL or Lua) and more.
 
-The important mental model: **the database is the base**! yaga introspects your database,
+The important mental model: **the database is the base**! YAGA introspects your database,
 captures its schema, and adds behaviour **on top** of it — it does not replace a good
 database design.
 
