@@ -586,7 +586,19 @@ To use from opencode (or another MCP client):
 ```json
 { "mcp": { "yaga": { "type": "remote", "url": "http://localhost:9090/mcp" } } }
 ```
-
+Full example Opencode MCP configuration:
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "yaga": {
+      "type": "remote",
+      "url": "http://localhost:9090/mcp",
+      "enabled": true
+    }
+  }
+}
+```
 ---
 
 ## 6. Actions & Hooks
