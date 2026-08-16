@@ -31,9 +31,7 @@ func (st serverMCPState) Parse(data []byte) (*types.Config, []string, []string) 
 	return cfg, errs, warns
 }
 func (st serverMCPState) Commit(cfg *types.Config) {
-	st.s.mu.Lock()
-	st.s.cfg = cfg
-	st.s.mu.Unlock()
+	st.s.replaceConfig(cfg)
 }
 func (st serverMCPState) Save() error {
 	if data, err := os.ReadFile(st.s.configPath); err == nil {

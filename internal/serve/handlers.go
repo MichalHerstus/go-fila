@@ -85,6 +85,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cfg := s.cfg
 	path := s.configPath
+	rev := s.rev
 	s.mu.RUnlock()
 
 	tree, err := configTree(cfg)
@@ -95,6 +96,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":   path,
 		"config": tree,
+		"rev":    rev,
 	})
 }
 
@@ -113,13 +115,17 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	s.mu.Lock()
-	s.cfg = cfg
-	s.mu.Unlock()
+	rev := s.replaceConfig(cfg)
 	if warns == nil {
 		warns = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "warnings": warns})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "warnings": warns, "rev": rev})
+}
+
+// handleRev reports the current config revision so the SPA can detect changes
+// made elsewhere (MCP/agent) without fetching the whole config.
+func (s *Server) handleRev(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{"rev": s.currentRev()})
 }
 
 // saveToDisk writes the in-memory config to disk. Shared by the SPA save
@@ -177,9 +183,7 @@ func (s *Server) handleFix(w http.ResponseWriter, r *http.Request) {
 
 	newCfg, errs, warns := configFromYAML(out)
 	if newCfg != nil {
-		s.mu.Lock()
-		s.cfg = newCfg
-		s.mu.Unlock()
+		s.replaceConfig(newCfg)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "changed": true, "fixed": fixed, "errors": norm(errs), "warnings": norm(warns)})
 }
@@ -298,11 +302,9 @@ func (s *Server) handleRawPut(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	s.mu.Lock()
-	s.cfg = cfg
-	s.mu.Unlock()
+	rev := s.replaceConfig(cfg)
 	if warns == nil {
 		warns = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "warnings": warns})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "warnings": warns, "rev": rev})
 }

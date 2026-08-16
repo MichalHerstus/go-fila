@@ -1399,9 +1399,11 @@ editor tests.
         ├─ POST /api/generate-queries  → generate missing SQL query files
         ├─ GET  /api/queries/{name}    → staged-over-disk query body
         ├─ PUT  /api/queries           → stage a query body rewrite (pendingSQL)
-        ├─ GET  /api/raw               → raw YAML text
-        ├─ PUT  /api/raw               → replace config from raw YAML (validate)
-        └─ GET  /static/*              → embedded SPA (index.html, app.js, style.css)
+         ├─ GET  /api/raw               → raw YAML text
+         ├─ PUT  /api/raw               → replace config from raw YAML (validate)
+         ├─ GET  /api/rev               → {"rev": N} revision counter
+         ├─ GET  /api/events            → SSE stream: event: rev / data: <n>
+         └─ GET  /static/*              → embedded SPA (index.html, app.js, style.css)
  ```
 
  **Go server (`internal/serve/serve.go` + `handlers.go`):**
@@ -1509,8 +1511,13 @@ answers 405 or an SSE 200 for spec compliance. `initialize` /
 `notifications/initialized`, `ping`, `tools/list`, `tools/call`,
 `resources/list`/`read`, `prompts/list`/`get` are implemented. Zero new Go
 dependencies (`encoding/json` is stdlib). **State sharing:** MCP writes go to
-the same in-memory `*types.Config` the SPA edits — agent and browser must not
-race (same as two tabs); the SPA sees agent edits on its next `/api/config`.
+the same in-memory `*types.Config` the SPA edits — every mutating path (MCP
+`Commit`, `PUT /api/config`, `PUT /api/raw`, `POST /api/fix`) funnels through
+`Server.replaceConfig`, which bumps a `rev` counter. The SPA holds one
+`EventSource("/api/events")` and reloads on `event: rev`, unless it has unsaved
+edits (one-shot toast via `state.warnedRev`); Save / Raw-Apply first compare
+`GET /api/rev` to `state.rev` and open a stale-write Overwrite/Reload modal on a
+mismatch, so a stale agent/browser can't silently clobber newer changes.
 
 **Layering:**
 
@@ -1520,7 +1527,7 @@ race (same as two tabs); the SPA sees agent edits on its next `/api/config`.
 | `internal/mcp/tools.go` | all tool handler implementations |
 | `internal/mcp/path.go` | case-insensitive `nav.go`-style path resolution on the yaml.Node tree + get/set/add/remove helpers |
 | `internal/mcp/mcp_test.go` | request→response shape tests for every tool |
-| `internal/serve/serve.go` | +`POST /mcp` +`GET /mcp` routes |
+| `internal/serve/serve.go` | +`POST /mcp` +`GET /mcp` +`GET /api/rev` +`GET /api/events` routes; `replaceConfig`/rev/SSE |
 | `internal/serve/mcp.go` | wires `internal/mcp` to the existing `Server` (`s.cfg`, `s.pendingSQL`, `configFromYAML`, `analyze`, shared `save()`) |
 | `internal/serve/mcp_test.go` | httptest flow: `initialize` → `tools/list` → `set_value` → `validate` → `save` |
 

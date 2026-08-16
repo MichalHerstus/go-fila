@@ -41,6 +41,8 @@ type Server struct {
 	mu         sync.RWMutex
 	cfg        *types.Config
 	configPath string
+	rev        uint64 // bumped on every in-memory config replacement
+	subs       map[chan uint64]struct{}
 
 	port int
 	open bool // open the browser automatically after binding
@@ -77,6 +79,89 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+// replaceConfig swaps the in-memory config, bumps the revision counter and
+// notifies every SSE subscriber (non-blocking, coalesced to the latest rev).
+// Every path that replaces the config must go through here so the SPA's
+// auto-refresh and stale-write guard see the change.
+func (s *Server) replaceConfig(cfg *types.Config) uint64 {
+	s.mu.Lock()
+	s.cfg = cfg
+	s.rev++
+	for ch := range s.subs {
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- s.rev:
+		default:
+		}
+	}
+	s.mu.Unlock()
+	return s.rev
+}
+
+// currentRev returns the latest config revision.
+func (s *Server) currentRev() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.rev
+}
+
+// subscribe registers a channel that receives the config revision on every
+// change (coalesced). The returned unsub func must be called when the
+// subscriber goes away.
+func (s *Server) subscribe() (chan uint64, func()) {
+	ch := make(chan uint64, 1)
+	s.mu.Lock()
+	if s.subs == nil {
+		s.subs = make(map[chan uint64]struct{})
+	}
+	s.subs[ch] = struct{}{}
+	s.mu.Unlock()
+	return ch, func() {
+		s.mu.Lock()
+		delete(s.subs, ch)
+		s.mu.Unlock()
+	}
+}
+
+// handleEvents serves a Server-Sent Events stream (`event: rev` / `data: N`)
+// that fires whenever the in-memory config is replaced, so the SPA can refresh
+// without polling. An initial event carries the current rev so a client that
+// subscribes late syncs immediately.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusNotImplemented)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	fl.Flush()
+	ch, unsub := s.subscribe()
+	defer unsub()
+	writeRev := func(rev uint64) {
+		fmt.Fprintf(w, "event: rev\ndata: %d\n\n", rev)
+		fl.Flush()
+	}
+	writeRev(s.currentRev())
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case rev := <-ch:
+			writeRev(rev)
+		case <-ticker.C:
+			fmt.Fprint(w, ": keep-alive\n\n")
+			fl.Flush()
+		}
+	}
+}
+
 // routes registers the REST API and the embedded SPA.
 func (s *Server) routes() {
 	mux := s.mux
@@ -89,6 +174,8 @@ func (s *Server) routes() {
 	mux.HandleFunc("GET /mcp", s.handleMCPGet)
 	mux.HandleFunc("GET /api/raw", s.handleRawGet)
 	mux.HandleFunc("PUT /api/raw", s.handleRawPut)
+	mux.HandleFunc("GET /api/rev", s.handleRev)
+	mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {

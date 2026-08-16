@@ -11,6 +11,9 @@ const state = {
   resource: null, // drill-in: resource being edited
   pageName: null, // drill-in: page being edited
   dirty: false,
+  rawDirty: false, // raw-tab textarea has unsaved typing
+  rev: 0, // last-known server config revision
+  warnedRev: 0, // rev already announced as "changed on server" (toast dedup)
 };
 
 const FIELD_TYPES = [
@@ -1284,12 +1287,15 @@ function pagePreview() {
 
   async function syncConfigThenLoad() {
     errDiv.classList.add("hidden");
-    try {
-      await api("PUT", "/api/config", state.config);
-    } catch (e) {
-      const errors = (e.data && e.data.errors) || [e.message];
-      errDiv.textContent = "Config is currently invalid; preview shows the last saved config:\n" + errors.join("\n");
-      errDiv.classList.remove("hidden");
+    if (state.dirty) {
+      try {
+        const r = await api("PUT", "/api/config", state.config);
+        state.rev = r.rev || state.rev;
+      } catch (e) {
+        const errors = (e.data && e.data.errors) || [e.message];
+        errDiv.textContent = "Config is currently invalid; preview shows the last saved config:\n" + errors.join("\n");
+        errDiv.classList.remove("hidden");
+      }
     }
     loadPreview();
   }
@@ -1379,9 +1385,11 @@ async function pageRaw() {
     toast("load failed: " + e.message, "error");
     return;
   }
+  state.rawDirty = false;
   const ta = document.createElement("textarea");
   ta.className = "raw-editor";
   ta.value = data.yaml;
+  ta.addEventListener("input", () => { state.rawDirty = true; });
   root.appendChild(ta);
 
   const row = document.createElement("div");
@@ -1389,7 +1397,16 @@ async function pageRaw() {
   const apply = btn("Apply", "primary");
   apply.addEventListener("click", async () => {
     try {
-      await apiRawPut("/api/raw", ta.value);
+      if (!(await checkStaleRev())) {
+        state.rawDirty = false;
+        await reloadConfig();
+        renderTabs();
+        renderPage();
+        return;
+      }
+      const r = await apiRawPut("/api/raw", ta.value);
+      state.rev = r.rev || state.rev;
+      state.rawDirty = false;
       toast("YAML applied (validated). Press Save to write it.", "ok");
       clearDirty();
       await reloadConfig();
@@ -1406,18 +1423,60 @@ async function pageRaw() {
 
 $("#save-btn").addEventListener("click", save);
 
+/* Confirm-style modal that resolves true for "Overwrite" and false for
+   "Reload" — used by the stale-write guard below. */
+function confirmOverwriteModal() {
+  return new Promise((resolve) => {
+    openModal("Confirm", (body, ok, cancel, close) => {
+      const p = document.createElement("p");
+      p.textContent = "The config changed on the server since you loaded it (likely an agent/MCP edit). " +
+        "Overwrite the server copy with your changes, or reload to see the latest?";
+      body.appendChild(p);
+      ok.textContent = "Overwrite";
+      ok.addEventListener("click", () => { close(); resolve(true); });
+      cancel.textContent = "Reload";
+      cancel.addEventListener("click", () => { close(); resolve(false); });
+    });
+  });
+}
+
+/* Checks whether another writer (MCP/agent) replaced the config since we last
+   loaded it. Resolves true to proceed, false to reload first. */
+async function checkStaleRev() {
+  let rev;
+  try {
+    rev = (await api("GET", "/api/rev")).rev;
+  } catch (e) {
+    return true; // rev endpoint unavailable — do not block saves
+  }
+  if (rev === state.rev) return true;
+  return confirmOverwriteModal();
+}
+
 async function save() {
   const btn = $("#save-btn");
   btn.disabled = true;
   const status = $("#save-status");
   status.textContent = "validating…";
   try {
+    if (!(await checkStaleRev())) {
+      state.rawDirty = false;
+      await reloadConfig();
+      renderTabs();
+      renderPage();
+      status.textContent = "";
+      toast("Reloaded the latest config; your unsaved edits were discarded.", "ok");
+      return;
+    }
     if (state.page === "raw") {
       const ta = $(".raw-editor");
       if (!ta) throw new Error("raw editor not loaded");
-      await apiRawPut("/api/raw", ta.value);
+      const r = await apiRawPut("/api/raw", ta.value);
+      state.rev = r.rev || state.rev;
+      state.rawDirty = false;
     } else {
-      await api("PUT", "/api/config", state.config);
+      const r = await api("PUT", "/api/config", state.config);
+      state.rev = r.rev || state.rev;
     }
     status.textContent = "saving…";
     await api("POST", "/api/save");
@@ -1438,7 +1497,34 @@ async function reloadConfig() {
   const data = await api("GET", "/api/config");
   state.config = data.config;
   state.configPath = data.path;
+  state.rev = data.rev || 0;
   $("#config-path").textContent = data.path;
+}
+
+/* ---------- server-change events (SSE) ---------- */
+
+function connectEvents() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("rev", (e) => onServerRev(Number(e.data)));
+}
+
+async function onServerRev(rev) {
+  if (!rev || rev === state.rev) return;
+  if (state.dirty || state.rawDirty) {
+    if (state.warnedRev !== rev) {
+      state.warnedRev = rev;
+      toast("Config changed on the server (agent/MCP) — save or reload to see it.", "warn");
+    }
+    return;
+  }
+  state.warnedRev = 0;
+  try {
+    await reloadConfig();
+  } catch (e) {
+    return;
+  }
+  renderTabs();
+  renderPage();
 }
 
 /* ---------- init ---------- */
@@ -1449,9 +1535,11 @@ async function init() {
     const data = await api("GET", "/api/config");
     state.config = data.config;
     state.configPath = data.path;
+    state.rev = data.rev || 0;
     $("#config-path").textContent = data.path;
     renderTabs();
     renderPage();
+    connectEvents();
   } catch (e) {
     const root = content();
     const p = document.createElement("p");

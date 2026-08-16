@@ -3,12 +3,15 @@ package serve
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/MichalHerstus/yaga/internal/types"
 )
@@ -324,6 +327,175 @@ func TestStaticServesIndex(t *testing.T) {
 	if rec, _ := get(t, s.Handler(), "GET", "/nope", nil); rec.Code != 404 {
 		t.Errorf("unknown path status = %d, want 404", rec.Code)
 	}
+}
+
+// TestRevContract checks the revision counter contract: initial 0, reported by
+// GET /api/config, bumped and returned by every config-replacing path.
+func TestRevContract(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	h := s.Handler()
+
+	revOf := func() uint64 {
+		_, data := get(t, h, "GET", "/api/rev", nil)
+		if v, ok := data["rev"].(float64); ok {
+			return uint64(v)
+		}
+		t.Fatal("missing rev in /api/rev")
+		return 0
+	}
+
+	if revOf() != 0 {
+		t.Fatalf("initial rev = %d, want 0", revOf())
+	}
+	_, data := get(t, h, "GET", "/api/config", nil)
+	if v := data["rev"].(float64); v != 0 {
+		t.Fatalf("config GET rev = %v, want 0", v)
+	}
+
+	payload, _ := json.Marshal(data["config"])
+	rec, put := get(t, h, "PUT", "/api/config", payload)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if v := put["rev"].(float64); v != 1 {
+		t.Fatalf("config PUT rev = %v, want 1", v)
+	}
+	if revOf() != 1 {
+		t.Fatalf("rev after PUT = %d, want 1", revOf())
+	}
+}
+
+// TestRevBumpsOnMutationPaths verifies every config-replacing path (raw PUT,
+// fix-with-changes, MCP Commit) bumps the revision, while a no-op fix does not.
+func TestRevBumpsOnMutationPaths(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	h := s.Handler()
+
+	// PUT /api/raw bumps.
+	_, data := get(t, h, "GET", "/api/raw", nil)
+	rec, put := get(t, h, "PUT", "/api/raw", []byte(data["yaml"].(string)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("raw PUT status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if v := put["rev"].(float64); v != 1 {
+		t.Fatalf("raw PUT rev = %v, want 1", v)
+	}
+
+	// A no-op fix leaves the rev untouched.
+	s2, _ := setupServer(t, testConfig())
+	h2 := s2.Handler()
+	if rec, d := get(t, h2, "POST", "/api/fix", nil); rec.Code != 200 || d["changed"] != false {
+		t.Fatalf("noop fix: %d %v", rec.Code, d)
+	}
+	_, data = get(t, h2, "GET", "/api/rev", nil)
+	if v := data["rev"].(float64); v != 0 {
+		t.Fatalf("noop fix bumped rev to %v", v)
+	}
+
+	// A repairing fix bumps.
+	cfg := testConfig()
+	cfg.Resources[0].List.Filter = &types.FilterConfig{}
+	s3, _ := setupServer(t, cfg)
+	h3 := s3.Handler()
+	if rec, d := get(t, h3, "POST", "/api/fix", nil); rec.Code != 200 || d["changed"] != true {
+		t.Fatalf("fix: %d %v", rec.Code, d)
+	}
+	_, data = get(t, h3, "GET", "/api/rev", nil)
+	if v := data["rev"].(float64); v != 1 {
+		t.Fatalf("fix rev = %v, want 1", v)
+	}
+
+	// An MCP Commit bumps.
+	s4, _ := setupServer(t, testConfig())
+	h4 := s4.Handler()
+	serverMCPState{s: s4}.Commit(testConfig())
+	_, data = get(t, h4, "GET", "/api/rev", nil)
+	if v := data["rev"].(float64); v != 1 {
+		t.Fatalf("mcp commit rev = %v, want 1", v)
+	}
+}
+
+// sseCollector streams an SSE response body into an accumulating buffer, so
+// assertions are content-based instead of byte-delivery-timing dependent.
+type sseCollector struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func startSSECollector(t *testing.T, body io.ReadCloser) *sseCollector {
+	t.Helper()
+	c := &sseCollector{}
+	go func() {
+		var tmp [4096]byte
+		for {
+			n, err := body.Read(tmp[:])
+			if n > 0 {
+				c.mu.Lock()
+				c.buf.Write(tmp[:n])
+				c.mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return c
+}
+
+func (c *sseCollector) contains(s string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Contains(c.buf.String(), s)
+}
+
+// waitSSE blocks until the stream has received want, or fails after a timeout.
+func waitSSE(t *testing.T, c *sseCollector, want string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for !c.contains(want) {
+		select {
+		case <-deadline:
+			c.mu.Lock()
+			got := c.buf.String()
+			c.mu.Unlock()
+			t.Fatalf("timed out waiting for %q in SSE stream; got %q", want, got)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// TestSSEEvents checks that GET /api/events streams an initial rev event and a
+// new one whenever the config is replaced (via PUT here).
+func TestSSEEvents(t *testing.T) {
+	s, _ := setupServer(t, testConfig())
+	h := s.Handler()
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+
+	c := startSSECollector(t, resp.Body)
+
+	// Initial event carries the current rev (0).
+	waitSSE(t, c, "event: rev\ndata: 0")
+
+	// A config PUT bumps the rev and the client sees the event.
+	_, data := get(t, h, "GET", "/api/config", nil)
+	payload, _ := json.Marshal(data["config"])
+	if rec, _ := get(t, h, "PUT", "/api/config", payload); rec.Code != http.StatusOK {
+		t.Fatalf("PUT failed: %s", rec.Body.String())
+	}
+	waitSSE(t, c, "event: rev\ndata: 1")
 }
 
 func writeFile(t *testing.T, path, content string) {
